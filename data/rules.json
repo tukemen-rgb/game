@@ -1,0 +1,78 @@
+{
+  "_comment": [
+    "校正チェックの設定。tools/proofread.py が読みます。",
+    "line_max_width は 1 行に入る文字数 (全角 1.0 / 半角 0.5 で数える)。",
+    "lines_max は 1 ページ (ボタン待ち・クリアまで) に表示できる行数。",
+    "実際の案件では、この 2 つの数字が最初に開発元から渡される仕様です。"
+  ],
+  "ja": {
+    "line_max_width": 18.0,
+    "lines_max": 3,
+    "allow_halfwidth": false,
+    "check_font_table": true,
+    "forbid_line_start": "。、，．）」』】〉》！？ーぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ",
+    "forbid_line_end": "（「『【〈《",
+    "ban_patterns": [
+      {
+        "pattern": "\\.\\.\\.+",
+        "severity": "ERROR",
+        "message": "三点リーダは全角の「…」を使います (半角ピリオド 3 つは不可)"
+      },
+      {
+        "pattern": "〜",
+        "severity": "ERROR",
+        "message": "波ダッシュ U+301C は Shift-JIS に無い文字です。全角チルダ「～」(U+FF5E) を使います"
+      },
+      {
+        "pattern": "。。",
+        "severity": "WARN",
+        "message": "句点の連続。ためらいや余韻は「……」で表します"
+      },
+      {
+        "pattern": "、、",
+        "severity": "WARN",
+        "message": "読点の連続"
+      },
+      {
+        "pattern": "　　",
+        "severity": "WARN",
+        "message": "全角スペースの連続。字下げは 1 つに揃えます"
+      },
+      {
+        "pattern": "[ 　](?=<BR>)|[ 　]$",
+        "severity": "WARN",
+        "message": "行末の空白。表示位置がずれる原因になります"
+      },
+      {
+        "pattern": "…{3,}",
+        "severity": "WARN",
+        "message": "三点リーダは 2 つ (……) までに揃えます"
+      }
+    ]
+  },
+  "en": {
+    "line_max_width": 30.0,
+    "lines_max": 3,
+    "allow_halfwidth": true,
+    "check_font_table": true,
+    "forbid_line_start": ".,;:!?)]}",
+    "forbid_line_end": "([{",
+    "ban_patterns": [
+      {
+        "pattern": "  +",
+        "severity": "WARN",
+        "message": "Double space"
+      },
+      {
+        "pattern": " [,.;:!?]",
+        "severity": "ERROR",
+        "message": "Space before punctuation"
+      },
+      {
+        "pattern": "\\.\\.\\.",
+        "severity": "WARN",
+        "message": "Use the ellipsis character instead of three periods"
+      }
+    ]
+  }
+}

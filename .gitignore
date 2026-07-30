@@ -1,0 +1,5 @@
+# 生成物。tools/make_sample.py で作り直せる
+work/
+
+__pycache__/
+*.py[cod]

@@ -1,0 +1,6 @@
+# 抽出・解読・校正・再挿入のツールは標準ライブラリだけで動きます。
+# 以下はフォント演習 (課題 4) を動かす場合にだけ必要です。
+#   - tools/make_sample.py の work/FONT.BIN 生成
+#   - tools/font_view.py --png
+# 入れなくても --no-font / --ascii で進められます。
+pillow
