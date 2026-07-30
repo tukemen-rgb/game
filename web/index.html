@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>構造探査台 — ゲームデータの中身を読む</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>構造探査台</h1>
+  <span class="sub">ディスクイメージやデータファイルの構造を推定して可視化する</span>
+  <div class="loaded" id="loaded" hidden></div>
+</header>
+
+<!-- ===================== 受け入れ画面 ===================== -->
+<section class="intake" id="intake">
+  <div class="dropzone" id="dropzone">
+    <strong>ファイルをここにドロップ</strong>
+    <p>ディスクイメージ (.iso / .bin) でも、単体のデータファイルでもかまいません。</p>
+    <div class="row">
+      <button class="btn primary" id="pick">ファイルを選ぶ</button>
+      <button class="btn" id="sample" hidden>練習用のイメージを読む</button>
+    </div>
+    <p class="privacy" id="privacy">読み込みはブラウザの中だけで行われます。どこにも送信しません。</p>
+    <input type="file" id="fileinput" hidden>
+  </div>
+
+  <div class="card">
+    <h2>何をするサイトか</h2>
+    <ul>
+      <li><b>ISO9660 のファイル一覧を取り出す</b> — ボリューム記述子からディレクトリを辿ります</li>
+      <li><b>バイトの性質を色で地図にする</b> — ゼロ埋め・テキスト・タイル・波形・圧縮を区別します</li>
+      <li><b>構造の候補を自動で探す</b> — 文字列の並び、ポインタテーブル、タイルの周期</li>
+      <li><b>手で確かめる</b> — 16 進表示、文字列一覧、タイル表示、相対検索</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>できないこと</h2>
+    <ul>
+      <li>圧縮されたデータの展開 (伸張ルーチンはゲームごとに違うため)</li>
+      <li>実行コードの逆アセンブル</li>
+      <li>データの書き戻し (読み取り専用です)</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ===================== 解析画面 ===================== -->
+<div class="shell" id="shell" hidden>
+  <section class="rail" aria-label="ファイルと検出結果">
+    <div class="rail-head">
+      <h2>ファイル</h2>
+      <span class="right" id="treecount"></span>
+    </div>
+    <ul class="tree" id="tree"></ul>
+
+    <div class="rail-head">
+      <h2>見つかった構造</h2>
+      <span class="right" id="findcount"></span>
+    </div>
+    <ul class="findlist" id="findlist"></ul>
+
+    <div class="rail-head"><h2>操作</h2></div>
+    <div style="padding:12px 14px;display:grid;gap:8px">
+      <button class="btn" id="reopen">別のファイルを開く</button>
+      <p class="hint" id="capnote"></p>
+    </div>
+  </section>
+
+  <main class="main">
+    <div class="panel">
+      <header>
+        <h3>全体マップ</h3>
+        <span class="note" id="mapnote"></span>
+      </header>
+      <div class="body">
+        <canvas id="map" height="200"></canvas>
+        <p class="maptip" id="maptip">マスにカーソルを合わせると位置と種類が出ます。押すとその位置に飛びます。</p>
+        <div class="maplegend" id="maplegend"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="tabs" role="tablist" id="tabs">
+        <button role="tab" data-tab="hex" aria-selected="true">16 進</button>
+        <button role="tab" data-tab="strings" aria-selected="false">文字列</button>
+        <button role="tab" data-tab="pointers" aria-selected="false">ポインタ表</button>
+        <button role="tab" data-tab="tiles" aria-selected="false">タイル</button>
+        <button role="tab" data-tab="relative" aria-selected="false">相対検索</button>
+        <button role="tab" data-tab="format" aria-selected="false">既知の形式</button>
+      </div>
+
+      <!-- 16 進 -->
+      <div class="tabpanel" id="tab-hex" role="tabpanel">
+        <div class="controls">
+          <div class="field">
+            <label for="hexoff">位置 (16 進)</label>
+            <input type="text" id="hexoff" value="0" size="10" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="hexenc">文字の解釈</label>
+            <select id="hexenc">
+              <option value="sjis">Shift-JIS</option>
+              <option value="ascii">ASCII</option>
+              <option value="utf8">UTF-8</option>
+              <option value="table">読み込んだテーブル</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="hexwidth">1 行のバイト数</label>
+            <select id="hexwidth">
+              <option>8</option><option selected>16</option><option>24</option><option>32</option>
+            </select>
+          </div>
+          <div class="pager">
+            <button class="btn" id="hexprev">◀ 前</button>
+            <button class="btn" id="hexnext">次 ▶</button>
+            <span class="pos" id="hexpos"></span>
+          </div>
+        </div>
+        <div class="hexwrap"><pre class="hexview" id="hexview"></pre></div>
+      </div>
+
+      <!-- 文字列 -->
+      <div class="tabpanel" id="tab-strings" role="tabpanel" hidden>
+        <div class="controls">
+          <div class="field">
+            <label for="strmin">最低文字数</label>
+            <input type="number" id="strmin" value="6" min="2" max="40" size="4">
+          </div>
+          <div class="field">
+            <label>絞り込み</label>
+            <div style="display:flex;gap:4px">
+              <button class="chipbtn" data-strfilter="all" aria-pressed="true">全部</button>
+              <button class="chipbtn" data-strfilter="jp" aria-pressed="false">日本語</button>
+              <button class="chipbtn" data-strfilter="ascii" aria-pressed="false">ASCII</button>
+            </div>
+          </div>
+          <button class="btn" id="strrescan">再スキャン</button>
+        </div>
+        <p class="hint">
+          圧縮データや乱数のような領域では、偶然 Shift-JIS として読めてしまう並びが
+          必ず混ざります。文字数を増やすと減ります。
+        </p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>位置</th><th>長さ</th><th>形式</th><th>内容</th></tr></thead>
+            <tbody id="strbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ポインタ表 -->
+      <div class="tabpanel" id="tab-pointers" role="tabpanel" hidden>
+        <p class="hint">
+          値が単調に増え、すべてファイル内を指している並びを探します。基準の値は
+          決め打ちにせず、いくつかの仮説を立てて根拠の多いものを採ります
+          (イメージの中に埋まったファイルのポインタも拾えます)。根拠は 2 つ
+          ——「表の直後から本文が始まっている」と「各行き先の直前が区切りバイト
+          (0x00 / 0xFF) になっている」。両方そろえば確度「高」です。
+        </p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>位置</th><th>件数</th><th>幅</th><th>基準</th><th>最初の行き先</th><th>確度</th></tr></thead>
+            <tbody id="ptrbody"></tbody>
+          </table>
+        </div>
+        <div id="ptrdetail"></div>
+      </div>
+
+      <!-- タイル -->
+      <div class="tabpanel" id="tab-tiles" role="tabpanel" hidden>
+        <div class="controls">
+          <div class="field">
+            <label for="tileoff">位置 (16 進)</label>
+            <input type="text" id="tileoff" value="0" size="10" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="tilebpp">1 ドットのビット数</label>
+            <select id="tilebpp"><option value="1" selected>1bpp</option><option value="2">2bpp</option><option value="4">4bpp</option><option value="8">8bpp</option></select>
+          </div>
+          <div class="field">
+            <label for="tilew">タイルの幅</label>
+            <select id="tilew"><option>8</option><option selected>16</option><option>24</option><option>32</option></select>
+          </div>
+          <div class="field">
+            <label for="tileh">タイルの高さ</label>
+            <select id="tileh"><option>8</option><option selected>16</option><option>24</option><option>32</option></select>
+          </div>
+          <div class="field">
+            <label for="tilecols">横に並べる数</label>
+            <input type="number" id="tilecols" value="24" min="1" max="64" size="4">
+          </div>
+          <div class="field">
+            <label for="tilezoom">拡大率</label>
+            <select id="tilezoom"><option>1</option><option selected>2</option><option>3</option><option>4</option></select>
+          </div>
+          <button class="btn" id="tileguess">周期から推定</button>
+        </div>
+        <p class="hint" id="tilehint"></p>
+        <div class="tilewrap"><canvas id="tiles"></canvas></div>
+      </div>
+
+      <!-- 相対検索 -->
+      <div class="tabpanel" id="tab-relative" role="tabpanel" hidden>
+        <p class="hint">
+          フォントが五十音順に並んでいれば、文字コードも連番になります。文字どうしの
+          <b>差の並び</b>は起点が未知でも変わらないので、それを手がかりに文章を探します。
+          清音のひらがなだけ、4 文字以上で試すのがこつです。
+        </p>
+        <div class="controls">
+          <div class="field">
+            <label for="relq">探す語</label>
+            <input type="text" id="relq" value="ここは" size="14" spellcheck="false" style="font-family:var(--font-ui)">
+          </div>
+          <div class="field">
+            <label for="relwidth">1 文字のバイト数</label>
+            <select id="relwidth"><option value="1" selected>1</option><option value="2">2</option></select>
+          </div>
+          <div class="field">
+            <label for="relendian">2 バイトのときの並び</label>
+            <select id="relendian"><option value="be">ビッグ</option><option value="le">リトル</option></select>
+          </div>
+          <div class="field">
+            <label for="relorder">かなの並びの仮説</label>
+            <select id="relorder"><option value="unicode">Unicode 順</option><option value="nosmall">小書き文字を除く</option></select>
+          </div>
+          <button class="btn primary" id="relrun">探す</button>
+        </div>
+        <p class="hint" id="reldiff"></p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>位置</th><th>先頭文字のコード</th><th>推定した起点</th><th>前後を仮に読んだ結果</th></tr></thead>
+            <tbody id="relbody"></tbody>
+          </table>
+        </div>
+        <div class="controls">
+          <div class="field" style="flex:1;min-width:280px">
+            <label for="reltable">文字テーブル (16 進=文字。相対検索の結果から作ったものを編集できます)</label>
+            <textarea id="reltable" spellcheck="false" placeholder="01=ぁ&#10;02=あ&#10;E000=一"></textarea>
+          </div>
+          <button class="btn" id="reluse">このテーブルを 16 進表示に使う</button>
+        </div>
+      </div>
+
+      <!-- 既知の形式 -->
+      <div class="tabpanel" id="tab-format" role="tabpanel" hidden>
+        <div id="formatbox"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

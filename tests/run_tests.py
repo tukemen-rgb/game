@@ -374,5 +374,159 @@ class TestViewer(unittest.TestCase):
                          len(self.data["messages"]))
 
 
+class TestIso(unittest.TestCase):
+    """練習用ディスクイメージが ISO9660 として正しく読めること."""
+
+    @classmethod
+    def setUpClass(cls):
+        import make_iso
+
+        cls.make_iso = make_iso
+        cls.path = os.path.join(REPO, "work", "RINFOLT.iso")
+        if not os.path.exists(cls.path):
+            raise unittest.SkipTest("work/RINFOLT.iso がありません (make_iso.py を実行)")
+        with open(cls.path, "rb") as fh:
+            cls.data = fh.read()
+
+    def test_volume_descriptor(self):
+        import struct
+
+        pvd = self.data[16 * 2048:17 * 2048]
+        self.assertEqual(pvd[0], 1)
+        self.assertEqual(pvd[1:6], b"CD001")
+        self.assertEqual(struct.unpack("<H", pvd[128:130])[0], 2048)
+        self.assertEqual(struct.unpack("<I", pvd[80:84])[0], len(self.data) // 2048)
+        self.assertEqual(pvd[40:72].decode("ascii").strip(), "RINFOLT_SENKI")
+
+    def _walk(self):
+        """PVD からディレクトリを辿って {パス: (オフセット, サイズ)} を返す."""
+        import struct
+
+        pvd = self.data[16 * 2048:17 * 2048]
+        root = pvd[156:190]
+        found = {}
+
+        def walk(lba, length, prefix):
+            sec = self.data[lba * 2048:lba * 2048 + length]
+            i = 0
+            while i < len(sec):
+                rec_len = sec[i]
+                if rec_len == 0:
+                    break
+                rec = sec[i:i + rec_len]
+                extent = struct.unpack("<I", rec[2:6])[0]
+                size = struct.unpack("<I", rec[10:14])[0]
+                flags = rec[25]
+                name = rec[33:33 + rec[32]]
+                i += rec_len
+                if name in (b"\x00", b"\x01"):
+                    continue
+                label = name.decode("ascii").split(";")[0]
+                if flags & 0x02:
+                    walk(extent, size, prefix + label + "/")
+                else:
+                    found[prefix + label] = (extent * 2048, size)
+
+        walk(struct.unpack("<I", root[2:6])[0], struct.unpack("<I", root[10:14])[0], "/")
+        return found
+
+    def test_file_tree(self):
+        found = self._walk()
+        self.assertIn("/SYSTEM.CNF", found)
+        for name in ["SCRIPT.BIN", "MSG_ENC.BIN", "FONT.BIN", "MOVIE.PSS", "BGM.ADP", "PAD.DAT"]:
+            self.assertIn("/DATA/" + name, found, f"{name} が見つかりません")
+
+    def test_embedded_files_match_the_originals(self):
+        found = self._walk()
+        for name in ["SCRIPT.BIN", "MSG_ENC.BIN", "FONT.BIN"]:
+            offset, size = found["/DATA/" + name]
+            with open(os.path.join(REPO, "work", name), "rb") as fh:
+                original = fh.read()
+            self.assertEqual(size, len(original))
+            self.assertEqual(self.data[offset:offset + size], original)
+
+    def test_synthetic_data_has_the_intended_character(self):
+        """解析の練習になるよう、性質の違うデータが入っていること."""
+        import math
+
+        def entropy(b):
+            hist = [0] * 256
+            for v in b:
+                hist[v] += 1
+            return -sum((c / len(b)) * math.log2(c / len(b)) for c in hist if c)
+
+        found = self._walk()
+        movie_off, _ = found["/DATA/MOVIE.PSS"]
+        bgm_off, _ = found["/DATA/BGM.ADP"]
+        pad_off, pad_size = found["/DATA/PAD.DAT"]
+        movie = self.data[movie_off:movie_off + 4096]
+        bgm = self.data[bgm_off:bgm_off + 4096]
+        self.assertGreater(entropy(movie), 7.8)                  # 圧縮相当
+        mean_diff = sum(abs(bgm[i] - bgm[i - 1]) for i in range(1, len(bgm))) / (len(bgm) - 1)
+        self.assertLess(mean_diff, 24)                           # 波形相当
+        self.assertEqual(self.data[pad_off:pad_off + pad_size], b"\x00" * pad_size)
+
+
+class TestWebBuild(unittest.TestCase):
+    """構造探査台の 1 枚 HTML が自己完結していること."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.webdir = os.path.join(REPO, "web")
+        for name in ("index.html", "style.css", "app.js"):
+            if not os.path.exists(os.path.join(cls.webdir, name)):
+                raise unittest.SkipTest(f"web/{name} がありません")
+
+    def _build(self, embed=None, fragment=False):
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "explorer.html")
+            cmd = [sys.executable, os.path.join(REPO, "tools", "build_web.py"), "-o", out]
+            if embed:
+                cmd += ["--embed-sample", embed]
+            if fragment:
+                cmd.append("--fragment")
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            with open(out, encoding="utf-8") as fh:
+                return fh.read()
+
+    def test_no_external_references(self):
+        html = self._build()
+        for bad in ("http://", "https://", 'src="app.js"', 'href="style.css"'):
+            self.assertNotIn(bad, html)
+        self.assertIn("<style>", html)
+        self.assertIn("構造探査台", html)
+
+    def test_fragment_has_no_document_tags(self):
+        html = self._build(fragment=True)
+        for bad in ("<!doctype", "<html", "<head>", "<body>"):
+            self.assertNotIn(bad, html.lower())
+        self.assertTrue(html.lstrip().startswith("<title>"))
+
+    def test_sample_is_embedded_and_decodes(self):
+        import base64
+        import re
+
+        iso = os.path.join(REPO, "work", "RINFOLT.iso")
+        if not os.path.exists(iso):
+            self.skipTest("work/RINFOLT.iso がありません")
+        html = self._build(embed=iso)
+        m = re.search(r'window\.SAMPLE_ISO = "([A-Za-z0-9+/=]+)"', html)
+        self.assertIsNotNone(m)
+        with open(iso, "rb") as fh:
+            self.assertEqual(base64.b64decode(m.group(1)), fh.read())
+
+    def test_javascript_has_no_unescaped_control_characters(self):
+        """正規表現リテラルに生の制御文字が混ざると読み込み時に落ちる."""
+        with open(os.path.join(self.webdir, "app.js"), encoding="utf-8") as fh:
+            src = fh.read()
+        for lineno, line in enumerate(src.split("\n"), 1):
+            bad = [c for c in line if ord(c) < 0x20 and c != "\t"]
+            self.assertEqual(bad, [], f"app.js:{lineno} に生の制御文字があります")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
