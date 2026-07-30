@@ -40,11 +40,14 @@ python3 tools/relative_search.py work/MSG_ENC.BIN --search こんなところ
 # 6. 校正チェックにかける (不具合を仕込んだ訳文が題材)
 python3 tools/proofread.py exercises/qa_target.tsv
 
-# 7. 直したテキストをデータに入れ直す (ポインタは自動で振り直される)
+# 7. 画面でどう見えるかを確かめる (メッセージウィンドウの検査台)
+python3 tools/make_viewer.py && open work/viewer.html   # Windows は start、Linux は xdg-open
+
+# 8. 直したテキストをデータに入れ直す (ポインタは自動で振り直される)
 python3 tools/insert_text.py work/SCRIPT.tsv -o work/SCRIPT_new.BIN \
     --original work/SCRIPT.BIN
 
-# 8. ツール自体のテスト
+# 9. ツール自体のテスト
 python3 tests/run_tests.py
 ```
 
@@ -62,6 +65,7 @@ python3 tests/run_tests.py
 | Crystal Tile 2 | `tools/font_view.py` | フォント画像からグリフの並びを読む |
 | 自作の抽出/挿入スクリプト | `tools/dump_text.py` / `tools/insert_text.py` | 抽出・再挿入とポインタ再計算 |
 | Excel の目視チェック | `tools/proofread.py` | 校正チェックの機械化 |
+| 実機・開発ビルドでの表示確認 | `tools/make_viewer.py` | 画面での見え方を再現して照合する |
 
 ## 覚えるのはこの 3 つ + 1
 
@@ -71,6 +75,7 @@ python3 tests/run_tests.py
 | 相対検索 | 未知の文字コードでも規則性から日本語を探す | [docs/02-相対検索.md](docs/02-相対検索.md) |
 | ポインタテーブル | 各セリフの開始位置の一覧 | [docs/03-ポインタテーブル.md](docs/03-ポインタテーブル.md) |
 | 校正 QA の勘所 | 文字数・禁則・用語・変数・フォント | [docs/04-校正とQA.md](docs/04-校正とQA.md) |
+| 画面での確認 | データ上の文字列と見た目を突き合わせる | [docs/06-画面で確かめる.md](docs/06-画面で確かめる.md) |
 
 実物のディスクを扱う話 (ISO 化、エミュレータでの照合、日本の著作権法上の
 注意点) は [docs/05-実物のディスクを扱う場合.md](docs/05-実物のディスクを扱う場合.md)
@@ -91,7 +96,8 @@ python3 tests/run_tests.py
 4. **フォントを読む** — `font_view.py` で `FONT.BIN` のグリフを見て、
    「文字コード = グリフの並び順」を体感する
 5. **校正する** — `exercises/qa_target.tsv` の不具合を洗い出し、直す
-6. **入れ直す** — 直した TSV を `insert_text.py` で元の容量に収める
+6. **画面で確かめる** — `make_viewer.py` で原文と訳文を切り替え、崩れを目で見る
+7. **入れ直す** — 直した TSV を `insert_text.py` で元の容量に収める
 
 ## ディレクトリ構成
 

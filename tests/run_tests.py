@@ -299,5 +299,80 @@ class TestProofread(unittest.TestCase):
         self.assertEqual(flagged - planted, set(), "仕込んでいない行を誤検出しています")
 
 
+class TestViewer(unittest.TestCase):
+    """メッセージウィンドウのシミュレータが正しいデータを埋め込むこと."""
+
+    @classmethod
+    def setUpClass(cls):
+        import argparse
+        import make_viewer
+
+        cls.mv = make_viewer
+        font = os.path.join(REPO, "work", "FONT.BIN")
+        if not os.path.exists(font):
+            raise unittest.SkipTest("work/FONT.BIN がありません (make_sample.py --font を実行)")
+        cls.args = argparse.Namespace(
+            tsv=os.path.join(REPO, "exercises", "qa_target.tsv"),
+            binary=os.path.join(REPO, "work", "SCRIPT.BIN"),
+            font=font,
+            font_chars=os.path.join(REPO, "data", "font_chars.txt"),
+            names=os.path.join(REPO, "data", "names.tsv"),
+            rules=os.path.join(REPO, "data", "rules.json"),
+            glossary=os.path.join(REPO, "data", "glossary.tsv"),
+            lang="ja",
+        )
+        cls.data = make_viewer.build_data(cls.args)
+
+    def test_glyph_data_matches_char_list(self):
+        import base64
+
+        g = self.data["glyphs"]
+        raw = base64.b64decode(g["bytes"])
+        self.assertEqual(len(raw), len(g["chars"]) * g["w"] * g["h"] // 8)
+        self.assertEqual(g["chars"], "".join(FIX.glyph_order))
+
+    def test_every_row_is_present(self):
+        rows = scrp.read_tsv(self.args.tsv)
+        self.assertEqual(len(self.data["messages"]), len(rows))
+        self.assertEqual([m["id"] for m in self.data["messages"]], [r["id"] for r in rows])
+
+    def test_original_is_clean_and_planted_rows_are_flagged(self):
+        import plant_errors
+
+        planted = {rid for rid, *_ in plant_errors.PLANTED}
+        flagged = set()
+        for m in self.data["messages"]:
+            self.assertEqual(m["findings"]["original"], [], f"id {m['id']} の原文に指摘が出ました")
+            if m["findings"]["translation"]:
+                flagged.add(int(m["id"]))
+        self.assertEqual(flagged, planted)
+
+    def test_hex_matches_the_binary(self):
+        archive = scrp.read_archive(self.args.binary)
+        for m in self.data["messages"]:
+            expected = archive.raw_block(int(m["id"])).hex(" ").upper()
+            self.assertEqual(m["hex"], expected)
+
+    def test_html_is_self_contained(self):
+        import json as _json
+        import re
+
+        payload = _json.dumps(self.data, ensure_ascii=False,
+                              separators=(",", ":")).replace("</", "<\\/")
+        html = (self.mv.DOC_OPEN + self.mv.HTML_HEAD + self.mv.DOC_MID
+                + self.mv.HTML_BODY.replace("/*__DATA__*/", payload) + self.mv.DOC_CLOSE)
+        self.assertNotIn("/*__DATA__*/", html)
+        # 外部リソースを読み込まないこと
+        self.assertIsNone(re.search(r'(src|href)\s*=\s*"(?!#)[^"]', html))
+        self.assertNotIn("http://", html)
+        self.assertNotIn("https://", html)
+        # 埋め込んだ JSON が取り出せること
+        m = re.search(r'<script id="viewer-data" type="application/json">(.*?)</script>',
+                      html, re.S)
+        self.assertIsNotNone(m)
+        self.assertEqual(len(_json.loads(m.group(1).replace("<\\/", "</"))["messages"]),
+                         len(self.data["messages"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

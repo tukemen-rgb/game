@@ -120,6 +120,13 @@ python3 tools/font_view.py work/FONT.BIN --png work/font_sheet.png --cols 24
 python3 tools/proofread.py exercises/qa_target.tsv
 ```
 
+さらに、画面でどう崩れるかを見る。原文と訳文を `T` キーで切り替えると、
+仕込んだ不具合が見た目の崩れとして現れます。
+
+```bash
+python3 tools/make_viewer.py     # → work/viewer.html をブラウザで開く
+```
+
 **自分が見つけられなかった項目が、自分のチェックリストに足すべきもの**です。
 逆に、機械が拾えていないのに自分が気づいたものがあれば、それは
 `proofread.py` に足すべきルールです。
@@ -143,11 +150,16 @@ python3 tools/insert_text.py work/qa_fixed.tsv -o work/SCRIPT_fixed.BIN \
 python3 tools/dump_text.py work/SCRIPT_fixed.BIN -o work/verify.tsv
 ```
 
+```bash
+python3 tools/make_viewer.py --tsv work/qa_fixed.tsv -o work/viewer_fixed.html
+```
+
 条件:
 
 * `proofread.py` の ERROR が 0 件
 * `insert_text.py` が容量オーバーで落ちない
 * 入れ直したファイルから再抽出したテキストが、意図したものと一致する
+* 検査台の画面で、枠から出た文字と □ が 1 つも無い
 
 最後の再抽出まで含めて確認するのが大事です。「TSV は直したがデータに
 反映されていない」が実務でよくある事故で、往復して確認する癖をつけます。
@@ -169,3 +181,5 @@ python3 tools/dump_text.py work/SCRIPT_fixed.BIN -o work/verify.tsv
 
 これができると、`id 2` の `<VAR:00>！　こんなところにいたのね。` が
 仕様違反として検出されるようになります (14 文字 + 名前 6 文字 = 20 文字 > 18)。
+検査台 (`make_viewer.py`) でプレイヤー名を `ながいなまえ` にすると、
+直すべき状態が画面で確認できます。
