@@ -624,6 +624,9 @@ const state = {
   pointers: [],
   hexOff: 0,
   tab: "hex",
+  marks: [],        /* マップに重ねる印 (見つけた構造の位置) */
+  lit: -1,          /* 強調中の印 */
+  showMarks: true,
 };
 
 /* ======================= 7. 受け入れ ======================= */
@@ -758,13 +761,46 @@ async function classifyEntries() {
   if (targets.length) renderTree();
 }
 
+/**
+ * 検出結果をマップ上の位置 (マス番号) に直す。
+ * 左のレールに出しているものと同じ集合を印にするので、一覧と地図が対応する。
+ */
+function buildMarks() {
+  const block = state.map ? state.map.blockSize : 1;
+  const marks = [];
+  for (const t of railPointers()) {
+    marks.push({
+      kind: "ptr", from: Math.floor(t.off / block),
+      to: Math.floor((t.tableEnd - 1) / block),
+      label: `${t.stride === 4 ? "PTR32" : "PTR16"} ${hx(t.off)} · ${t.count} 件`,
+      off: t.off,
+    });
+  }
+  for (const str of railStrings()) {
+    marks.push({
+      kind: "text", from: Math.floor(str.off / block),
+      to: Math.floor((str.off + str.byteLen - 1) / block),
+      label: `TEXT ${hx(str.off)} · ${str.text.slice(0, 24)}`,
+      off: str.off,
+    });
+  }
+  state.marks = marks;
+}
+
+function railPointers() {
+  const high = state.pointers.filter((t) => t.confidence === "high");
+  return (high.length ? high : state.pointers.filter((t) => t.confidence === "mid")).slice(0, 8);
+}
+
+function railStrings() {
+  return state.strings.filter((str) => str.kind !== "ascii").slice(0, 12);
+}
+
 function renderFindings() {
   const ul = $("findlist");
   ul.textContent = "";
   const items = [];
-  const best = state.pointers.filter((t) => t.confidence === "high");
-  const shown = best.length ? best : state.pointers.filter((t) => t.confidence === "mid");
-  for (const t of shown.slice(0, 8)) {
+  for (const t of railPointers()) {
     items.push({
       kind: t.stride === 4 ? "PTR32" : "PTR16",
       at: hx(t.off),
@@ -773,11 +809,10 @@ function renderFindings() {
       go: () => { gotoOffset(t.off); showTab("pointers"); highlightPointer(t); },
     });
   }
-  const jp = state.strings.filter((s) => s.kind !== "ascii");
-  for (const s of jp.slice(0, 12)) {
+  for (const str of railStrings()) {
     items.push({
-      kind: "TEXT", at: hx(s.off), txt: s.text.slice(0, 60),
-      go: () => { gotoOffset(s.off); showTab("hex"); },
+      kind: "TEXT", at: hx(str.off), txt: str.text.slice(0, 60),
+      go: () => { gotoOffset(str.off); showTab("hex"); },
     });
   }
   if (!items.length) {
@@ -786,11 +821,12 @@ function renderFindings() {
       + 'ここには構造が無いのかもしれません。</p>';
     ul.append(li);
   }
-  for (const it of items) {
+  items.forEach((it, i) => {
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.className = "findrow";
     btn.type = "button";
+    btn.style.setProperty("--i", String(i));
     const k = document.createElement("span");
     k.className = "kind";
     k.textContent = it.kind;
@@ -802,9 +838,14 @@ function renderFindings() {
     t.textContent = it.txt;
     btn.append(k, a, t);
     btn.addEventListener("click", it.go);
+    /* 一覧の行と地図の印を対応させる。どこにあるものなのかが目で追える */
+    btn.addEventListener("mouseenter", () => { state.lit = i; drawMap(); });
+    btn.addEventListener("focus", () => { state.lit = i; drawMap(); });
+    btn.addEventListener("mouseleave", () => { state.lit = -1; drawMap(); });
+    btn.addEventListener("blur", () => { state.lit = -1; drawMap(); });
     li.append(btn);
     ul.append(li);
-  }
+  });
   const high = state.pointers.filter((t) => t.confidence === "high").length;
   $("findcount").textContent =
     `高 ${high} / ${state.pointers.length} 表 · JP ${state.strings.filter((s) => s.kind !== "ascii").length}`;
@@ -867,11 +908,50 @@ function drawMap() {
   const colors = {};
   for (const k of Object.keys(CLASSES)) colors[k] = cssColor(CLASSES[k].css);
   const shown = Math.ceil(m.nBlocks * mapReveal);
+
+  /* 一覧をなぞっている間は、その構造の範囲だけを残して他を沈める。
+     どこにあるものなのかが一目で分かる */
+  const lit = state.showMarks && state.lit >= 0 ? state.marks[state.lit] : null;
   for (let i = 0; i < shown; i++) {
     const x = (i % cols) * CELL_PX;
     const y = Math.floor(i / cols) * CELL_PX;
+    g.globalAlpha = lit ? (i >= lit.from && i <= lit.to ? 1 : 0.28) : 1;
     g.fillStyle = colors[m.cells[i]] || colors.tile;
     g.fillRect(x, y, CELL_PX - 1, CELL_PX - 1);
+  }
+  g.globalAlpha = 1;
+
+  /* 見つけた構造の位置に印を重ねる。一覧と地図をつなぐ */
+  if (state.showMarks) {
+    const seal = cssColor("--seal");
+    state.marks.forEach((mk, i) => {
+      const strong = i === state.lit;
+      g.fillStyle = seal;
+      g.globalAlpha = strong ? 1 : (mk.kind === "ptr" ? 0.9 : 0.6);
+      const thick = mk.kind === "ptr" ? 3 : 2;
+      for (let c = mk.from; c <= mk.to && c < m.nBlocks; c++) {
+        const x = (c % cols) * CELL_PX;
+        const y = Math.floor(c / cols) * CELL_PX;
+        g.fillRect(x, y + CELL_PX - 1 - thick, CELL_PX - 1, thick);
+      }
+      if (strong) {
+        g.strokeStyle = seal;
+        g.lineWidth = 1;
+        for (let c = mk.from; c <= mk.to && c < m.nBlocks; c++) {
+          const x = (c % cols) * CELL_PX;
+          const y = Math.floor(c / cols) * CELL_PX;
+          g.strokeRect(x - 0.5, y - 0.5, CELL_PX, CELL_PX);
+        }
+      }
+      g.globalAlpha = 1;
+    });
+  }
+
+  /* 走査線。読み込み時に左から流れる */
+  if (mapReveal < 1) {
+    const front = (shown % cols) * CELL_PX;
+    g.fillStyle = cssColor("--seal");
+    g.fillRect(front, 0, 1, h);
   }
 
   /* 十字線。押す前にどの行・列を見ているかが分かる */
@@ -951,6 +1031,18 @@ $("map").addEventListener("mousemove", (ev) => {
   tip.append(b, document.createTextNode(`  ${fmtSize(off)} 付近  ·  ${label}`));
   $("ro-off").textContent = hx(off);
   $("ro-cls").textContent = label;
+
+  /* 印の上なら、その構造が何かを出して一覧側も光らせる */
+  const under = state.marks.findIndex((mk) => idx >= mk.from && idx <= mk.to);
+  state.lit = under;
+  const rows = $("findlist").querySelectorAll(".findrow");
+  rows.forEach((el, i) => el.classList.toggle("lit", i === under));
+  if (under >= 0) {
+    tip.append(document.createTextNode("  ·  "));
+    const s2 = document.createElement("b");
+    s2.textContent = state.marks[under].label;
+    tip.append(s2);
+  }
   drawMap();
 });
 $("map").addEventListener("mouseleave", () => { mapHover = -1; drawMap(); });
@@ -961,6 +1053,12 @@ $("map").addEventListener("click", (ev) => {
   showTab("hex");
 });
 window.addEventListener("resize", () => drawMap());
+$("tmarks").addEventListener("click", () => {
+  state.showMarks = !state.showMarks;
+  $("tmarks").setAttribute("aria-pressed", String(state.showMarks));
+  drawMap();
+});
+$("tsweep").addEventListener("click", () => animateMap());
 
 function renderLegend() {
   const box = $("maplegend");
@@ -972,6 +1070,11 @@ function renderLegend() {
     el.append(i, document.createTextNode(def.label));
     box.append(el);
   }
+  const mk = document.createElement("span");
+  mk.className = "mark-key push";
+  const bar = document.createElement("i");
+  mk.append(bar, document.createTextNode("見つけた構造の位置"));
+  box.append(mk);
 }
 
 /* ======================= 10. 選択と解析 ======================= */
@@ -1006,6 +1109,8 @@ async function selectEntry(entry) {
   $("hexoff").value = hex(state.hexOff);
 
   state.map = await buildMap(entry);
+  state.lit = -1;
+  buildMarks();
   renderLegend();
   animateMap();
   renderTree();
@@ -1026,7 +1131,24 @@ function updateReadout() {
   $("ro-cls").textContent = entry.cls ? CLASSES[entry.cls].label : "—";
   const high = state.pointers.filter((t) => t.confidence === "high").length;
   const jp = state.strings.filter((s) => s.kind !== "ascii").length;
-  $("ro-found").textContent = `ポインタ表 ${high} · 日本語 ${jp}`;
+  countUp($("ro-found"), high, jp);
+}
+
+/** 検出数をゼロから数え上げる。見つかった感じを出すための一手間 */
+function countUp(el, high, jp) {
+  const write = (a, b) => { el.textContent = `ポインタ表 ${a} · 日本語 ${b}`; };
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches || jp === 0) {
+    write(high, jp);
+    return;
+  }
+  const t0 = performance.now();
+  const step = (now) => {
+    const t = Math.min(1, (now - t0) / 520);
+    const e = 1 - Math.pow(1 - t, 3);
+    write(Math.round(high * e), Math.round(jp * e));
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function gotoOffset(off) {

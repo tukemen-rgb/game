@@ -28,8 +28,8 @@
   --cls-wave: #a8751e;
   --cls-high: #794e95;
 
-  --font-ui: "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic", YuGothic,
-             "Noto Sans JP", IPAGothic, Meiryo, system-ui, sans-serif;
+  --font-ui: Meiryo, "メイリオ", "Hiragino Kaku Gothic ProN", "Hiragino Sans",
+             "Yu Gothic", YuGothic, "Noto Sans JP", IPAGothic, system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono",
                "Roboto Mono", Menlo, Consolas, monospace;
 
@@ -316,7 +316,16 @@ code { font-family: var(--font-mono); font-size: .92em; }
   width: 100%; padding: 8px 16px; background: none; border: 0;
   border-top: 1px solid var(--rule-soft); text-align: left; cursor: pointer;
 }
-.findrow:hover { background: var(--plate-2); }
+.findrow {
+  animation: rise .3s cubic-bezier(.2, .7, .3, 1) both;
+  animation-delay: calc(var(--i, 0) * 30ms);
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: none; }
+}
+.findrow:hover, .findrow.lit { background: var(--plate-2); }
+.findrow:hover .at, .findrow.lit .at { text-decoration: underline; text-underline-offset: 2px; }
 .findrow .kind {
   font-family: var(--font-mono); font-size: 8.5px; letter-spacing: .12em;
   padding: 1px 5px; align-self: start; margin-top: 3px; white-space: nowrap;
@@ -356,9 +365,13 @@ code { font-family: var(--font-mono); font-size: .92em; }
 }
 #map { display: block; width: 100%; cursor: crosshair; }
 .maplegend {
-  display: flex; flex-wrap: wrap; gap: 3px 0;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 3px 0;
   border-top: 1px solid var(--rule-soft); padding-top: 10px;
 }
+.maplegend .mark-key i {
+  height: 3px; background: var(--seal);
+}
+.maplegend .push { margin-left: auto; padding-right: 0; }
 .maplegend span {
   display: inline-flex; align-items: center; gap: 7px;
   padding-right: 18px; font-size: 11px; color: var(--ink-2);
