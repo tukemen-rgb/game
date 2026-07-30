@@ -9,41 +9,76 @@
 <body>
 
 <header class="topbar">
-  <h1>構造探査台</h1>
-  <span class="sub">ディスクイメージやデータファイルの構造を推定して可視化する</span>
+  <div class="mark">
+    <span class="glyph" aria-hidden="true"></span>
+    <h1>構造探査台</h1>
+  </div>
+  <span class="sub">ディスクイメージの構造を推定して可視化する</span>
   <div class="loaded" id="loaded" hidden></div>
 </header>
 
 <!-- ===================== 受け入れ画面 ===================== -->
 <section class="intake" id="intake">
-  <div class="dropzone" id="dropzone">
-    <strong>ファイルをここにドロップ</strong>
-    <p>ディスクイメージ (.iso / .bin) でも、単体のデータファイルでもかまいません。</p>
-    <div class="row">
-      <button class="btn primary" id="pick">ファイルを選ぶ</button>
-      <button class="btn" id="sample" hidden>練習用のイメージを読む</button>
+  <div class="hero">
+    <canvas id="hero" aria-hidden="true"></canvas>
+    <div class="hero-inner">
+      <span class="eyebrow">Structure probe · 読み取り専用</span>
+      <h2>構造の分からないファイルから、<br><em>構造そのもの</em>を取り出す。</h2>
+      <p class="lede">
+バイト列の性質を地図にし、ポインタテーブルと文字列を推定します。<br>形式を何も教えなくても、どこにテキストがあるかが分かります。
+      </p>
+
+      <div class="dropzone" id="dropzone">
+        <div class="dz-main">
+          <strong>ファイルをここにドロップ</strong>
+          <span class="hintline">.iso / .bin / 単体のデータファイル</span>
+        </div>
+        <div class="row">
+          <button class="btn primary" id="pick">ファイルを選ぶ</button>
+          <button class="btn seal" id="sample" hidden>練習用のイメージを読む</button>
+        </div>
+        <p class="privacy" id="privacy">
+          解析はブラウザの中だけで完結します。送信も保存もしません
+        </p>
+        <input type="file" id="fileinput" hidden>
+      </div>
     </div>
-    <p class="privacy" id="privacy">読み込みはブラウザの中だけで行われます。どこにも送信しません。</p>
-    <input type="file" id="fileinput" hidden>
   </div>
 
-  <div class="card">
-    <h2>何をするサイトか</h2>
-    <ul>
-      <li><b>ISO9660 のファイル一覧を取り出す</b> — ボリューム記述子からディレクトリを辿ります</li>
-      <li><b>バイトの性質を色で地図にする</b> — ゼロ埋め・テキスト・タイル・波形・圧縮を区別します</li>
-      <li><b>構造の候補を自動で探す</b> — 文字列の並び、ポインタテーブル、タイルの周期</li>
-      <li><b>手で確かめる</b> — 16 進表示、文字列一覧、タイル表示、相対検索</li>
-    </ul>
+  <div class="stages">
+    <span class="eyebrow">解析の五段階</span>
+    <div class="stage">
+      <span class="no">01</span>
+      <h3>入れ物を開ける</h3>
+      <p>ISO9660 のボリューム記述子からディレクトリを辿り、ファイル一覧を取り出す。</p>
+    </div>
+    <div class="stage">
+      <span class="no">02</span>
+      <h3>性質を地図にする</h3>
+      <p>ブロックごとのバイト統計で六種に色分けする。ゼロ埋め・ASCII・日本語・タイル・波形・圧縮。</p>
+    </div>
+    <div class="stage">
+      <span class="no">03</span>
+      <h3>構造を推定する</h3>
+      <p>文字列の並び、ポインタテーブル、タイルの周期を自動で探し、根拠つきで確度を出す。</p>
+    </div>
+    <div class="stage">
+      <span class="no">04</span>
+      <h3>手で確かめる</h3>
+      <p>16 進表示、文字列一覧、タイル表示、相対検索。推定を人が検証する。</p>
+    </div>
+    <div class="stage">
+      <span class="no">05</span>
+      <h3>分かったら読む</h3>
+      <p>形式が判明したファイルは本文まで展開する。ここを増やすことでツールが実用になる。</p>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>できないこと</h2>
-    <ul>
-      <li>圧縮されたデータの展開 (伸張ルーチンはゲームごとに違うため)</li>
-      <li>実行コードの逆アセンブル</li>
-      <li>データの書き戻し (読み取り専用です)</li>
-    </ul>
+  <div class="limits">
+    <span class="eyebrow">できないこと</span>
+    <p>圧縮データの展開。伸張ルーチンはゲームごとに違うため。</p>
+    <p>実行コードの逆アセンブル。</p>
+    <p>データの書き戻し。読み取り専用です。</p>
   </div>
 </section>
 
@@ -62,8 +97,7 @@
     </div>
     <ul class="findlist" id="findlist"></ul>
 
-    <div class="rail-head"><h2>操作</h2></div>
-    <div style="padding:12px 14px;display:grid;gap:8px">
+    <div class="railfoot">
       <button class="btn" id="reopen">別のファイルを開く</button>
       <p class="hint" id="capnote"></p>
     </div>
@@ -76,7 +110,11 @@
         <span class="note" id="mapnote"></span>
       </header>
       <div class="body">
-        <canvas id="map" height="200"></canvas>
+        <div class="mapstack">
+          <div class="mapruler" id="mapruler" aria-hidden="true"></div>
+          <canvas id="map" height="200"
+                  aria-label="バイトの性質を色分けした地図。マスを押すとその位置に移動します"></canvas>
+        </div>
         <p class="maptip" id="maptip">マスにカーソルを合わせると位置と種類が出ます。押すとその位置に飛びます。</p>
         <div class="maplegend" id="maplegend"></div>
       </div>
@@ -132,7 +170,7 @@
           </div>
           <div class="field">
             <label>絞り込み</label>
-            <div style="display:flex;gap:4px">
+            <div style="display:flex;gap:5px">
               <button class="chipbtn" data-strfilter="all" aria-pressed="true">全部</button>
               <button class="chipbtn" data-strfilter="jp" aria-pressed="false">日本語</button>
               <button class="chipbtn" data-strfilter="ascii" aria-pressed="false">ASCII</button>
@@ -142,7 +180,7 @@
         </div>
         <p class="hint">
           圧縮データや乱数のような領域では、偶然 Shift-JIS として読めてしまう並びが
-          必ず混ざります。文字数を増やすと減ります。
+          <b>必ず</b>混ざります。最低文字数を上げると減ります。
         </p>
         <div class="tablewrap">
           <table>
@@ -155,11 +193,8 @@
       <!-- ポインタ表 -->
       <div class="tabpanel" id="tab-pointers" role="tabpanel" hidden>
         <p class="hint">
-          値が単調に増え、すべてファイル内を指している並びを探します。基準の値は
-          決め打ちにせず、いくつかの仮説を立てて根拠の多いものを採ります
-          (イメージの中に埋まったファイルのポインタも拾えます)。根拠は 2 つ
-          ——「表の直後から本文が始まっている」と「各行き先の直前が区切りバイト
-          (0x00 / 0xFF) になっている」。両方そろえば確度「高」です。
+          値が単調に増え、すべてファイル内を指している並びを探します。基準の値は決め打ちにせず、複数の仮説を立てて根拠の多いものを採ります (イメージの中に埋まったファイルのポインタも拾えます)。根拠は二つ —
+          <b>表の直後から本文が始まっている</b>ことと、<b>各行き先の直前が区切りバイト (0x00 / 0xFF) になっている</b>こと。両方そろえば確度「高」です。
         </p>
         <div class="tablewrap">
           <table>
@@ -207,13 +242,13 @@
       <div class="tabpanel" id="tab-relative" role="tabpanel" hidden>
         <p class="hint">
           フォントが五十音順に並んでいれば、文字コードも連番になります。文字どうしの
-          <b>差の並び</b>は起点が未知でも変わらないので、それを手がかりに文章を探します。
-          清音のひらがなだけ、4 文字以上で試すのがこつです。
+          <b>差の並び</b>は起点が未知でも変わらないので、それを手がかりに文章を探します。清音のひらがなだけ、四文字以上で試すのがこつです。
         </p>
         <div class="controls">
           <div class="field">
             <label for="relq">探す語</label>
-            <input type="text" id="relq" value="ここは" size="14" spellcheck="false" style="font-family:var(--font-ui)">
+            <input type="text" id="relq" value="ここは" size="14" spellcheck="false"
+                   style="font-family:var(--font-ui)">
           </div>
           <div class="field">
             <label for="relwidth">1 文字のバイト数</label>
@@ -237,8 +272,8 @@
           </table>
         </div>
         <div class="controls">
-          <div class="field" style="flex:1;min-width:280px">
-            <label for="reltable">文字テーブル (16 進=文字。相対検索の結果から作ったものを編集できます)</label>
+          <div class="field" style="flex:1;min-width:300px">
+            <label for="reltable">文字テーブル (16 進=文字)</label>
             <textarea id="reltable" spellcheck="false" placeholder="01=ぁ&#10;02=あ&#10;E000=一"></textarea>
           </div>
           <button class="btn" id="reluse">このテーブルを 16 進表示に使う</button>
@@ -252,6 +287,14 @@
     </div>
   </main>
 </div>
+
+<footer class="readout" id="readout" hidden>
+  <span class="live"><i>解析</i><b id="ro-file">—</b></span>
+  <span><i>位置</i><b id="ro-off">—</b></span>
+  <span><i>種類</i><b id="ro-cls">—</b></span>
+  <span><i>構造</i><b id="ro-found">—</b></span>
+  <span class="spacer"><i>ローカル処理</i><b>送信なし</b></span>
+</footer>
 
 <script src="app.js"></script>
 </body>

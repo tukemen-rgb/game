@@ -531,6 +531,82 @@ function derivedTable(code, query, order, width, endian) {
   return { map, maxLen: width, origin };
 }
 
+
+/* ======================= ヒーローのバイトマップ =======================
+ * 受け入れ画面の背景は、この道具が出す絵そのもの。埋め込んである練習用
+ * イメージを本当に分類して描く (無ければ似せた模様にする)。列ごとに
+ * 同じ種類が並ぶので、分光プレートのように読める。
+ */
+
+let heroCells = null;
+let heroRaf = null;
+
+function heroClasses() {
+  if (typeof window.SAMPLE_ISO === "string" && window.SAMPLE_ISO.length) {
+    try {
+      const raw = atob(window.SAMPLE_ISO);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      const block = 192;
+      const out = [];
+      for (let s = 0; s < bytes.length; s += block) {
+        out.push(classifyStats(blockStats(bytes.subarray(s, s + block))));
+      }
+      if (out.length > 40) return out;
+    } catch (err) { /* 落ちたら下の模様にする */ }
+  }
+  const plan = [["zero", 70], ["ascii", 12], ["jp", 110], ["tile", 190], ["wave", 130],
+                ["high", 300], ["zero", 34], ["jp", 54], ["tile", 84], ["high", 120], ["zero", 48]];
+  const out = [];
+  let x = 20260730;
+  for (const [kind, n] of plan) {
+    for (let i = 0; i < n; i++) {
+      x = (x * 1103515245 + 12345) & 0x7FFFFFFF;
+      out.push((x >> 20) % 17 === 0 ? "tile" : kind);
+    }
+  }
+  return out;
+}
+
+function startHero() {
+  const cv = $("hero");
+  if (!cv || !cv.parentElement) return;
+  if (!heroCells) heroCells = heroClasses();
+  const host = cv.parentElement;
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let t0 = null;
+  const render = (now) => {
+    const w = host.clientWidth, h = host.clientHeight;
+    if (!w || !h) { heroRaf = requestAnimationFrame(render); return; }
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); }
+    if (cv.height !== Math.round(h * dpr)) { cv.height = Math.round(h * dpr); }
+    const g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    const S = 9;
+    const cols = Math.ceil(w / S), rows = Math.ceil(h / S);
+    if (t0 === null) t0 = now;
+    const prog = reduced ? 1 : Math.min(1, (now - t0) / 1100);
+    const eased = 1 - Math.pow(1 - prog, 3);
+    const colors = {};
+    for (const k of Object.keys(CLASSES)) colors[k] = cssColor(CLASSES[k].css);
+    const revealed = Math.ceil(cols * eased);
+    for (let c = 0; c < revealed; c++) {
+      for (let r = 0; r < rows; r++) {
+        const idx = (c * rows + r) % heroCells.length;
+        g.fillStyle = colors[heroCells[idx]] || colors.tile;
+        g.fillRect(c * S, r * S, S - 1, S - 1);
+      }
+    }
+    heroRaf = prog < 1 ? requestAnimationFrame(render) : null;
+  };
+  if (heroRaf) cancelAnimationFrame(heroRaf);
+  heroRaf = requestAnimationFrame(render);
+}
+
+window.addEventListener("resize", () => { if (!$("intake").hidden) startHero(); });
+
 /* ======================= 6. 状態 ======================= */
 
 const state = {
@@ -569,6 +645,8 @@ $("reopen").addEventListener("click", () => {
   $("shell").hidden = true;
   $("intake").hidden = false;
   $("loaded").hidden = true;
+  $("readout").hidden = true;
+  startHero();
 });
 
 /* ページに練習用イメージが埋め込まれている場合はボタンを出す
@@ -603,23 +681,27 @@ async function openFile(file) {
   loaded.hidden = false;
   loaded.textContent = "";
   const info = [
-    [file.name, ""],
+    [file.name, "ファイル"],
     [fmtSize(file.size), "サイズ"],
-    [state.iso ? "ISO9660" : "単体ファイル", "形式"],
+    [state.iso ? "ISO9660" : "単体", "形式"],
   ];
   if (state.iso) info.push([state.iso.volumeId || "(名前なし)", "ボリューム"]);
-  for (const [v, k] of info) {
+  for (const [value, label] of info) {
     const el = document.createElement("span");
     const b = document.createElement("b");
-    b.textContent = v;
-    el.append(b);
-    if (k) el.append(" " + k);
+    b.textContent = value;
+    const i = document.createElement("i");
+    i.textContent = label;
+    el.append(b, i);
     loaded.append(el);
   }
+  $("readout").hidden = false;
+  $("ro-file").textContent = file.name;
 
   renderTree();
   /* まずイメージ全体の地図を見せる。単体ファイルならそのファイル */
   await selectEntry(state.entries[0]);
+  await classifyEntries();
 }
 
 /* ======================= 8. ファイル一覧と検出結果 ======================= */
@@ -664,6 +746,16 @@ function renderTree() {
   }
   $("treecount").textContent = state.iso
     ? state.iso.entries.length + " ファイル" : "1 ファイル";
+}
+
+/** ファイル一覧に色の帯を出すため、各ファイルの先頭 4KB だけ見て分類する */
+async function classifyEntries() {
+  const targets = state.entries.filter((e) => e.kind !== "image" && !e.cls).slice(0, 300);
+  for (const entry of targets) {
+    const head = await readRange(state.file, entry.offset, Math.min(entry.size, 4096));
+    entry.cls = classifyStats(blockStats(head));
+  }
+  if (targets.length) renderTree();
 }
 
 function renderFindings() {
@@ -714,8 +806,8 @@ function renderFindings() {
     ul.append(li);
   }
   const high = state.pointers.filter((t) => t.confidence === "high").length;
-  $("findcount").textContent = `確度高 ${high} / 全 ${state.pointers.length} 表 · `
-    + state.strings.filter((s) => s.kind !== "ascii").length + " 日本語";
+  $("findcount").textContent =
+    `高 ${high} / ${state.pointers.length} 表 · JP ${state.strings.filter((s) => s.kind !== "ascii").length}`;
 }
 
 /* ======================= 9. 全体マップ ======================= */
@@ -753,6 +845,8 @@ async function buildMap(entry) {
 
 const CELL_PX = 11;
 let mapGeom = null;
+let mapHover = -1;
+let mapReveal = 1;      /* 0→1 で左から順に出す掃引 */
 
 function drawMap() {
   const cv = $("map");
@@ -761,24 +855,71 @@ function drawMap() {
   const cssW = cv.clientWidth || 900;
   const cols = Math.max(8, Math.floor(cssW / CELL_PX));
   const rows = Math.ceil(m.nBlocks / cols);
+  const h = Math.max(CELL_PX, rows * CELL_PX);
   const dpr = window.devicePixelRatio || 1;
-  cv.height = Math.max(40, rows * CELL_PX) * dpr;
+  cv.height = h * dpr;
   cv.width = cssW * dpr;
-  cv.style.height = Math.max(40, rows * CELL_PX) + "px";
+  cv.style.height = h + "px";
   const g = cv.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.clearRect(0, 0, cssW, rows * CELL_PX);
+  g.clearRect(0, 0, cssW, h);
+
   const colors = {};
   for (const k of Object.keys(CLASSES)) colors[k] = cssColor(CLASSES[k].css);
-  for (let i = 0; i < m.nBlocks; i++) {
+  const shown = Math.ceil(m.nBlocks * mapReveal);
+  for (let i = 0; i < shown; i++) {
     const x = (i % cols) * CELL_PX;
     const y = Math.floor(i / cols) * CELL_PX;
     g.fillStyle = colors[m.cells[i]] || colors.tile;
     g.fillRect(x, y, CELL_PX - 1, CELL_PX - 1);
   }
+
+  /* 十字線。押す前にどの行・列を見ているかが分かる */
+  if (mapHover >= 0 && mapHover < m.nBlocks) {
+    const hx2 = (mapHover % cols) * CELL_PX;
+    const hy = Math.floor(mapHover / cols) * CELL_PX;
+    g.fillStyle = cssColor("--seal");
+    g.globalAlpha = 0.22;
+    g.fillRect(0, hy, cssW, CELL_PX - 1);
+    g.fillRect(hx2, 0, CELL_PX - 1, h);
+    g.globalAlpha = 1;
+    g.strokeStyle = cssColor("--seal");
+    g.lineWidth = 1;
+    g.strokeRect(hx2 - 0.5, hy - 0.5, CELL_PX, CELL_PX);
+  }
+
   mapGeom = { cols, rows, cssW };
   $("mapnote").textContent =
     `1 マス ${fmtSize(m.blockSize)} · ${m.nBlocks.toLocaleString("ja-JP")} マス`;
+  drawRuler(cols, rows);
+}
+
+/** 行の先頭オフセットを縦に並べる (計測器の目盛りにあたる) */
+function drawRuler(cols, rows) {
+  const box = $("mapruler");
+  const m = state.map;
+  box.textContent = "";
+  box.style.gridTemplateRows = `repeat(${rows}, ${CELL_PX}px)`;
+  const every = rows > 24 ? Math.ceil(rows / 24) : 1;
+  for (let r = 0; r < rows; r++) {
+    const el = document.createElement("div");
+    el.style.lineHeight = CELL_PX + "px";
+    el.textContent = r % every === 0 ? hex(r * cols * m.blockSize, 6) : "";
+    box.append(el);
+  }
+}
+
+function animateMap() {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) { mapReveal = 1; drawMap(); return; }
+  mapReveal = 0;
+  const t0 = performance.now();
+  const step = (now) => {
+    const t = Math.min(1, (now - t0) / 420);
+    mapReveal = 1 - Math.pow(1 - t, 3);
+    drawMap();
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function mapIndexFromEvent(ev) {
@@ -795,10 +936,24 @@ function mapIndexFromEvent(ev) {
 $("map").addEventListener("mousemove", (ev) => {
   const idx = mapIndexFromEvent(ev);
   const tip = $("maptip");
-  if (idx < 0) { tip.textContent = "マスにカーソルを合わせると位置と種類が出ます。"; return; }
+  if (idx === mapHover) return;
+  mapHover = idx;
+  if (idx < 0) {
+    tip.textContent = "マスにカーソルを合わせると位置と種類が出ます。";
+    drawMap();
+    return;
+  }
   const off = idx * state.map.blockSize;
-  tip.textContent = `${hx(off)}  (${fmtSize(off)} 付近)  ${CLASSES[state.map.cells[idx]].label}`;
+  const label = CLASSES[state.map.cells[idx]].label;
+  tip.innerHTML = "";
+  const b = document.createElement("b");
+  b.textContent = hx(off);
+  tip.append(b, document.createTextNode(`  ${fmtSize(off)} 付近  ·  ${label}`));
+  $("ro-off").textContent = hx(off);
+  $("ro-cls").textContent = label;
+  drawMap();
 });
+$("map").addEventListener("mouseleave", () => { mapHover = -1; drawMap(); });
 $("map").addEventListener("click", (ev) => {
   const idx = mapIndexFromEvent(ev);
   if (idx < 0) return;
@@ -852,7 +1007,7 @@ async function selectEntry(entry) {
 
   state.map = await buildMap(entry);
   renderLegend();
-  drawMap();
+  animateMap();
   renderTree();
   renderFindings();
   renderHex();
@@ -860,12 +1015,25 @@ async function selectEntry(entry) {
   renderPointers();
   renderTiles();
   renderFormat();
+  updateReadout();
+}
+
+function updateReadout() {
+  const entry = state.current;
+  if (!entry) return;
+  $("ro-file").textContent = entry.kind === "image" ? entry.path : entry.path;
+  $("ro-off").textContent = hx(state.hexOff);
+  $("ro-cls").textContent = entry.cls ? CLASSES[entry.cls].label : "—";
+  const high = state.pointers.filter((t) => t.confidence === "high").length;
+  const jp = state.strings.filter((s) => s.kind !== "ascii").length;
+  $("ro-found").textContent = `ポインタ表 ${high} · 日本語 ${jp}`;
 }
 
 function gotoOffset(off) {
   state.hexOff = Math.max(0, Math.min(off, Math.max(0, state.buf.length - 1)));
   $("hexoff").value = hex(state.hexOff);
   renderHex();
+  updateReadout();
 }
 
 /* ---------- タブ ---------- */
@@ -1390,3 +1558,4 @@ function renderScrp(b) {
 /* ======================= 起動 ======================= */
 renderLegend();
 showTab("hex");
+startHero();
