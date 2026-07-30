@@ -419,6 +419,178 @@ function findPointerTables(b, fileSize, opt = {}) {
   return uniq;
 }
 
+
+/* ======================= タイル領域の自動検出 =======================
+ * 「この位置に絵がありそう」を自動で探す。
+ *
+ * 手がかりは 2 つだけ。
+ *   1. バイトの性質が「タイル・コードなど」に分類される
+ *      (圧縮・波形・テキストはここで落ちる)
+ *   2. ある間隔だけ離れたバイトが、隣のバイトより似ている
+ *      画像は縦に相関があるので、行の長さ = その間隔になる
+ *
+ * 2 の強さは「間隔をあけた平均差 ÷ 隣どうしの平均差」で測ります。1 より
+ * 十分小さければ縦の相関があるということ。練習用データで測ると、フォントは
+ * 0.56、独自文字コードのテキストは 0.97 と、はっきり分かれます。
+ */
+
+const TILE_WINDOW = 4096;
+const TILE_LAGS = [8, 16, 24, 32, 64, 128];
+const TILE_RATIO_MAX = 0.82;
+
+/**
+ * 間隔をあけたバイトの平均差。
+ *
+ * ゼロ同士の組は数えません。ゼロ埋めはどの間隔でも完全に一致するので、
+ * 入れておくと詰め物のある領域が「周期が強い」と誤判定されます。
+ */
+function meanGapDiff(win, lag) {
+  let sum = 0, count = 0;
+  const step = lag === 1 ? 1 : 3;
+  for (let i = 0; i + lag < win.length; i += step) {
+    const a = win[i], c = win[i + lag];
+    if (a === 0 && c === 0) continue;
+    sum += Math.abs(a - c);
+    count++;
+  }
+  return count >= 64 ? sum / count : null;
+}
+
+function lagRatio(win, lag) {
+  if (win.length <= lag * 4) return 9;
+  const base = meanGapDiff(win, 1);
+  const gap = meanGapDiff(win, lag);
+  if (base === null || gap === null || base < 1) return 9;
+  return gap / base;
+}
+
+/** その窓が絵らしいかを返す (らしくなければ null) */
+function tileScore(b, off, len) {
+  const win = b.subarray(off, off + len);
+  const st = blockStats(win);
+  if (!st || classifyStats(st) !== "tile") return null;
+  if (st.padRatio > 0.5) return null;      /* ほとんど詰め物の窓は対象外 */
+  let best = null;
+  for (const lag of TILE_LAGS) {
+    const ratio = lagRatio(win, lag);
+    if (!best || ratio < best.ratio) best = { lag, ratio };
+  }
+  if (!best || best.ratio > TILE_RATIO_MAX) return null;
+  return { lag: best.lag, ratio: best.ratio, st };
+}
+
+/** 1 ドットのビット数と 1 タイルの大きさを見当をつける */
+function guessTileShape(b, off, len, bytesPerTile) {
+  const win = b.subarray(off, Math.min(b.length, off + Math.min(len, 8192)));
+  let flat = 0;
+  const seen = new Set();
+  for (const v of win) {
+    if (v === 0x00 || v === 0xFF) flat++;
+    seen.add(v);
+  }
+  const bpp = flat / win.length > 0.3 ? 1 : (seen.size <= 64 ? 4 : 8);
+  const side = Math.sqrt(bytesPerTile * 8 / bpp);
+  const choices = [8, 16, 24, 32];
+  const fit = choices.reduce((a, c) => Math.abs(c - side) < Math.abs(a - side) ? c : a);
+  return { bpp, tw: fit, th: fit };
+}
+
+/**
+ * 領域の前後を詰める。窓の刻み (4KB) は粗いので、そのままだと絵の手前の
+ * 別のデータまで含んでしまい、縮小図の頭が化ける。512 バイトずつ寄せる。
+ */
+function refineRegion(b, r) {
+  const STEP = 512, PROBE = 1024;
+  /* 領域そのものの強さを基準にする。固定値だと隣の別データを取り込んでしまう */
+  const limit = Math.min(TILE_RATIO_MAX, r.ratio + 0.12);
+  const looksTile = (o) => {
+    const win = b.subarray(o, Math.min(b.length, o + PROBE));
+    return lagRatio(win, r.lag) <= limit;
+  };
+  let start = r.off;
+  let end = r.off + r.len;
+  while (start + PROBE < end && !looksTile(start)) start += STEP;
+  while (end - PROBE > start && !looksTile(end - PROBE)) end -= STEP;
+  r.off = start;
+  r.len = Math.max(PROBE, end - start);
+}
+
+function findTileRegions(b) {
+  const raw = [];
+  for (let off = 0; off + 1024 <= b.length; off += TILE_WINDOW) {
+    const len = Math.min(TILE_WINDOW, b.length - off);
+    const r = tileScore(b, off, len);
+    if (r) raw.push({ off, len, lag: r.lag, ratio: r.ratio });
+  }
+  /* 続いている窓はひとつの領域にまとめる */
+  const regions = [];
+  for (const h of raw) {
+    const last = regions[regions.length - 1];
+    if (last && h.off === last.off + last.len && h.lag === last.lag) {
+      last.len += h.len;
+      last.ratio = Math.min(last.ratio, h.ratio);
+    } else {
+      regions.push(Object.assign({}, h));
+    }
+  }
+  for (const r of regions) {
+    refineRegion(b, r);
+    Object.assign(r, guessTileShape(b, r.off, r.len, r.lag));
+  }
+  return regions.sort((a, c) => a.ratio - c.ratio).slice(0, 24);
+}
+
+/** タイルを 1 枚の canvas に並べて描く。一覧の縮小図と「タイル」タブで共用する */
+function drawTiles(cv, opt) {
+  const { off, bpp, tw, th, cols, zoom, maxTiles } = opt;
+  const b = state.buf;
+  const bytesPerTile = Math.ceil(tw * th * bpp / 8);
+  const avail = Math.max(0, b.length - off);
+  const nTiles = Math.min(maxTiles, Math.floor(avail / bytesPerTile));
+  const rows = Math.max(1, Math.ceil(nTiles / cols));
+  cv.width = cols * (tw + 1) * zoom;
+  cv.height = rows * (th + 1) * zoom;
+  /* 表示上の大きさは呼び出し側で決める。ここで style を書くと
+     一覧側の width:100% を上書きしてしまい、縮小図が横に切れる */
+  const g = cv.getContext("2d");
+  g.imageSmoothingEnabled = false;
+  g.fillStyle = cssColor("--plate-2");
+  g.fillRect(0, 0, cv.width, cv.height);
+
+  const img = g.createImageData(tw, th);
+  const maxVal = (1 << bpp) - 1;
+  const fg = hexToRgb(cssColor("--ink"));
+  const bgc = hexToRgb(cssColor("--bg"));
+  const tmp = document.createElement("canvas");
+  tmp.width = tw; tmp.height = th;
+  const tg = tmp.getContext("2d");
+
+  for (let t = 0; t < nTiles; t++) {
+    const base = off + t * bytesPerTile;
+    let bit = 0;
+    for (let y = 0; y < th; y++) {
+      for (let x = 0; x < tw; x++) {
+        let v = 0;
+        for (let k = 0; k < bpp; k++) {
+          const byte = b[base + ((bit + k) >> 3)] || 0;
+          v = (v << 1) | ((byte >> (7 - ((bit + k) & 7))) & 1);
+        }
+        bit += bpp;
+        const a = v / maxVal;
+        const p = (y * tw + x) * 4;
+        img.data[p] = Math.round(bgc[0] + (fg[0] - bgc[0]) * a);
+        img.data[p + 1] = Math.round(bgc[1] + (fg[1] - bgc[1]) * a);
+        img.data[p + 2] = Math.round(bgc[2] + (fg[2] - bgc[2]) * a);
+        img.data[p + 3] = 255;
+      }
+    }
+    tg.putImageData(img, 0, 0);
+    g.drawImage(tmp, (t % cols) * (tw + 1) * zoom, Math.floor(t / cols) * (th + 1) * zoom,
+                tw * zoom, th * zoom);
+  }
+  return { nTiles, bytesPerTile };
+}
+
 /* ======================= 5. 文字コード ======================= */
 
 const DECODERS = {
@@ -624,6 +796,7 @@ const state = {
   pointers: [],
   hexOff: 0,
   tab: "hex",
+  tiles: [],        /* 自動検出した絵の領域 */
   marks: [],        /* マップに重ねる印 (見つけた構造の位置) */
   lit: -1,          /* 強調中の印 */
   showMarks: true,
@@ -776,6 +949,14 @@ function buildMarks() {
       off: t.off,
     });
   }
+  for (const r of state.tiles.slice(0, 8)) {
+    marks.push({
+      kind: "tile", from: Math.floor(r.off / block),
+      to: Math.floor((r.off + r.len - 1) / block),
+      label: `絵 ${hx(r.off)} · ${r.bpp}bpp ${r.tw}x${r.th}`,
+      off: r.off,
+    });
+  }
   for (const str of railStrings()) {
     marks.push({
       kind: "text", from: Math.floor(str.off / block),
@@ -807,6 +988,13 @@ function renderFindings() {
       txt: `${t.count} 件 / 最初の行き先 ${hx(t.first)}`
            + (t.evidence.length ? " / " + t.evidence.join(" / ") : ""),
       go: () => { gotoOffset(t.off); showTab("pointers"); highlightPointer(t); },
+    });
+  }
+  for (const r of state.tiles.slice(0, 8)) {
+    items.push({
+      kind: "TILE", at: hx(r.off),
+      txt: `${fmtSize(r.len)} / ${r.bpp}bpp ${r.tw}x${r.th} / 縦の相関 ${r.ratio.toFixed(2)}`,
+      go: () => { showTab("gallery"); openTileRegion(r); },
     });
   }
   for (const str of railStrings()) {
@@ -847,8 +1035,8 @@ function renderFindings() {
     ul.append(li);
   });
   const high = state.pointers.filter((t) => t.confidence === "high").length;
-  $("findcount").textContent =
-    `高 ${high} / ${state.pointers.length} 表 · JP ${state.strings.filter((s) => s.kind !== "ascii").length}`;
+  $("findcount").textContent = `表 ${high} · 絵 ${state.tiles.length} · JP `
+    + state.strings.filter((s) => s.kind !== "ascii").length;
 }
 
 /* ======================= 9. 全体マップ ======================= */
@@ -927,8 +1115,8 @@ function drawMap() {
     state.marks.forEach((mk, i) => {
       const strong = i === state.lit;
       g.fillStyle = seal;
-      g.globalAlpha = strong ? 1 : (mk.kind === "ptr" ? 0.9 : 0.6);
-      const thick = mk.kind === "ptr" ? 3 : 2;
+      g.globalAlpha = strong ? 1 : (mk.kind === "text" ? 0.6 : 0.9);
+      const thick = mk.kind === "ptr" ? 3 : (mk.kind === "tile" ? 3 : 2);
       for (let c = mk.from; c <= mk.to && c < m.nBlocks; c++) {
         const x = (c % cols) * CELL_PX;
         const y = Math.floor(c / cols) * CELL_PX;
@@ -1094,6 +1282,7 @@ async function selectEntry(entry) {
     .concat(scanUtf8(state.buf, parseInt($("strmin").value, 10) || 6))
     .sort((a, b) => a.off - b.off);
   state.pointers = findPointerTables(state.buf, entry.size);
+  state.tiles = findTileRegions(state.buf);
   entry.cls = classifyStats(blockStats(state.buf.subarray(0, 4096)));
 
   /* 先頭がゼロ埋めのことが多いので、最初に意味のある位置へ寄せておく */
@@ -1164,10 +1353,11 @@ function showTab(name) {
   for (const btn of $("tabs").querySelectorAll("button")) {
     btn.setAttribute("aria-selected", String(btn.dataset.tab === name));
   }
-  for (const key of ["hex", "strings", "pointers", "tiles", "relative", "format"]) {
+  for (const key of ["hex", "strings", "pointers", "gallery", "tiles", "relative", "format"]) {
     $("tab-" + key).hidden = key !== name;
   }
   if (name === "tiles") renderTiles();
+  else if (name === "gallery") renderGallery();
   else if (name === "format") renderFormat();
   else if (name === "hex") renderHex();
 }
@@ -1396,53 +1586,9 @@ function renderTiles() {
   const cols = Math.max(1, parseInt($("tilecols").value, 10) || 24);
   const zoom = parseInt($("tilezoom").value, 10) || 2;
   const off = parseOffset($("tileoff").value, 0);
-  const bytesPerTile = Math.ceil(tw * th * bpp / 8);
-  const avail = Math.max(0, state.buf.length - off);
-  const nTiles = Math.min(2048, Math.floor(avail / bytesPerTile));
-  const rows = Math.max(1, Math.ceil(nTiles / cols));
-
-  const dpr = 1;
-  cv.width = cols * (tw + 1) * zoom * dpr;
-  cv.height = rows * (th + 1) * zoom * dpr;
-  cv.style.width = cols * (tw + 1) * zoom + "px";
-  const g = cv.getContext("2d");
-  g.imageSmoothingEnabled = false;
-  g.fillStyle = cssColor("--surface-2");
-  g.fillRect(0, 0, cv.width, cv.height);
-
-  const img = g.createImageData(tw, th);
-  const maxVal = (1 << bpp) - 1;
-  const ink = cssColor("--text");
-  const rgb = hexToRgb(ink);
-  const bg = hexToRgb(cssColor("--surface"));
-
-  for (let t = 0; t < nTiles; t++) {
-    const base = off + t * bytesPerTile;
-    let bit = 0;
-    for (let y = 0; y < th; y++) {
-      for (let x = 0; x < tw; x++) {
-        let v = 0;
-        for (let k = 0; k < bpp; k++) {
-          const byteIdx = base + ((bit + k) >> 3);
-          const b = state.buf[byteIdx] || 0;
-          v = (v << 1) | ((b >> (7 - ((bit + k) & 7))) & 1);
-        }
-        bit += bpp;
-        const a = v / maxVal;
-        const p = (y * tw + x) * 4;
-        img.data[p] = Math.round(bg[0] + (rgb[0] - bg[0]) * a);
-        img.data[p + 1] = Math.round(bg[1] + (rgb[1] - bg[1]) * a);
-        img.data[p + 2] = Math.round(bg[2] + (rgb[2] - bg[2]) * a);
-        img.data[p + 3] = 255;
-      }
-    }
-    const gx = (t % cols) * (tw + 1) * zoom;
-    const gy = Math.floor(t / cols) * (th + 1) * zoom;
-    const tmp = document.createElement("canvas");
-    tmp.width = tw; tmp.height = th;
-    tmp.getContext("2d").putImageData(img, 0, 0);
-    g.drawImage(tmp, gx, gy, tw * zoom, th * zoom);
-  }
+  const { nTiles, bytesPerTile } =
+    drawTiles(cv, { off, bpp, tw, th, cols, zoom, maxTiles: 2048 });
+  cv.style.width = cv.width + "px";      /* タイルタブは実寸で見せる */
 
   const periods = guessPeriods(state.buf.subarray(off, off + 64 * 1024));
   const top = periods.slice(0, 3).map((p) => `${p.lag} バイト`).join(" / ");
@@ -1457,15 +1603,74 @@ $("tileguess").addEventListener("click", () => {
   const off = parseOffset($("tileoff").value, 0);
   const periods = guessPeriods(state.buf.subarray(off, off + 64 * 1024));
   if (!periods.length) return;
-  const bytesPerTile = periods[0].lag;
-  const bpp = parseInt($("tilebpp").value, 10);
-  const side = Math.round(Math.sqrt(bytesPerTile * 8 / bpp));
-  const choices = [8, 16, 24, 32];
-  const best = choices.reduce((a, b) => Math.abs(b - side) < Math.abs(a - side) ? b : a);
-  $("tilew").value = String(best);
-  $("tileh").value = String(best);
+  const shape = guessTileShape(state.buf, off, 8192, periods[0].lag);
+  $("tilebpp").value = String(shape.bpp);
+  $("tilew").value = String(shape.tw);
+  $("tileh").value = String(shape.th);
   renderTiles();
 });
+
+/* ---------- 見つけた絵 ---------- */
+function openTileRegion(r) {
+  $("tileoff").value = hex(r.off);
+  $("tilebpp").value = String(r.bpp);
+  $("tilew").value = String(r.tw);
+  $("tileh").value = String(r.th);
+  $("tilecols").value = "24";
+  showTab("tiles");
+  renderTiles();
+}
+
+function renderGallery() {
+  const box = $("gallerybox");
+  box.textContent = "";
+  const note = $("gallerynote");
+  if (!state.tiles.length) {
+    note.textContent = "絵らしい領域は見つかりませんでした。"
+      + "圧縮されているか、このファイルには画像が無いのかもしれません。"
+      + "「タイル」タブで位置と大きさを手で指定すれば、そこを直接見られます。";
+    return;
+  }
+  note.textContent = `${state.tiles.length} か所。縦の相関が強い順に並べています`
+    + "（1 に近いほど根拠が弱い）。押すと「タイル」タブで細かく見られます。";
+
+  state.tiles.forEach((r, i) => {
+    const card = document.createElement("button");
+    card.className = "gcard";
+    card.type = "button";
+    card.style.setProperty("--i", String(i));
+
+    const shot = document.createElement("canvas");
+    shot.className = "gshot";
+    drawTiles(shot, {
+      off: r.off, bpp: r.bpp, tw: r.tw, th: r.th,
+      cols: 16, zoom: 2, maxTiles: 48,
+    });
+
+    const meta = document.createElement("div");
+    meta.className = "gmeta";
+    const at = document.createElement("b");
+    at.textContent = hx(r.off);
+    const shape = document.createElement("span");
+    shape.textContent = `${r.bpp}bpp ${r.tw}×${r.th}`;
+    const size = document.createElement("span");
+    size.textContent = fmtSize(r.len);
+    const conf = document.createElement("span");
+    conf.className = "gconf";
+    conf.textContent = `縦の相関 ${r.ratio.toFixed(2)}`;
+    meta.append(at, shape, size, conf);
+
+    card.append(shot, meta);
+    card.addEventListener("click", () => openTileRegion(r));
+    card.addEventListener("mouseenter", () => {
+      const idx = state.marks.findIndex((mk) => mk.kind === "tile" && mk.off === r.off);
+      state.lit = idx;
+      drawMap();
+    });
+    card.addEventListener("mouseleave", () => { state.lit = -1; drawMap(); });
+    box.append(card);
+  });
+}
 
 function hexToRgb(css) {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(css.trim());

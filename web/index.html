@@ -129,6 +129,7 @@
         <button role="tab" data-tab="hex" aria-selected="true">16 進</button>
         <button role="tab" data-tab="strings" aria-selected="false">文字列</button>
         <button role="tab" data-tab="pointers" aria-selected="false">ポインタ表</button>
+        <button role="tab" data-tab="gallery" aria-selected="false">見つけた絵</button>
         <button role="tab" data-tab="tiles" aria-selected="false">タイル</button>
         <button role="tab" data-tab="relative" aria-selected="false">相対検索</button>
         <button role="tab" data-tab="format" aria-selected="false">既知の形式</button>
@@ -207,6 +208,13 @@
           </table>
         </div>
         <div id="ptrdetail"></div>
+      </div>
+
+      <!-- 見つけた絵 -->
+      <div class="tabpanel" id="tab-gallery" role="tabpanel" hidden>
+        <p class="hint">バイトの性質が「タイル・コードなど」で、かつ<b>ある間隔だけ離れたバイトが隣のバイトより似ている</b>領域を探しています。画像は縦に相関があるので、その間隔が 1 行の長さになります。圧縮データや波形はこの条件で落ちます。</p>
+        <p class="hint" id="gallerynote"></p>
+        <div class="gallery" id="gallerybox"></div>
       </div>
 
       <!-- タイル -->
