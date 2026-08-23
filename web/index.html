@@ -136,6 +136,7 @@
         <button role="tab" data-tab="tiles" aria-selected="false">タイル</button>
         <button role="tab" data-tab="relative" aria-selected="false">相対検索</button>
         <button role="tab" data-tab="format" aria-selected="false">既知の形式</button>
+        <button role="tab" data-tab="report" aria-selected="false">調査メモ</button>
       </div>
 
       <!-- 16 進 -->
@@ -235,6 +236,18 @@
           </table>
         </div>
         <div id="idxpreview"></div>
+      </div>
+
+      <!-- 調査メモ -->
+      <div class="tabpanel" id="tab-report" role="tabpanel" hidden>
+        <p class="hint">ここまでに分かったことを、そのまま人に見せられる形にまとめます。<b>解析はこの画面の中だけで完結していて、データはどこにも送られません。</b>だから相談したいときは、この文章を自分でコピーして渡す必要があります。中身は位置・分類・根拠だけで、ファイルそのものは含みません。</p>
+        <div class="controls">
+          <button class="btn primary" id="repcopy">コピーする</button>
+          <button class="btn" id="repmake">作り直す</button>
+          <span class="pos" id="repnote"></span>
+        </div>
+        <textarea id="reptext" spellcheck="false" readonly
+                  style="min-height:420px;font-size:11.5px"></textarea>
       </div>
 
       <!-- 見つけた絵 -->

@@ -1669,12 +1669,13 @@ function showTab(name) {
     btn.setAttribute("aria-selected", String(btn.dataset.tab === name));
   }
   for (const key of ["hex", "strings", "pointers", "index", "gallery", "tiles",
-                     "relative", "format"]) {
+                     "relative", "format", "report"]) {
     $("tab-" + key).hidden = key !== name;
   }
   if (name === "tiles") renderTiles();
   else if (name === "gallery") renderGallery();
   else if (name === "index") refreshSourcePickers();
+  else if (name === "report") buildReport();
   else if (name === "format") renderFormat();
   else if (name === "hex") renderHex();
 }
@@ -2118,6 +2119,132 @@ $("reluse").addEventListener("click", () => {
   $("hexenc").value = "table";
   renderFormat();
   showTab("hex");
+});
+
+/* ---------- 調査メモ ----------
+ * 解析はブラウザの中だけで完結するので、結果を外に出す道がないと相談ができない。
+ * 位置・分類・根拠だけを文章にまとめる (ファイルの中身そのものは含めない)。
+ */
+function buildReport() {
+  const entry = state.current;
+  if (!entry) return;
+  const L = [];
+  const add = (line) => L.push(line);
+
+  add("# 構造探査台 調査メモ");
+  add("");
+  const total = state.files.reduce((sum, f) => sum + f.size, 0);
+  add(`読み込み: ${state.files.length} ファイル / 合計 ${fmtSize(total)}`);
+  if (state.iso) add(`ディスクイメージ: ISO9660 / ボリューム ${state.iso.volumeId || "(名前なし)"}`);
+  add("");
+
+  add("## ファイル一覧");
+  const listed = state.entries.filter((e) => e.kind !== "part").slice(0, 80);
+  for (const e of listed) {
+    const cls = e.cls ? CLASSES[e.cls].label : "未分類";
+    add(`- ${e.path}  ${fmtSize(e.size)}  [${cls}]`);
+  }
+  const parts = state.entries.filter((e) => e.kind === "part").length;
+  if (state.entries.length - parts > listed.length) {
+    add(`- ... 他 ${state.entries.length - parts - listed.length} 件`);
+  }
+  if (parts) add(`(索引で切り分けた断片が ${parts} 件あります)`);
+  add("");
+
+  add(`## いま見ているもの: ${entry.path}`);
+  add(`サイズ ${fmtSize(entry.size)} / 先頭の分類 ${entry.cls ? CLASSES[entry.cls].label : "—"}`);
+  if (state.truncated) add(`※ 大きいので解析は先頭 ${fmtSize(ANALYZE_CAP)} まで`);
+  add("");
+  add("先頭 64 バイト:");
+  add("  " + [...state.buf.subarray(0, 64)].map((v) => hex(v, 2)).join(" "));
+  const magic = ascii(state.buf.subarray(0, 8)).trim();
+  if (magic) add(`  先頭を ASCII で読むと "${magic}"`);
+  add("");
+
+  add("## ポインタ表の候補");
+  if (!state.pointers.length) {
+    add("なし");
+  } else {
+    /* 同じ形の表が繰り返しているなら、それは同じ形式のファイルが
+       その数だけ埋まっているということ。まとめたほうが情報になる */
+    const groups = new Map();
+    for (const t of state.pointers) {
+      const key = `${t.stride}:${t.count}:${t.first - t.base}:${t.confidence}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(t);
+    }
+    for (const [, g] of [...groups].slice(0, 10)) {
+      const t = g[0];
+      const where = g.length === 1 ? hx(t.off)
+        : `${hx(t.off)} ほか ${g.length - 1} か所 (${g.slice(1, 4).map((x) => hx(x.off)).join(", ")}${g.length > 4 ? ", ..." : ""})`;
+      add(`- ${where}  ${t.count} 件 / ${t.stride * 8} ビット / `
+        + `基準 ${t.baseKind === "rel" ? "表の直前" : "ファイル先頭"} / `
+        + `最初の行き先 ${hx(t.first)} (表の終わりとの差 ${t.gap} バイト) / `
+        + `確度 ${t.confidence}`
+        + (t.evidence.length ? ` (${t.evidence.join(", ")})` : ""));
+      if (g.length > 1) {
+        add(`  → 同じ形の表が ${g.length} 個。同じ形式のファイルがその数だけ埋まっている可能性`);
+      }
+    }
+  }
+  add("");
+
+  if (state.idxCands.length) {
+    add("## 索引ファイルの候補");
+    add(`${$("idxsrc").value} → ${$("idxdata").value}`);
+    for (const c of state.idxCands.slice(0, 6)) {
+      add(`- レコード ${c.rec} / ヘッダ ${c.skip} / 位置 +${c.field} `
+        + `(${c.mult === 1 ? "バイト" : "セクタ"}) / `
+        + `長さ ${c.size ? "+" + c.size.field + (c.size.mult === 2048 ? " セクタ" : " バイト") : "隣との差"}`
+        + ` / ${c.count} 件 / 被覆率 ${Math.round(c.coverage * 100)}%`);
+    }
+    add("");
+  }
+
+  add("## 絵らしい領域");
+  if (!state.tiles.length) {
+    add("なし");
+  } else {
+    for (const r of state.tiles.slice(0, 10)) {
+      add(`- ${hx(r.off)}  ${fmtSize(r.len)} / ${r.bpp}bpp ${r.tw}x${r.th} / `
+        + `縦の相関 ${r.ratio.toFixed(2)}`);
+    }
+  }
+  add("");
+
+  const jp = state.strings.filter((x) => x.kind !== "ascii");
+  const asc = state.strings.filter((x) => x.kind === "ascii");
+  add(`## 文字列 (日本語 ${jp.length} 件 / ASCII ${asc.length} 件)`);
+  for (const x of jp.slice(0, 20)) add(`- ${hx(x.off)}  ${x.text.slice(0, 50)}`);
+  if (!jp.length) {
+    add("日本語として読める並びなし → 独自文字コードの可能性");
+    for (const x of asc.slice(0, 10)) add(`- ${hx(x.off)}  [ASCII] ${x.text.slice(0, 50)}`);
+  }
+  add("");
+  add("---");
+  add("この画面で読み込んだデータは送信されていません。上の内容は位置と分類だけです。");
+
+  const text = L.join("\n");
+  $("reptext").value = text.length > 12000 ? text.slice(0, 12000) + "\n(以下省略)" : text;
+  $("repnote").textContent = `${$("reptext").value.length.toLocaleString("ja-JP")} 文字`;
+}
+
+$("repmake").addEventListener("click", buildReport);
+$("repcopy").addEventListener("click", async () => {
+  const box = $("reptext");
+  box.readOnly = false;
+  box.select();
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(box.value);
+    ok = true;
+  } catch (err) {
+    try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
+  }
+  box.readOnly = true;
+  $("repnote").textContent = ok
+    ? "コピーしました"
+    : "コピーできませんでした。枠の中を選んで手でコピーしてください";
 });
 
 /* ---------- 索引ファイル ---------- */
