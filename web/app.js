@@ -1063,6 +1063,219 @@ function indexEntries(idx, c, dataSize, limit) {
 }
 /* @extract-end index-analyzer */
 
+
+/* ======================= 診断 =======================
+ * 集めた手がかりから「このファイルはどう作られているか」を言葉にする。
+ * 学習用の道具なので、判定だけでなく **なぜそう言えるか** と
+ * **そこで覚えること** を必ず添える。断定できないときは断定しない。
+ */
+
+/** 32 ビット値の並びから、バイトの並び順を推定する */
+function guessEndian(b) {
+  let le = 0, be = 0, n = 0;
+  const limit = Math.min(b.length, 16384);
+  for (let p = 0; p + 4 <= limit; p += 4) {
+    const l = u32le(b, p), g = u32be(b, p);
+    if (l === 0) continue;
+    n++;
+    /* ポインタや件数は小さい値になる。小さく読めるほうが正しい並び */
+    if (l < 0x1000000) le++;
+    if (g < 0x1000000) be++;
+  }
+  if (n < 16) return null;
+  const ratio = (le + 1) / (be + 1);
+  if (ratio > 1.6) return { order: "le", label: "リトルエンディアン", le, be, n };
+  if (ratio < 0.62) return { order: "be", label: "ビッグエンディアン", le, be, n };
+  return { order: "?", label: "判別できず", le, be, n };
+}
+
+/** 地図の色を続きごとにまとめて、ファイルの骨組みにする */
+function layoutSegments(maxSegments) {
+  const m = state.map;
+  if (!m) return [];
+  const segs = [];
+  let start = 0;
+  for (let i = 1; i <= m.nBlocks; i++) {
+    if (i === m.nBlocks || m.cells[i] !== m.cells[start]) {
+      segs.push({
+        cls: m.cells[start],
+        off: start * m.blockSize,
+        len: (i - start) * m.blockSize,
+      });
+      start = i;
+    }
+  }
+  segs.sort((a, b) => b.len - a.len);
+  const keep = segs.slice(0, maxSegments || 8);
+  keep.sort((a, b) => a.off - b.off);
+  return keep;
+}
+
+function diagnose() {
+  const entry = state.current;
+  const b = state.buf;
+  const facts = [];
+  const next = [];
+  const magic = ascii(b.subarray(0, 4));
+  const jp = state.strings.filter((x) => x.kind !== "ascii");
+  const asc = state.strings.filter((x) => x.kind === "ascii");
+  const strongTables = state.pointers.filter((t) => t.confidence === "high");
+  const headTable = strongTables.find((t) => t.off <= 256);
+  const endian = guessEndian(b);
+
+  const say = (title, detail, why, learn) => facts.push({ title, detail, why, learn });
+
+  /* --- 何でできているか --- */
+  let verdict = "判別できませんでした";
+  let sub = "手がかりが足りません。下の「次にやること」を試してください。";
+
+  /* 順番が大事。バイトの統計 (分類) は文字列の件数より信用できる。
+     乱数や波形は Shift-JIS として偶然読めてしまう並びを大量に含むので、
+     文字列の件数だけで判定すると圧縮データをテキストと誤認する */
+  if (b[0] === 0x7F && magic.slice(1) === "ELF") {
+    verdict = "実行ファイル (ELF)";
+    sub = "ゲーム本体のプログラムです。文字列や伸張ルーチンがここに入っています。";
+    say("先頭が 7F 45 4C 46", '"\\x7FELF"',
+        "ELF はこの 4 バイトで始まると決まっています。",
+        "決まった目印 (マジックナンバー) を持つ形式は、先頭を見るだけで判別できます。目印は形式の名札です。");
+  } else if (entry.iso) {
+    verdict = "ディスクイメージ (ISO9660)";
+    sub = "中にファイルが入っています。一覧から個別に選んで調べてください。";
+    say("セクタ 16 に CD001", `ボリューム ${entry.iso.volumeId || "(名前なし)"}`,
+        "ISO9660 は先頭 32KB を空けて、その次にボリューム記述子を置きます。",
+        "入れ物 (コンテナ) と中身は別の層です。まず入れ物を開けてから中身の形式を考えます。");
+  } else if (headTable && jp.length >= 5) {
+    verdict = "ポインタ表つきのテキストデータ";
+    sub = "先頭に索引があり、そのあとに文章が並んでいます。翻訳や校正の対象になる形です。";
+  } else if (headTable && entry.cls === "tile") {
+    verdict = "独自の文字コードを使ったテキスト (推定)";
+    sub = "ポインタ表はあるのに Shift-JIS では読めません。独自の文字コードを使っている典型的な形です。";
+  } else if (headTable) {
+    verdict = "索引つきのアーカイブ";
+    sub = "先頭の表が中身の位置を指しています。切り分ければ個別のファイルになります。";
+  } else if (entry.cls === "high") {
+    verdict = "圧縮または暗号化されたデータ";
+    sub = "この道具では中身に届きません。伸張ルーチンを解くか、展開後のメモリを見る必要があります。";
+  } else if (entry.cls === "wave") {
+    verdict = "音声らしいデータ";
+    sub = "隣り合うバイトの差が小さく、波形の性質があります。";
+  } else if (entry.cls === "zero") {
+    verdict = "ほとんどがゼロ埋め";
+    sub = "詰め物か、未使用の領域です。";
+  } else if (entry.cls === "jp" || jp.length >= 20) {
+    verdict = "日本語テキストの塊";
+    sub = "Shift-JIS がそのまま入っています。索引は見つかりませんでした。";
+  } else if (entry.cls === "ascii") {
+    verdict = "ASCII のテキスト";
+    sub = "英数字だけの文章です。設定ファイルやスクリプトのことが多い形です。";
+    const head = ascii(b.subarray(0, 60)).replace(/\s+/g, " ").trim();
+    if (head) {
+      say("そのまま読める", head.slice(0, 48),
+          "表示できる文字が 85% 以上を占めています。",
+          "設定ファイルは中身がそのまま読めるので、まずここから当たると全体の構成が分かります。");
+    }
+  } else if (state.tiles.length && state.tiles[0].ratio < 0.7) {
+    verdict = "画像またはフォントのデータ";
+    sub = "縦に相関のある領域があります。タイルとして並べると絵になります。";
+  } else if (entry.cls === "tile") {
+    verdict = "独自の形式 (テキストか画像か判定できず)";
+    sub = "統計だけでは、独自文字コードのテキストと画像を区別できません。相対検索で確かめます。";
+  }
+
+  /* --- 根拠を並べる --- */
+  if (magic.trim() && /^[\x20-\x7E]{3,4}$/.test(magic)) {
+    say("先頭 4 バイトが読める文字", `"${magic}"`,
+        "自作の形式でも、先頭に短い名札を置くのが普通です。",
+        "この 4 文字で検索すれば、同じ形式のファイルが他にもあるか分かります。");
+  }
+
+  if (endian && endian.order !== "?") {
+    say(`${endian.label}`, `小さい値として読める数: LE ${endian.le} / BE ${endian.be}`,
+        "ポインタや件数は小さい値になるので、小さく読めるほうが正しい並びです。",
+        "PS2・PSP・PC はリトルエンディアン、ゲームキューブ・Wii・PS3 の一部はビッグエンディアンです。並びを間違えると数値がまったく別物になります。");
+  }
+
+  if (headTable) {
+    const aligned = [];
+    for (let i = 0; i < Math.min(headTable.count, 64); i++) {
+      const read = headTable.stride === 4 ? u32le : u16le;
+      aligned.push(headTable.base + read(b, headTable.off + i * headTable.stride));
+    }
+    const mult = [2048, 512, 16].find((m2) => aligned.every((v) => v % m2 === 0));
+    say(`${hx(headTable.off)} にポインタ表`,
+        `${headTable.count} 件 / ${headTable.stride * 8} ビット` + (mult ? ` / ${mult} バイト境界に揃っている` : ""),
+        headTable.evidence.join(" と ") + "、の 2 点が根拠です。",
+        "ポインタ表は「何番目の中身がどこから始まるか」の一覧です。長さを変えたらここを必ず作り直します。" +
+        (mult ? ` 位置が ${mult} の倍数に揃っているのは、読み込み単位に合わせているからです。` : ""));
+    next.push("「ポインタ表」タブでこの表を選び、切り分けてみる");
+  }
+
+  if (state.idxCands.length) {
+    const c = state.idxCands[0];
+    say("別ファイルの索引が使えそう",
+        `レコード ${c.rec} バイト / ${c.count} 件 / 位置は${c.mult === 2048 ? "セクタ" : "バイト"}単位 / 被覆率 ${Math.round(c.coverage * 100)}%`,
+        "位置が減らずに増え、本体をはみ出さず、ほぼ使い切っています。",
+        "索引と本体を分ける形は市販ゲームで最も多い作りです。位置がセクタ単位なのは、ディスクの読み込み単位に合わせるためです。");
+  }
+
+  const noisy = entry.cls === "high" || entry.cls === "wave";
+  if (jp.length >= 5 && noisy) {
+    say(`Shift-JIS として読める並びが ${jp.length} 件`,
+        "ただし偶然の一致とみられる",
+        `このファイルは「${CLASSES[entry.cls].label}」に分類されています。乱数に近いバイト列は、`
+        + "確率的に Shift-JIS として成立する組み合わせを必ず含みます。",
+        "文字列の件数だけで判定してはいけません。バイトの統計 (分類) のほうが信用できます。件数が多くても、内容が意味を成していなければテキストではありません。");
+  } else if (jp.length >= 5) {
+    say(`日本語が ${jp.length} 件`, jp.slice(0, 3).map((x) => x.text.slice(0, 18)).join(" / "),
+        "Shift-JIS として成立するバイト対が並んでいます。",
+        "そのまま読めるということは、ゲームが標準の文字コードを使っているということです。独自コードなら読めません。");
+    next.push("「文字列」タブで全体を眺め、ゲーム内で見た言葉があるか確かめる");
+  } else if (entry.cls === "tile") {
+    say("日本語として読めない", jp.length ? `${jp.length} 件だけ (偶然の一致とみられる)` : "0 件",
+        "統計上はテキストでもおかしくないのに、Shift-JIS では読めません。",
+        "独自の文字コードを使っている可能性があります。フォントの並び順がそのまま文字コードになっているので、相対検索で当てられます。");
+    next.push("「相対検索」タブで「ここは」など清音のかなを探す");
+    next.push("「見つけた絵」タブでフォントを探す (グリフの並び = 文字コードの順)");
+  }
+
+  if (state.tiles.length) {
+    const r = state.tiles[0];
+    say("絵らしい領域", `${hx(r.off)} から ${fmtSize(r.len)} / ${r.bpp}bpp ${r.tw}x${r.th}`,
+        `縦の相関が ${r.ratio.toFixed(2)} で、隣より ${r.tw} ドットぶん離れたバイトのほうが似ています。`,
+        "画像は縦に相関があります。1 行の長さだけ離れたバイトが似ているかどうかで、絵かどうかを見分けられます。");
+    next.push("「見つけた絵」タブで縮小図を見る");
+  }
+
+  const control = countControlRange(b);
+  if (control) {
+    say("制御コードらしいバイト範囲", control.label,
+        "文字として使われていない範囲に、特定の値だけが繰り返し現れます。",
+        "改行や色替えなどの指示は、文字コードが使っていないバイト値に割り当てます。だから未使用の範囲に固まって出ます。");
+  }
+
+  if (!facts.length) {
+    next.push("「16 進」タブで先頭を眺め、繰り返しの形が無いか探す");
+  }
+  if (entry.cls === "high") {
+    next.push("圧縮の可能性が高いので、PCSX2 などで動かして展開後のメモリを見るほうが早い");
+  }
+
+  return { verdict, sub, facts, next, layout: layoutSegments(8), endian };
+}
+
+/** 文字コードが使っていない範囲に集中しているバイト値を探す */
+function countControlRange(b) {
+  const hist = new Uint32Array(256);
+  const limit = Math.min(b.length, 262144);
+  for (let i = 0; i < limit; i++) hist[b[i]]++;
+  const hot = [];
+  for (let v = 0xF0; v <= 0xFF; v++) {
+    if (hist[v] > limit / 2000) hot.push(v);
+  }
+  if (hot.length < 2 || hot.length > 12) return null;
+  return { label: hot.map((v) => "0x" + hex(v, 2)).join(" ") + " が繰り返し現れる", hot };
+}
+
 /* ======================= 6. 状態 ======================= */
 
 const state = {
@@ -1144,14 +1357,18 @@ async function openFiles(files) {
   state.iso = null;
 
   for (const file of list) {
-    const iso = list.length === 1 ? await readIso(file) : null;
+    /* どのファイルもディスクイメージかどうかを試す。読むのは 2KB だけなので安い */
+    const iso = await readIso(file);
     if (iso) {
-      state.iso = iso;
+      state.iso = state.iso || iso;
+      const base = list.length === 1 ? "" : "/" + file.name;
       state.entries.push({
-        path: "(イメージ全体)", name: file.name, file,
-        offset: 0, size: file.size, kind: "image",
+        path: list.length === 1 ? "(イメージ全体)" : base, name: file.name, file,
+        offset: 0, size: file.size, kind: "image", iso,
       });
-      for (const e of iso.entries) state.entries.push(Object.assign({}, e, { file }));
+      for (const e of iso.entries) {
+        state.entries.push(Object.assign({}, e, { file, path: base + e.path }));
+      }
     } else {
       const rel = file.webkitRelativePath || file.name;
       state.entries.push({
@@ -1624,6 +1841,7 @@ async function selectEntry(entry) {
   renderPointers();
   renderTiles();
   renderFormat();
+  renderDiagnosis();
   updateReadout();
 }
 
@@ -1668,11 +1886,12 @@ function showTab(name) {
   for (const btn of $("tabs").querySelectorAll("button")) {
     btn.setAttribute("aria-selected", String(btn.dataset.tab === name));
   }
-  for (const key of ["hex", "strings", "pointers", "index", "gallery", "tiles",
+  for (const key of ["diag", "hex", "strings", "pointers", "index", "gallery", "tiles",
                      "relative", "format", "report"]) {
     $("tab-" + key).hidden = key !== name;
   }
-  if (name === "tiles") renderTiles();
+  if (name === "diag") renderDiagnosis();
+  else if (name === "tiles") renderTiles();
   else if (name === "gallery") renderGallery();
   else if (name === "index") refreshSourcePickers();
   else if (name === "report") buildReport();
@@ -2120,6 +2339,111 @@ $("reluse").addEventListener("click", () => {
   renderFormat();
   showTab("hex");
 });
+
+/* ---------- 診断の表示 ---------- */
+function renderDiagnosis() {
+  const box = $("diagbox");
+  if (!box || !state.current) return;
+  box.textContent = "";
+  const d = diagnose();
+
+  const head = document.createElement("div");
+  head.className = "verdict";
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "eyebrow";
+  eyebrow.textContent = state.current.path;
+  const h2 = document.createElement("h2");
+  h2.append(document.createTextNode("これは "));
+  const mk = document.createElement("mark");
+  mk.textContent = d.verdict;
+  h2.append(mk, document.createTextNode(" です"));
+  const sub = document.createElement("p");
+  sub.textContent = d.sub;
+  head.append(eyebrow, h2, sub);
+  box.append(head);
+
+  /* ファイルの骨組みを帯で描く */
+  if (d.layout.length > 1) {
+    const wrap = document.createElement("div");
+    wrap.className = "bandwrap";
+    const label = document.createElement("span");
+    label.className = "eyebrow";
+    label.textContent = "ファイルの骨組み";
+    const band = document.createElement("div");
+    band.className = "band";
+    const total = d.layout.reduce((a, c2) => a + c2.len, 0) || 1;
+    for (const seg of d.layout) {
+      const el = document.createElement("span");
+      el.style.flex = String(seg.len / total);
+      el.style.background = cssColor(CLASSES[seg.cls].css);
+      el.title = `${hx(seg.off)}  ${fmtSize(seg.len)}  ${CLASSES[seg.cls].label}`;
+      /* 狭い区画にラベルを出すと隣と重なるので、幅がある区画だけに付ける */
+      const share = seg.len / total;
+      if (share >= 0.12) el.dataset.label = `${hx(seg.off)} ${CLASSES[seg.cls].label}`;
+      else if (share >= 0.05) el.dataset.label = hx(seg.off);
+      band.append(el);
+    }
+    wrap.append(label, band);
+    box.append(wrap);
+  }
+
+  /* 根拠と、そこで覚えること */
+  const facts = document.createElement("div");
+  facts.className = "facts";
+  if (!d.facts.length) {
+    const p2 = document.createElement("p");
+    p2.className = "hint";
+    p2.textContent = "決め手になる手がかりが見つかりませんでした。";
+    facts.append(p2);
+  }
+  for (const f of d.facts) {
+    const el = document.createElement("div");
+    el.className = "fact";
+    const left = document.createElement("div");
+    const h4 = document.createElement("h4");
+    h4.textContent = f.title;
+    const val = document.createElement("div");
+    val.className = "val";
+    val.textContent = f.detail;
+    left.append(h4, val);
+    const why = document.createElement("p");
+    why.className = "why";
+    why.textContent = f.why;
+    el.append(left, why);
+    if (f.learn) {
+      const det = document.createElement("details");
+      const sm = document.createElement("summary");
+      sm.textContent = "ここで覚えること";
+      const p3 = document.createElement("p");
+      p3.textContent = f.learn;
+      det.append(sm, p3);
+      el.append(det);
+    }
+    facts.append(el);
+  }
+  const factLabel = document.createElement("span");
+  factLabel.className = "eyebrow";
+  factLabel.textContent = `そう判断した根拠 (${d.facts.length})`;
+  box.append(factLabel, facts);
+
+  if (d.next.length) {
+    const nl = document.createElement("span");
+    nl.className = "eyebrow";
+    nl.textContent = "次にやること";
+    const list = document.createElement("div");
+    list.className = "nextlist";
+    d.next.forEach((t, i) => {
+      const row = document.createElement("div");
+      const b2 = document.createElement("b");
+      b2.textContent = String(i + 1).padStart(2, "0");
+      const sp = document.createElement("span");
+      sp.textContent = t;
+      row.append(b2, sp);
+      list.append(row);
+    });
+    box.append(nl, list);
+  }
+}
 
 /* ---------- 調査メモ ----------
  * 解析はブラウザの中だけで完結するので、結果を外に出す道がないと相談ができない。
@@ -2609,5 +2933,5 @@ function renderScrp(b) {
 
 /* ======================= 起動 ======================= */
 renderLegend();
-showTab("hex");
+showTab("diag");
 startHero();

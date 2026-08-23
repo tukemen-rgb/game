@@ -128,7 +128,8 @@
 
     <div class="panel">
       <div class="tabs" role="tablist" id="tabs">
-        <button role="tab" data-tab="hex" aria-selected="true">16 進</button>
+        <button role="tab" data-tab="diag" aria-selected="true">診断</button>
+        <button role="tab" data-tab="hex" aria-selected="false">16 進</button>
         <button role="tab" data-tab="strings" aria-selected="false">文字列</button>
         <button role="tab" data-tab="pointers" aria-selected="false">ポインタ表</button>
         <button role="tab" data-tab="index" aria-selected="false">索引ファイル</button>
@@ -139,8 +140,13 @@
         <button role="tab" data-tab="report" aria-selected="false">調査メモ</button>
       </div>
 
+      <!-- 診断 -->
+      <div class="tabpanel" id="tab-diag" role="tabpanel">
+        <div id="diagbox"></div>
+      </div>
+
       <!-- 16 進 -->
-      <div class="tabpanel" id="tab-hex" role="tabpanel">
+      <div class="tabpanel" id="tab-hex" role="tabpanel" hidden>
         <div class="controls">
           <div class="field">
             <label for="hexoff">位置 (16 進)</label>
