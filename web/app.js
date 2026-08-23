@@ -1777,6 +1777,8 @@ const state = {
   idxCands: [],     /* 索引の解釈の候補 */
   idxPick: -1,
   elf: null,        /* ELF として読めた場合のヘッダ */
+  elfBase: 0,       /* ファイル内で ELF が始まる位置 (先頭とは限らない) */
+  elfBuf: null,     /* そこから先の切り出し。逆アセンブルはこれを見る */
   disAddr: null,    /* 逆アセンブルを表示している仮想アドレス */
   disHist: [],      /* 飛んできた履歴 (戻る用) */
   marks: [],        /* マップに重ねる印 (見つけた構造の位置) */
@@ -2312,6 +2314,8 @@ async function selectEntry(entry) {
   $("hexoff").value = hex(state.hexOff);
 
   state.elf = null;
+  state.elfBase = 0;
+  state.elfBuf = null;
   state.disAddr = null;
   state.disHist = [];
   $("disback").hidden = true;
@@ -3030,7 +3034,7 @@ function buildReport() {
     for (const s of elf.segments.filter((x) => x.type === 1)) {
       add(`- PT_LOAD  ファイル ${hx(s.offset)} → メモリ 0x${hex(s.vaddr, 8)}  ${fmtSize(s.filesz)}`);
     }
-    const refs = scanStringRefs(state.buf, elf, 40);
+    const refs = scanStringRefs(state.elfBuf, elf, 40);
     if (refs.length) {
       add(`コードが指している文字列 (先頭 ${refs.length} 件):`);
       for (const r of refs) {
@@ -3323,13 +3327,41 @@ const PT_NAMES = { 1: "PT_LOAD (読み込む)", 2: "PT_DYNAMIC", 3: "PT_INTERP",
 const bootLike = (name) =>
   /^S[A-Z]{3}_\d{3}\.\d{2}$/i.test(name) || /\.(elf|irx)$/i.test(name);
 
+/**
+ * ファイルの中から ELF の目印 (7F 45 4C 46) を探す。
+ *
+ * 先頭にあるとは限りません。詰め物やヘッダが前に付いていたり、別の入れ物の中に
+ * 埋まっていたりします。4 バイト境界だけを見れば十分です (命令が 4 バイト固定長
+ * なので、実行ファイルは必ずそこに置かれます)。
+ */
+function findElfStarts(b, limit) {
+  const out = [];
+  const end = Math.min(b.length, 64 * 1024 * 1024) - 8;
+  for (let i = 0; i <= end; i += 4) {
+    if (b[i] === 0x7F && b[i + 1] === 0x45 && b[i + 2] === 0x4C && b[i + 3] === 0x46
+        && b[i + 4] === 1 && b[i + 5] === 1) {
+      out.push(i);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
 function renderDisasm() {
   const box = $("elfbox");
   if (!box || !state.current) return;
   box.textContent = "";
   $("disxrefbox").textContent = "";
-  const elf = readElf(state.buf);
+
+  /* 先頭が ELF ならそこ、駄目なら中を探す。見つかった位置から先を対象にする */
+  let base = state.elfBase || 0;
+  let buf = base ? state.buf.subarray(base) : state.buf;
+  let elf = readElf(buf);
+  if (!elf && base) { base = 0; buf = state.buf; elf = readElf(buf); }
   state.elf = elf;
+  state.elfBase = elf ? base : 0;
+  state.elfBuf = elf ? buf : null;
+
   $("discontrols").hidden = !elf;
   $("diswrap").hidden = !elf;
   $("dishelp").hidden = !elf;
@@ -3338,12 +3370,54 @@ function renderDisasm() {
     const p = document.createElement("p");
     p.className = "hint";
     p.textContent = state.buf[0] === 0x7F && ascii(state.buf.subarray(1, 4)) === "ELF"
-      ? "ELF ですが 32 ビット・リトルエンディアンではありません。PS2 の本体プログラムは"
-        + "必ず ELF32 / リトルエンディアンなので、これは別物です。"
-      : "このファイルは ELF ではありません。逆アセンブルできるのは本体プログラムだけです。"
+      ? "先頭は ELF ですが、32 ビット・リトルエンディアンではありません"
+        + " (5 バイト目が 1 / 6 バイト目が 1 になっていない)。PS2 の本体プログラムは"
+        + "必ず ELF32 / リトルエンディアンです。"
+      : "このファイルの先頭は ELF ではありません。逆アセンブルできるのは本体プログラムだけです。"
         + "ルートの SYSTEM.CNF に書かれている BOOT2 の行が、その名前を教えてくれます"
         + " (cdrom0:\\SLPS_123.45;1 のような形)。";
     box.append(p);
+
+    /* 何が入っているのかを出す。ここを見れば原因が言える */
+    const dl = document.createElement("dl");
+    dl.className = "kv";
+    const head = [...state.buf.subarray(0, 16)].map((v) => hex(v, 2)).join(" ");
+    for (const [k, v] of [
+      ["いま見ているもの", `${state.current.path}  (${fmtSize(state.current.size)})`],
+      ["先頭 16 バイト", head || "(空)"],
+      ["ASCII で読むと", `"${ascii(state.buf.subarray(0, 16))}"`],
+      ["ELF なら", "7F 45 4C 46 01 01 ... で始まります"],
+    ]) {
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = v;
+      dl.append(dt, dd);
+    }
+    box.append(dl);
+
+    /* 途中に埋まっている場合。実物では詰め物やヘッダが前に付くことがある */
+    const found = findElfStarts(state.buf, 6).filter((off) => off > 0);
+    if (found.length) {
+      const label = document.createElement("span");
+      label.className = "eyebrow";
+      label.textContent = "このファイルの途中に ELF が埋まっています";
+      const row = document.createElement("div");
+      row.className = "controls";
+      for (const off of found) {
+        const btn = document.createElement("button");
+        btn.className = "btn seal";
+        btn.textContent = `${hx(off)} から読む`;
+        btn.addEventListener("click", () => {
+          state.elfBase = off;
+          state.disAddr = null;
+          state.disHist = [];
+          renderDisasm();
+        });
+        row.append(btn);
+      }
+      box.append(label, row);
+    }
 
     const cands = state.entries.filter((e) => e !== state.current && bootLike(e.name));
     if (cands.length) {
@@ -3378,6 +3452,9 @@ function renderDisasm() {
     ["読み込み区画", `${elf.segments.length} 個`],
     ["セクション", elf.sections.length ? `${elf.sections.length} 個` : "無し (製品版は削られていることが多い)"],
   ];
+  if (state.elfBase) {
+    rows.unshift(["ELF の始まり", `${hx(state.elfBase)}  ← ファイルの先頭ではなく、ここから ELF`]);
+  }
   for (const [k, v] of rows) {
     const dt = document.createElement("dt");
     dt.textContent = k;
@@ -3467,7 +3544,7 @@ function drawDisasm() {
   const view = $("disview");
   view.textContent = "";
   const count = parseInt($("discount").value, 10) || 256;
-  const lines = disassemble(state.buf, elf, state.disAddr >>> 0, count);
+  const lines = disassemble(state.elfBuf, elf, state.disAddr >>> 0, count);
   if (!lines.length) {
     $("disnote").textContent = "そのアドレスはこのファイルの中に入っていません。";
     return;
@@ -3537,10 +3614,11 @@ function gotoVaddr(vaddr) {
   $("disaddr").value = "0x" + hex(state.disAddr, 8);
   $("disback").hidden = state.disHist.length === 0;
   drawDisasm();
-  /* ファイル内の位置も合わせておくと、16 進タブでそのまま続きが見られる */
+  /* ファイル内の位置も合わせておくと、16 進タブでそのまま続きが見られる。
+     ELF が途中から始まっている場合はその分を足す */
   const off = vaddrToOffset(state.elf, state.disAddr);
   if (off >= 0) {
-    state.hexOff = off;
+    state.hexOff = off + (state.elfBase || 0);
     $("hexoff").value = hex(off);
     renderHex();
   }
@@ -3597,7 +3675,7 @@ function renderXrefs() {
   const box = $("disxrefbox");
   box.textContent = "";
   if (!state.elf) return;
-  const hits = scanStringRefs(state.buf, state.elf, 4000);
+  const hits = scanStringRefs(state.elfBuf, state.elf, 4000);
   const label = document.createElement("span");
   label.className = "eyebrow";
   label.textContent = `文字列を指している場所  ${hits.length} 件`;
