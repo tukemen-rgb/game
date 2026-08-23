@@ -44,7 +44,9 @@ python3 tools/proofread.py exercises/qa_target.tsv
 python3 tools/make_viewer.py && open work/viewer.html   # Windows は start、Linux は xdg-open
 
 # 8. 構造が分からないファイルを推定する (構造探査台)
-python3 tools/make_iso.py && open web/index.html
+python3 tools/make_iso.py       # 練習用のディスクイメージ
+python3 tools/make_archive.py   # 練習用の「索引 + 本体」の組
+open web/index.html
 
 # 9. 直したテキストをデータに入れ直す (ポインタは自動で振り直される)
 python3 tools/insert_text.py work/SCRIPT.tsv -o work/SCRIPT_new.BIN \
@@ -70,6 +72,7 @@ python3 tests/run_tests.py
 | Excel の目視チェック | `tools/proofread.py` | 校正チェックの機械化 |
 | 実機・開発ビルドでの表示確認 | `tools/make_viewer.py` | 画面での見え方を再現して照合する |
 | ImgBurn + 手作業の当たり探し | `web/` (構造探査台) | ディスクイメージを開いて構造を推定する |
+| 専用アンパッカーを探す/書く | `web/` の「索引ファイル」タブ | 索引の形を総当たりで当てて中身を取り出す |
 
 ## 覚えるのはこの 3 つ + 1
 

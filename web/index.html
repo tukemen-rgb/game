@@ -31,16 +31,18 @@
       <div class="dropzone" id="dropzone">
         <div class="dz-main">
           <strong>ファイルをここにドロップ</strong>
-          <span class="hintline">.iso / .bin / 単体のデータファイル</span>
+          <span class="hintline">.iso / 吸い出したフォルダ / 複数ファイルまとめて</span>
         </div>
         <div class="row">
           <button class="btn primary" id="pick">ファイルを選ぶ</button>
+          <button class="btn" id="pickdir">フォルダごと読む</button>
           <button class="btn seal" id="sample" hidden>練習用のイメージを読む</button>
         </div>
         <p class="privacy" id="privacy">
           解析はブラウザの中だけで完結します。送信も保存もしません
         </p>
-        <input type="file" id="fileinput" hidden>
+        <input type="file" id="fileinput" multiple hidden>
+        <input type="file" id="dirinput" webkitdirectory directory multiple hidden>
       </div>
     </div>
   </div>
@@ -129,6 +131,7 @@
         <button role="tab" data-tab="hex" aria-selected="true">16 進</button>
         <button role="tab" data-tab="strings" aria-selected="false">文字列</button>
         <button role="tab" data-tab="pointers" aria-selected="false">ポインタ表</button>
+        <button role="tab" data-tab="index" aria-selected="false">索引ファイル</button>
         <button role="tab" data-tab="gallery" aria-selected="false">見つけた絵</button>
         <button role="tab" data-tab="tiles" aria-selected="false">タイル</button>
         <button role="tab" data-tab="relative" aria-selected="false">相対検索</button>
@@ -208,6 +211,30 @@
           </table>
         </div>
         <div id="ptrdetail"></div>
+      </div>
+
+      <!-- 索引ファイル -->
+      <div class="tabpanel" id="tab-index" role="tabpanel" hidden>
+        <p class="hint">市販ゲームで最も多いのが<b>「索引ファイル + データ本体」の組</b>です (<code>NAME.IDX</code> と <code>NAME.IMG</code> のような対)。レコード長・位置の列・長さの列・単位 (バイトかセクタか) を総当たりして、<b>位置が減らずに増える</b>・<b>本体をはみ出さない</b>・<b>本体をだいたい使い切っている</b>の三つで採点します。</p>
+        <div class="controls">
+          <div class="field">
+            <label for="idxsrc">索引ファイル</label>
+            <select id="idxsrc"></select>
+          </div>
+          <div class="field">
+            <label for="idxdata">データ本体</label>
+            <select id="idxdata"></select>
+          </div>
+          <button class="btn primary" id="idxrun">解析する</button>
+          <span class="pos" id="idxnote"></span>
+        </div>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>レコード長</th><th>先頭を飛ばす</th><th>位置の列</th><th>単位</th><th>長さの列</th><th>件数</th><th>被覆率</th></tr></thead>
+            <tbody id="idxbody"></tbody>
+          </table>
+        </div>
+        <div id="idxpreview"></div>
       </div>
 
       <!-- 見つけた絵 -->

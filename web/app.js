@@ -911,7 +911,7 @@ async function fullScan(entry, patterns, onProgress) {
   const seen = new Set();
   for (let pos = 0; pos < entry.size; pos += CHUNK) {
     const len = Math.min(CHUNK + OVERLAP, entry.size - pos);
-    const buf = await readRange(state.file, entry.offset + pos, len);
+    const buf = await readRange(entry.file, entry.offset + pos, len);
     scanPatterns(buf, patterns, pos, hits, seen);
     if (onProgress) onProgress(Math.min(entry.size, pos + CHUNK), entry.size, hits.length);
     if (hits.length > 4000) break;
@@ -921,10 +921,152 @@ async function fullScan(entry, patterns, onProgress) {
   return hits;
 }
 
+
+/* ======================= 別ファイルの索引 =======================
+ * PS2 の市販ゲームで最も多いアーカイブの形は「索引ファイル + データ本体」の組
+ * です (BOKU2.IDX と BOKU2.IMG のような対)。索引の中身はゲームごとに違いますが、
+ * 実際に使われている形はそれほど多くありません。
+ *
+ *   ・レコード長は 4/8/12/16/20/24/32 バイトのどれか
+ *   ・その中の u32 のどれかが位置、別の u32 が長さ
+ *   ・位置はバイト単位のこともあれば、セクタ (2048 バイト) 単位のこともある
+ *   ・先頭に件数などの小さなヘッダが付くことがある
+ *
+ * この組み合わせを総当たりして、「位置が減らずに増える」「本体の大きさを
+ * はみ出さない」「本体をだいたい使い切っている」の 3 つで採点します。
+ */
+
+/* @extract-start index-analyzer */
+const IDX_SKIPS = [0, 4, 8, 12, 16, 32];
+const IDX_RECS = [4, 8, 12, 16, 20, 24, 32];
+const IDX_MULTS = [1, 2048];
+
+function analyzeIndex(idx, dataSize) {
+  const cands = [];
+  for (const skip of IDX_SKIPS) {
+    for (const rec of IDX_RECS) {
+      const count = Math.floor((idx.length - skip) / rec);
+      if (count < 8 || count > 500000) continue;
+      const probe = Math.min(count, 1024);
+      for (let field = 0; field + 4 <= rec; field += 4) {
+        for (const mult of IDX_MULTS) {
+          let ok = true, prev = -1, flat = 0;
+          for (let i = 0; i < probe; i++) {
+            const v = u32le(idx, skip + i * rec + field) * mult;
+            if (v < prev || v > dataSize) { ok = false; break; }
+            if (v === prev) flat++;
+            prev = v;
+          }
+          if (!ok || prev <= 0 || flat > probe * 0.5) continue;
+          const lastVal = u32le(idx, skip + (count - 1) * rec + field) * mult;
+          if (lastVal > dataSize || lastVal <= 0) continue;
+          const coverage = lastVal / dataSize;
+          if (coverage < 0.2) continue;
+          cands.push({ skip, rec, field, mult, count, coverage });
+        }
+      }
+    }
+  }
+  /* 被覆率だけでは、ずれた読み方でも同じ点になってしまう。長さの列まで見て
+     採点し直す ── 長さが 1〜2 バイトばかりの読み方はここで落ちる */
+  cands.sort((a, b) => b.coverage - a.coverage);
+  const pool = cands.slice(0, 60);
+  for (const c of pool) {
+    c.size = findSizeField(idx, c, dataSize);
+    c.score = scoreCandidate(idx, c, dataSize);
+  }
+  /* 同点なら、位置が +0 の素直な表記を選ぶ (同じ読み方の言い換えになるため) */
+  pool.sort((a, b) => b.score - a.score || a.field - b.field || a.rec - b.rec);
+  return pool.slice(0, 12);
+}
+
+/**
+ * 候補の確からしさ。手がかりは 3 つ。
+ *   ・本体をだいたい使い切っているか (被覆率)
+ *   ・1 件目が先頭から始まっているか (アーカイブはほぼそう)
+ *   ・長さの合計が範囲を埋めているか、1 件あたりの長さが現実的か
+ */
+function scoreCandidate(idx, c, dataSize) {
+  const n = Math.min(c.count, 512);
+  const offs = [], sizes = [];
+  for (let i = 0; i < n; i++) {
+    offs.push(u32le(idx, c.skip + i * c.rec + c.field) * c.mult);
+    if (c.size) sizes.push(u32le(idx, c.skip + i * c.rec + c.size.field) * c.size.mult);
+  }
+  let score = c.coverage;
+  if (offs[0] === 0) score += 0.35;
+  else if (offs[0] < 2048) score += 0.1;
+
+  if (!c.size) return score - 0.15;
+
+  const span = offs[n - 1] + sizes[n - 1] - offs[0];
+  const sum = sizes.reduce((a, b) => a + b, 0);
+  const fill = span > 0 ? sum / span : 0;
+  const sorted = [...sizes].sort((a, b) => a - b);
+  const median = sorted[sorted.length >> 1] || 0;
+  if (median >= 16) score += 0.3;
+  if (fill > 0.5 && fill <= 1.05) score += 0.5 * fill;
+  else score -= 0.3;
+  return score;
+}
+
+/** 位置の列が決まったあと、長さが入っていそうな列を探す */
+function findSizeField(idx, c, dataSize) {
+  const probe = Math.min(c.count - 1, 512);
+  if (probe < 4) return null;
+  let best = null;
+  for (let field = 0; field + 4 <= c.rec; field += 4) {
+    if (field === c.field) continue;
+    for (const mult of IDX_MULTS) {
+      let fit = 0, checked = 0, positive = 0;
+      const lens = [];
+      for (let i = 0; i < probe; i++) {
+        const at = u32le(idx, c.skip + i * c.rec + c.field) * c.mult;
+        const next = u32le(idx, c.skip + (i + 1) * c.rec + c.field) * c.mult;
+        const len = u32le(idx, c.skip + i * c.rec + field) * mult;
+        if (len > 0) positive++;
+        lens.push(len);
+        checked++;
+        if (len > 0 && at + len <= next + c.mult) fit++;
+      }
+      const ratio = checked ? fit / checked : 0;
+      if (positive < checked * 0.8) continue;
+      /* 長さが 1〜2 バイトばかりの列は、たまたま条件を満たしているだけ */
+      lens.sort((x, y) => x - y);
+      const median = lens[lens.length >> 1] || 0;
+      const quality = ratio + (median >= 16 ? 0.5 : 0);
+      if (ratio > 0.9 && (!best || quality > best.quality)) {
+        best = { field, mult, ratio, median, quality };
+      }
+    }
+  }
+  return best;
+}
+
+function indexEntries(idx, c, dataSize, limit) {
+  const out = [];
+  const n = Math.min(c.count, limit || c.count);
+  for (let i = 0; i < n; i++) {
+    const at = u32le(idx, c.skip + i * c.rec + c.field) * c.mult;
+    let len;
+    if (c.size) {
+      len = u32le(idx, c.skip + i * c.rec + c.size.field) * c.size.mult;
+    } else {
+      const next = i + 1 < c.count
+        ? u32le(idx, c.skip + (i + 1) * c.rec + c.field) * c.mult : dataSize;
+      len = Math.max(0, next - at);
+    }
+    if (at >= dataSize) continue;
+    out.push({ i, at, len: Math.min(len, dataSize - at) });
+  }
+  return out;
+}
+/* @extract-end index-analyzer */
+
 /* ======================= 6. 状態 ======================= */
 
 const state = {
-  file: null,
+  files: [],
   iso: null,
   entries: [],
   current: null,
@@ -939,6 +1081,9 @@ const state = {
   hexOff: 0,
   tab: "hex",
   tiles: [],        /* 自動検出した絵の領域 */
+  idxBuf: null,     /* 読み込んだ索引ファイルの中身 */
+  idxCands: [],     /* 索引の解釈の候補 */
+  idxPick: -1,
   marks: [],        /* マップに重ねる印 (見つけた構造の位置) */
   lit: -1,          /* 強調中の印 */
   showMarks: true,
@@ -954,11 +1099,13 @@ const fileinput = $("fileinput");
 ["dragleave", "drop"].forEach((ev) =>
   document.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("hot"); }));
 document.addEventListener("drop", (e) => {
-  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (f) openFile(f);
+  const files = e.dataTransfer && e.dataTransfer.files;
+  if (files && files.length) openFiles(files);
 });
 $("pick").addEventListener("click", () => fileinput.click());
-fileinput.addEventListener("change", () => { if (fileinput.files[0]) openFile(fileinput.files[0]); });
+$("pickdir").addEventListener("click", () => $("dirinput").click());
+$("dirinput").addEventListener("change", () => openFiles($("dirinput").files));
+fileinput.addEventListener("change", () => openFiles(fileinput.files));
 $("reopen").addEventListener("click", () => {
   $("shell").hidden = true;
   $("intake").hidden = false;
@@ -976,50 +1123,76 @@ if (typeof window.SAMPLE_ISO === "string" && window.SAMPLE_ISO.length) {
     const raw = atob(window.SAMPLE_ISO);
     const bytes = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-    openFile(new File([bytes], window.SAMPLE_ISO_NAME || "SAMPLE.iso"));
+    openFiles([new File([bytes], window.SAMPLE_ISO_NAME || "SAMPLE.iso")]);
   });
 }
 
-async function openFile(file) {
-  state.file = file;
-  state.iso = await readIso(file);
+/**
+ * 受け取ったファイル群を 1 つの一覧にまとめる。
+ *
+ * ディスクイメージなら中のファイルを展開し、すでに展開済みのフォルダなら
+ * そのまま並べます。実物のゲームは「イメージから吸い出した一式」を
+ * フォルダごと渡されることが多いので、まとめて受け取れる必要があります。
+ */
+async function openFiles(files) {
+  const list = Array.from(files).filter((f) => f.size > 0);
+  if (!list.length) return;
+  list.sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
+
+  state.files = list;
   state.entries = [];
-  if (state.iso) {
-    state.entries.push({
-      path: "(イメージ全体)", name: file.name, offset: 0, size: file.size, kind: "image",
-    });
-    state.entries.push(...state.iso.entries);
-  } else {
-    state.entries.push({ path: file.name, name: file.name, offset: 0, size: file.size, kind: "file" });
+  state.iso = null;
+
+  for (const file of list) {
+    const iso = list.length === 1 ? await readIso(file) : null;
+    if (iso) {
+      state.iso = iso;
+      state.entries.push({
+        path: "(イメージ全体)", name: file.name, file,
+        offset: 0, size: file.size, kind: "image",
+      });
+      for (const e of iso.entries) state.entries.push(Object.assign({}, e, { file }));
+    } else {
+      const rel = file.webkitRelativePath || file.name;
+      state.entries.push({
+        path: rel.startsWith("/") ? rel : "/" + rel,
+        name: file.name, file, offset: 0, size: file.size, kind: "file",
+      });
+    }
   }
 
   $("intake").hidden = true;
   $("shell").hidden = false;
+  $("readout").hidden = false;
+
   const loaded = $("loaded");
   loaded.hidden = false;
   loaded.textContent = "";
-  const info = [
-    [file.name, "ファイル"],
-    [fmtSize(file.size), "サイズ"],
-    [state.iso ? "ISO9660" : "単体", "形式"],
-  ];
-  if (state.iso) info.push([state.iso.volumeId || "(名前なし)", "ボリューム"]);
-  for (const [value, label] of info) {
+  const total = list.reduce((sum, f) => sum + f.size, 0);
+  const label = list.length === 1 ? list[0].name : `${list.length} ファイル`;
+  const info = [[label, list.length === 1 ? "ファイル" : "読み込み"], [fmtSize(total), "合計"]];
+  if (state.iso) {
+    info.push(["ISO9660", "形式"], [state.iso.volumeId || "(名前なし)", "ボリューム"]);
+  } else {
+    info.push([String(state.entries.length), "エントリ"]);
+  }
+  for (const [value, sub] of info) {
     const el = document.createElement("span");
     const b = document.createElement("b");
     b.textContent = value;
     const i = document.createElement("i");
-    i.textContent = label;
+    i.textContent = sub;
     el.append(b, i);
     loaded.append(el);
   }
-  $("readout").hidden = false;
-  $("ro-file").textContent = file.name;
+  $("ro-file").textContent = label;
 
   renderTree();
-  /* まずイメージ全体の地図を見せる。単体ファイルならそのファイル */
-  await selectEntry(state.entries[0]);
+  /* いちばん大きいファイルから見せる。たいていそこに中身が入っている */
+  const biggest = state.entries.reduce((a, c) => (c.size > a.size ? c : a), state.entries[0]);
+  await selectEntry(state.iso ? state.entries[0] : biggest);
   await classifyEntries();
+  refreshSourcePickers();
 }
 
 /* ======================= 8. ファイル一覧と検出結果 ======================= */
@@ -1070,7 +1243,7 @@ function renderTree() {
 async function classifyEntries() {
   const targets = state.entries.filter((e) => e.kind !== "image" && !e.cls).slice(0, 300);
   for (const entry of targets) {
-    const head = await readRange(state.file, entry.offset, Math.min(entry.size, 4096));
+    const head = await readRange(entry.file, entry.offset, Math.min(entry.size, 4096));
     entry.cls = classifyStats(blockStats(head));
   }
   if (targets.length) renderTree();
@@ -1205,7 +1378,7 @@ async function buildMap(entry) {
     for (let i = 0; i < nBlocks; i += BATCH) {
       const jobs = [];
       for (let j = i; j < Math.min(nBlocks, i + BATCH); j++) {
-        jobs.push(readRange(state.file, entry.offset + j * blockSize, sampleLen));
+        jobs.push(readRange(entry.file, entry.offset + j * blockSize, sampleLen));
       }
       const got = await Promise.all(jobs);
       got.forEach((bytes, k) => { cells[i + k] = classifyStats(blockStats(bytes)); });
@@ -1414,7 +1587,7 @@ async function selectEntry(entry) {
   state.hexOff = 0;
   const readLen = Math.min(entry.size, ANALYZE_CAP);
   state.truncated = entry.size > ANALYZE_CAP;
-  state.buf = await readRange(state.file, entry.offset, readLen);
+  state.buf = await readRange(entry.file, entry.offset, readLen);
 
   $("capnote").textContent = state.truncated
     ? `このファイルは大きいので、詳しい解析は先頭 ${fmtSize(ANALYZE_CAP)} までに限っています。`
@@ -1495,11 +1668,13 @@ function showTab(name) {
   for (const btn of $("tabs").querySelectorAll("button")) {
     btn.setAttribute("aria-selected", String(btn.dataset.tab === name));
   }
-  for (const key of ["hex", "strings", "pointers", "gallery", "tiles", "relative", "format"]) {
+  for (const key of ["hex", "strings", "pointers", "index", "gallery", "tiles",
+                     "relative", "format"]) {
     $("tab-" + key).hidden = key !== name;
   }
   if (name === "tiles") renderTiles();
   else if (name === "gallery") renderGallery();
+  else if (name === "index") refreshSourcePickers();
   else if (name === "format") renderFormat();
   else if (name === "hex") renderHex();
 }
@@ -1757,7 +1932,7 @@ async function splitByTable(t) {
     if (end <= start || end > limit) end = limit;
     const name = "#" + String(i).padStart(4, "0");
     kids.push({
-      path: prefix + name, name,
+      path: prefix + name, name, file: parent.file,
       offset: parent.offset + start, size: end - start,
       kind: "part", parentPath: parent.path,
     });
@@ -1944,6 +2119,164 @@ $("reluse").addEventListener("click", () => {
   renderFormat();
   showTab("hex");
 });
+
+/* ---------- 索引ファイル ---------- */
+function selectableEntries() {
+  return state.entries.filter((e) => e.kind !== "part" && e.size > 0);
+}
+
+function refreshSourcePickers() {
+  const list = selectableEntries();
+  const fill = (el, prefer) => {
+    const keep = el.value;
+    el.textContent = "";
+    for (const e of list) {
+      const op = document.createElement("option");
+      op.value = e.path;
+      op.textContent = `${e.path}  (${fmtSize(e.size)})`;
+      el.append(op);
+    }
+    if (keep && list.some((e) => e.path === keep)) el.value = keep;
+    else if (prefer) el.value = prefer.path;
+  };
+  /* 索引は「拡張子が IDX / TBL」か小さめのファイル、本体はいちばん大きいファイル */
+  const byIdx = list.find((e) => /\.(idx|tbl|toc|hd)$/i.test(e.name));
+  const biggest = list.reduce((a, c) => (c.size > a.size ? c : a), list[0]);
+  fill($("idxsrc"), byIdx || state.current);
+  fill($("idxdata"), biggest);
+}
+
+$("idxrun").addEventListener("click", async () => {
+  const list = selectableEntries();
+  const idxEntry = list.find((e) => e.path === $("idxsrc").value);
+  const dataEntry = list.find((e) => e.path === $("idxdata").value);
+  const note = $("idxnote");
+  if (!idxEntry || !dataEntry) { note.textContent = "ファイルを選んでください"; return; }
+  if (idxEntry === dataEntry) {
+    note.textContent = "索引と本体が同じファイルです。同じファイル内の索引なら「ポインタ表」タブを使ってください。";
+    return;
+  }
+  note.textContent = "解析中…";
+  state.idxBuf = await readRange(idxEntry.file, idxEntry.offset,
+                                 Math.min(idxEntry.size, 32 * 1024 * 1024));
+  state.idxCands = analyzeIndex(state.idxBuf, dataEntry.size);
+  state.idxPick = -1;
+  note.textContent = state.idxCands.length
+    ? `${idxEntry.name} → ${dataEntry.name} · 候補 ${state.idxCands.length} 件`
+    : `${idxEntry.name} からは索引らしい並びが見つかりませんでした`;
+  renderIndexCands(dataEntry);
+});
+
+function renderIndexCands(dataEntry) {
+  const body = $("idxbody");
+  body.textContent = "";
+  $("idxpreview").textContent = "";
+  if (!state.idxCands.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 7;
+    td.textContent = "候補なし。索引が別の形か、圧縮されているかもしれません。";
+    tr.append(td);
+    body.append(tr);
+    return;
+  }
+  state.idxCands.forEach((c, i) => {
+    const tr = document.createElement("tr");
+    const cells = [
+      `${c.rec} バイト`, c.skip ? `${c.skip} バイト` : "なし",
+      `+${c.field}`, c.mult === 1 ? "バイト" : "セクタ (2048)",
+      c.size ? `+${c.size.field}${c.size.mult === 2048 ? " (セクタ)" : ""}` : "隣との差",
+      String(c.count), `${Math.round(c.coverage * 100)}%`,
+    ];
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.append(td);
+    }
+    tr.addEventListener("click", () => { state.idxPick = i; previewIndex(dataEntry); });
+    body.append(tr);
+  });
+  state.idxPick = 0;
+  previewIndex(dataEntry);
+}
+
+async function previewIndex(dataEntry) {
+  const rows = $("idxbody").querySelectorAll("tr");
+  rows.forEach((el, i) => el.toggleAttribute("aria-current", i === state.idxPick));
+  const c = state.idxCands[state.idxPick];
+  const box = $("idxpreview");
+  box.textContent = "";
+  if (!c) return;
+
+  const items = indexEntries(state.idxBuf, c, dataEntry.size, 24);
+  const head = document.createElement("p");
+  head.className = "hint";
+  head.textContent = "先頭 24 件の中身を実際に読んで確かめています。"
+    + "内容がそれらしければ、この解釈で合っています。";
+  box.append(head);
+
+  const wrap = document.createElement("div");
+  wrap.className = "tablewrap";
+  const table = document.createElement("table");
+  table.innerHTML = "<thead><tr><th>番号</th><th>位置</th><th>長さ</th>"
+    + "<th>先頭のバイト</th><th>見当</th></tr></thead>";
+  const tb = document.createElement("tbody");
+  for (const it of items) {
+    const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, Math.min(64, it.len || 64));
+    const magic = ascii(bytes.subarray(0, 4)).trim();
+    const st = blockStats(bytes);
+    const kind = st ? CLASSES[classifyStats(st)].label : "—";
+    const tr = document.createElement("tr");
+    const cells = [
+      String(it.i), hx(it.at), fmtSize(it.len),
+      [...bytes.subarray(0, 8)].map((v) => hex(v, 2)).join(" ") + (magic ? `  "${magic}"` : ""),
+      kind,
+    ];
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.append(td);
+    }
+    tb.append(tr);
+  }
+  table.append(tb);
+  wrap.append(table);
+  box.append(wrap);
+
+  const actions = document.createElement("div");
+  actions.className = "controls";
+  const go = document.createElement("button");
+  go.className = "btn primary";
+  go.textContent = `この解釈で ${c.count} 個に切り分ける`;
+  go.addEventListener("click", () => splitByIndex(dataEntry, c));
+  actions.append(go);
+  box.append(actions);
+}
+
+function splitByIndex(dataEntry, c) {
+  const items = indexEntries(state.idxBuf, c, dataEntry.size, 4096);
+  const prefix = dataEntry.path + "/";
+  state.entries = state.entries.filter((e) => e.kind !== "part" || e.parentPath !== dataEntry.path);
+  const kids = items.filter((it) => it.len > 0).map((it) => {
+    const name = "#" + String(it.i).padStart(4, "0");
+    return {
+      path: prefix + name, name, file: dataEntry.file,
+      offset: dataEntry.offset + it.at, size: it.len,
+      kind: "part", parentPath: dataEntry.path,
+    };
+  });
+  if (!kids.length) return;
+  const at = state.entries.indexOf(dataEntry);
+  state.entries.splice(at + 1, 0, ...kids);
+  renderTree();
+  selectEntry(kids[0]).then(() => {
+    $("capnote").textContent =
+      `${dataEntry.name} を索引に従って ${kids.length} 個に切り分けました`
+      + (items.length > kids.length ? ` (長さ 0 の ${items.length - kids.length} 件は除外)` : "")
+      + "。";
+    classifyEntries();
+  });
+}
 
 /* ---------- 署名 ---------- */
 function renderSignatures(hits, label) {

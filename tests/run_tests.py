@@ -528,5 +528,56 @@ class TestWebBuild(unittest.TestCase):
             self.assertEqual(bad, [], f"app.js:{lineno} に生の制御文字があります")
 
 
+class TestArchiveFixture(unittest.TestCase):
+    """索引ファイル + データ本体の練習用ペアが正しく作られること."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.idx = os.path.join(REPO, "work", "PACK.IDX")
+        cls.img = os.path.join(REPO, "work", "PACK.IMG")
+        if not (os.path.exists(cls.idx) and os.path.exists(cls.img)):
+            raise unittest.SkipTest("work/PACK.IDX がありません (make_archive.py を実行)")
+
+    def test_index_matches_the_body(self):
+        import struct
+
+        with open(self.idx, "rb") as fh:
+            idx = fh.read()
+        size = os.path.getsize(self.img)
+        count, _ = struct.unpack_from("<II", idx, 0)
+        self.assertEqual(len(idx), 8 + count * 16)
+        with open(self.img, "rb") as fh:
+            body = fh.read()
+        prev_end = 0
+        for i in range(count):
+            lba, length, _kind, _hash = struct.unpack_from("<IIII", idx, 8 + i * 16)
+            at = lba * 2048
+            self.assertGreaterEqual(at, prev_end, f"#{i} の位置が前と重なっています")
+            self.assertLessEqual(at + length, size, f"#{i} が本体をはみ出しています")
+            prev_end = at + length
+        # 1 件目は SCRP のはず
+        first_lba, first_len = struct.unpack_from("<II", idx, 8)
+        self.assertEqual(body[first_lba * 2048:first_lba * 2048 + 4], b"SCRP")
+        self.assertEqual(first_len, os.path.getsize(os.path.join(REPO, "work", "SCRIPT.BIN")))
+
+
+class TestIndexAnalyzer(unittest.TestCase):
+    """ブラウザ側の索引推定を Node で動かして回帰を止める."""
+
+    def test_analyzer_finds_the_true_layout(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        script = os.path.join(REPO, "tests", "test_index.mjs")
+        if not os.path.exists(os.path.join(REPO, "work", "PACK.IDX")):
+            self.skipTest("work/PACK.IDX がありません")
+        res = subprocess.run([node, script], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK", res.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
