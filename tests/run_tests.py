@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -574,6 +575,102 @@ class TestIndexAnalyzer(unittest.TestCase):
         script = os.path.join(REPO, "tests", "test_index.mjs")
         if not os.path.exists(os.path.join(REPO, "work", "PACK.IDX")):
             self.skipTest("work/PACK.IDX がありません")
+        res = subprocess.run([node, script], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK", res.stdout)
+
+
+class TestDisassembler(unittest.TestCase):
+    """MIPS の逆アセンブラを capstone の答えと突き合わせる.
+
+    自分で書いた逆アセンブラの正しさは、自分では確かめられません。
+    答えは tests/mips_cases.json に固めてあります (作り直すときは
+    tests/gen_mips_cases.py)。
+    """
+
+    # capstone は MIPS32 として読むので、R5900 独自のオペコードは食い違って正しい
+    R5900_ONLY = {0x1E, 0x1F, 0x36, 0x3E}
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        import elfdump
+
+        cls.elfdump = elfdump
+        path = os.path.join(REPO, "tests", "mips_cases.json")
+        if not os.path.exists(path):
+            raise unittest.SkipTest("tests/mips_cases.json がありません")
+        with open(path, encoding="utf-8") as fh:
+            cls.golden = json.load(fh)
+
+    def test_mnemonics_match_capstone(self):
+        wrong = []
+        matched = 0
+        for word, want in self.golden["cases"]:
+            mn, _ops = self.elfdump.decode(word, self.golden["addr"])
+            if mn == want:
+                matched += 1
+            elif (word >> 26) in self.R5900_ONLY:
+                pass                      # R5900 独自。食い違って正しい
+            elif mn == ".word":
+                pass                      # 知らない命令。嘘をつくよりましな態度
+            else:
+                wrong.append(f"0x{word:08X} capstone={want} こちら={mn}")
+        self.assertFalse(wrong, "capstone と食い違う命令:\n  " + "\n  ".join(wrong[:20]))
+        self.assertGreater(matched, len(self.golden["cases"]) * 0.8,
+                           f"一致が {matched} 件しかありません")
+
+    def test_reads_the_practice_boot_elf(self):
+        path = os.path.join(REPO, "work", "BOOT.ELF")
+        if not os.path.exists(path):
+            self.skipTest("work/BOOT.ELF がありません (python3 tools/make_elf.py)")
+        with open(path, "rb") as fh:
+            elf = self.elfdump.Elf(fh.read())
+        self.assertEqual(elf.machine, 8)
+        self.assertEqual(elf.entry, 0x00100000)
+        self.assertEqual(elf.to_offset(0x00100000), 0x1000)
+        self.assertEqual(elf.to_offset(0), -1)
+
+        # lui + addiu の組から、参照されている 4 本の文字列が復元できること
+        hits = self.elfdump.xrefs(elf)
+        texts = sorted(t for _f, _t, t in hits)
+        self.assertEqual(texts, sorted([
+            "cdrom0:\\BOKU2.IMG;1",
+            "cdrom0:\\BOKU2.IDX;1",
+            "index open failed\n",
+            "read error at sector %d\n",
+        ]), "参照されている文字列の顔ぶれが違います")
+
+        # 参照されていない文字列を参照済みと言わないこと
+        self.assertNotIn("MAP/NATSU00.PAK", texts)
+
+    def test_disassembles_the_entry_point(self):
+        path = os.path.join(REPO, "work", "BOOT.ELF")
+        if not os.path.exists(path):
+            self.skipTest("work/BOOT.ELF がありません")
+        with open(path, "rb") as fh:
+            elf = self.elfdump.Elf(fh.read())
+        lines = self.elfdump.disasm(elf, elf.entry, 16)
+        self.assertEqual(len(lines), 16)
+        self.assertEqual(lines[0][2], "addiu")
+        notes = [n for *_rest, n in lines if n]
+        self.assertTrue(any("BOKU2.IDX" in n for n in notes),
+                        f"文字列の注記が出ていません: {notes}")
+
+
+class TestDisassemblerInBrowser(unittest.TestCase):
+    """ブラウザ側の逆アセンブラも同じ答えと突き合わせる."""
+
+    def test_browser_decoder_matches(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        script = os.path.join(REPO, "tests", "test_disasm.mjs")
+        if not os.path.exists(os.path.join(REPO, "work", "BOOT.ELF")):
+            self.skipTest("work/BOOT.ELF がありません")
         res = subprocess.run([node, script], capture_output=True, text=True, cwd=REPO)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("OK", res.stdout)

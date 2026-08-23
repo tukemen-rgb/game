@@ -460,6 +460,23 @@ textarea {
 .hexview .b.mark { color: var(--seal); font-weight: 600; }
 .hexview .txt { color: var(--cls-jp); }
 
+/* ---------- 逆アセンブル ---------- */
+.hexview.dis { max-height: 62vh; overflow-y: auto; }
+.disrow { display: flex; align-items: baseline; gap: 12px; }
+.disrow:hover { background: var(--plate-2); }
+.disrow .off { flex: none; width: 8ch; }
+.disrow .b { flex: none; width: 8ch; }
+.disrow .mn { flex: none; color: var(--ink); font-weight: 600; }
+.disrow .mn.bad { color: var(--ink-3); font-weight: 400; }
+.disrow .op { color: var(--ink-2); white-space: pre; }
+.disrow .to { color: var(--cls-jp); }
+.disrow .slot { color: var(--ink-3); opacity: .7; }
+.jmp {
+  font: inherit; background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--seal); border-bottom: 1px solid var(--seal-soft);
+}
+.jmp:hover { border-bottom-color: var(--seal); }
+
 /* ---------- 表 ---------- */
 .tablewrap { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 12px; }

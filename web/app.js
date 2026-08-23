@@ -1222,6 +1222,19 @@ function diagnose() {
     say("先頭が 7F 45 4C 46", '"\\x7FELF"',
         "ELF はこの 4 バイトで始まると決まっています。",
         "決まった目印 (マジックナンバー) を持つ形式は、先頭を見るだけで判別できます。目印は形式の名札です。");
+    const elf = readElf(b);
+    if (elf) {
+      const load = elf.segments.filter((s) => s.type === 1);
+      say("入口と載せ先", `entry 0x${hex(elf.entry, 8)} · 読み込み区画 ${load.length} 個`
+          + (load.length ? ` (0x${hex(load[0].vaddr, 8)} から ${fmtSize(load[0].memsz)})` : ""),
+          "ELF は「ファイルのこの部分を、メモリのこの番地に載せて、ここから実行しろ」"
+          + "という指示書です。命令は 4 バイト固定長の MIPS。",
+          "ファイル内の位置とメモリ上の番地は違います。コードが指すアドレスをファイルに"
+          + "戻すには、この対応表を通す必要があります。");
+      next.push("「逆アセンブル」タブで入口から命令を読む");
+      next.push("「逆アセンブル」タブの「文字列を使っている場所を全部探す」で、"
+              + "ファイル名やメッセージをどの関数が使っているか調べる");
+    }
   } else if (entry.iso) {
     verdict = "ディスクイメージ (ISO9660)";
     sub = "中にファイルが入っています。一覧から個別に選んで調べてください。";
@@ -1398,6 +1411,350 @@ function countControlRange(b) {
   return { label: hot.map((v) => "0x" + hex(v, 2)).join(" ") + " が繰り返し現れる", hot };
 }
 
+
+/* ======================= ELF と MIPS の逆アセンブル =======================
+ * PS2 の本体プログラム (SCPS_xxx.xx など) は ELF32 / MIPS / リトルエンディアン。
+ * 命令は必ず 4 バイト固定長なので、逆アセンブルは表引きで書けます。
+ *
+ * ここまでの道具は「データがどこにあるか」を見るものでした。これは
+ * 「そのデータをどう読んでいるか」を見るためのものです。伸張ルーチンや
+ * 文字列の読み込み位置は、最終的にコードを読まないと分かりません。
+ */
+
+/* @extract-start mips */
+const MIPS_REGS = [
+  "$zero", "$at", "$v0", "$v1", "$a0", "$a1", "$a2", "$a3",
+  "$t0", "$t1", "$t2", "$t3", "$t4", "$t5", "$t6", "$t7",
+  "$s0", "$s1", "$s2", "$s3", "$s4", "$s5", "$s6", "$s7",
+  "$t8", "$t9", "$k0", "$k1", "$gp", "$sp", "$fp", "$ra",
+];
+
+const MIPS_SPECIAL = {
+  0x00: "sll", 0x02: "srl", 0x03: "sra", 0x04: "sllv", 0x06: "srlv", 0x07: "srav",
+  0x08: "jr", 0x09: "jalr", 0x0A: "movz", 0x0B: "movn", 0x0C: "syscall",
+  0x0D: "break", 0x0F: "sync",
+  0x10: "mfhi", 0x11: "mthi", 0x12: "mflo", 0x13: "mtlo",
+  0x14: "dsllv", 0x16: "dsrlv", 0x17: "dsrav",
+  0x18: "mult", 0x19: "multu", 0x1A: "div", 0x1B: "divu",
+  0x1C: "dmult", 0x1D: "dmultu", 0x1E: "ddiv", 0x1F: "ddivu",
+  0x20: "add", 0x21: "addu", 0x22: "sub", 0x23: "subu",
+  0x24: "and", 0x25: "or", 0x26: "xor", 0x27: "nor",
+  0x28: "mfsa", 0x29: "mtsa",
+  0x2A: "slt", 0x2B: "sltu", 0x2C: "dadd", 0x2D: "daddu", 0x2E: "dsub", 0x2F: "dsubu",
+  /* 例外を出す比較。コンパイラがゼロ除算の検査に必ず入れてくる */
+  0x30: "tge", 0x31: "tgeu", 0x32: "tlt", 0x33: "tltu", 0x34: "teq", 0x36: "tne",
+  0x38: "dsll", 0x3A: "dsrl", 0x3B: "dsra", 0x3C: "dsll32", 0x3E: "dsrl32", 0x3F: "dsra32",
+};
+const MIPS_OPS = {
+  0x02: "j", 0x03: "jal", 0x04: "beq", 0x05: "bne", 0x06: "blez", 0x07: "bgtz",
+  0x08: "addi", 0x09: "addiu", 0x0A: "slti", 0x0B: "sltiu",
+  0x0C: "andi", 0x0D: "ori", 0x0E: "xori", 0x0F: "lui",
+  0x14: "beql", 0x15: "bnel", 0x16: "blezl", 0x17: "bgtzl",
+  0x18: "daddi", 0x19: "daddiu", 0x1A: "ldl", 0x1B: "ldr",
+  0x1E: "lq", 0x1F: "sq",                 /* R5900 の 128 ビット転送 */
+  0x20: "lb", 0x21: "lh", 0x22: "lwl", 0x23: "lw", 0x24: "lbu", 0x25: "lhu",
+  0x26: "lwr", 0x27: "lwu",
+  0x28: "sb", 0x29: "sh", 0x2A: "swl", 0x2B: "sw", 0x2C: "sdl", 0x2D: "sdr",
+  0x2E: "swr", 0x2F: "cache",
+  0x30: "ll", 0x31: "lwc1", 0x32: "lwc2", 0x33: "pref", 0x34: "lld", 0x35: "ldc1",
+  0x36: "lqc2", 0x37: "ld",
+  0x38: "sc", 0x39: "swc1", 0x3A: "swc2", 0x3C: "scd", 0x3D: "sdc1",
+  0x3E: "sqc2", 0x3F: "sd",
+};
+const MIPS_REGIMM = {
+  0x00: "bltz", 0x01: "bgez", 0x02: "bltzl", 0x03: "bgezl",
+  0x08: "tgei", 0x09: "tgeiu", 0x0A: "tlti", 0x0B: "tltiu", 0x0C: "teqi", 0x0E: "tnei",
+  0x10: "bltzal", 0x11: "bgezal", 0x12: "bltzall", 0x13: "bgezall",
+};
+/** メモリを読み書きする命令 (rt, offset(base) の形) */
+const MIPS_MEM = new Set([0x1A, 0x1B, 0x1E, 0x1F,
+                          0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                          0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
+                          0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+                          0x38, 0x39, 0x3A, 0x3C, 0x3D, 0x3E, 0x3F]);
+/** SPECIAL のうち、例外を出す比較 (rs, rt の 2 つだけを取る) */
+const MIPS_TRAP = new Set([0x30, 0x31, 0x32, 0x33, 0x34, 0x36]);
+/** REGIMM のうち、即値と比べて例外を出すもの */
+const MIPS_TRAPI = new Set([0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0E]);
+
+/* R5900 の MMI (マルチメディア命令)。ここでは掛け算まわりの定番だけ。
+   PS2 のコンパイラは 64 ビットの掛け算にこれを使う */
+const MIPS_MMI = {
+  0x00: "madd", 0x01: "maddu", 0x04: "plzcw",
+  0x10: "mfhi1", 0x11: "mthi1", 0x12: "mflo1", 0x13: "mtlo1",
+  0x18: "mult1", 0x19: "multu1", 0x1A: "div1", 0x1B: "divu1",
+  0x20: "madd1", 0x21: "maddu1",
+};
+
+/* 補助プロセッサとの受け渡し。rs の値が動作を選ぶ */
+const COP_MOVE = { 0: "mfc", 2: "cfc", 4: "mtc", 6: "ctc" };
+/* 浮動小数の演算 (fmt = single / word)。ゲームの計算はほぼここを通る */
+const FPU_FMT = { 16: "s", 17: "d", 20: "w", 21: "l" };
+const FPU_OPS = {
+  0x00: "add", 0x01: "sub", 0x02: "mul", 0x03: "div",
+  0x04: "sqrt", 0x05: "abs", 0x06: "mov", 0x07: "neg",
+};
+const FPU_1SRC = new Set([0x04, 0x05, 0x06, 0x07]);
+const FPU_CVT = { 0x0C: "round.w", 0x0D: "trunc.w", 0x0E: "ceil.w", 0x0F: "floor.w",
+                  0x20: "cvt.s", 0x21: "cvt.d", 0x24: "cvt.w" };
+const FPU_COND = ["f", "un", "eq", "ueq", "olt", "ult", "ole", "ule",
+                  "sf", "ngle", "seq", "ngl", "lt", "nge", "le", "ngt"];
+
+const sx16 = (v) => (v & 0x8000) ? v - 0x10000 : v;
+const imm = (v) => (v < 0 ? "-0x" + hex(-v) : (v < 10 ? String(v) : "0x" + hex(v)));
+
+/**
+ * 32 ビットの命令語を 1 つ読む。
+ * 命令が固定長なので、opcode で表を引いてフィールドを切り出すだけです。
+ */
+function decodeMips(word, addr) {
+  const op = word >>> 26;
+  const rs = (word >>> 21) & 31, rt = (word >>> 16) & 31, rd = (word >>> 11) & 31;
+  const sa = (word >>> 6) & 31, funct = word & 63;
+  const R = MIPS_REGS;
+  const off = sx16(word & 0xFFFF);
+  const target = ((addr + 4) & 0xF0000000) | ((word & 0x3FFFFFF) << 2);
+  const branch = (addr + 4 + off * 4) >>> 0;
+
+  if (word === 0) return { mn: "nop", ops: "", kind: "nop" };
+
+  if (op === 0) {
+    const mn = MIPS_SPECIAL[funct];
+    if (!mn) return { mn: ".word", ops: "0x" + hex(word, 8), kind: "bad" };
+    if (funct === 0x08) return { mn: "jr", ops: R[rs], kind: "jr" };
+    if (funct === 0x09) return { mn: "jalr", ops: rd === 31 ? R[rs] : `${R[rd]}, ${R[rs]}`, kind: "call" };
+    if (funct === 0x0C || funct === 0x0D) return { mn, ops: "0x" + hex((word >>> 6) & 0xFFFFF), kind: "trap" };
+    if (funct === 0x0F) return { mn, ops: "", kind: "" };
+    if (MIPS_TRAP.has(funct)) return { mn, ops: `${R[rs]}, ${R[rt]}`, kind: "trap" };
+    if (funct === 0x28) return { mn, ops: R[rd], kind: "" };          /* mfsa */
+    if (funct === 0x29) return { mn, ops: R[rs], kind: "" };          /* mtsa */
+    if (funct === 0x10 || funct === 0x12) return { mn, ops: R[rd], kind: "" };
+    if (funct === 0x11 || funct === 0x13) return { mn, ops: R[rs], kind: "" };
+    if ([0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F].includes(funct)) {
+      return { mn, ops: `${R[rs]}, ${R[rt]}`, kind: "" };
+    }
+    if ([0x00, 0x02, 0x03, 0x38, 0x3A, 0x3B, 0x3C, 0x3E, 0x3F].includes(funct)) {
+      return { mn, ops: `${R[rd]}, ${R[rt]}, ${sa}`, kind: "" };
+    }
+    if ([0x04, 0x06, 0x07, 0x14, 0x16, 0x17].includes(funct)) {
+      return { mn, ops: `${R[rd]}, ${R[rt]}, ${R[rs]}`, kind: "" };
+    }
+    /* addu rd, rs, $zero は move と書くのが慣例 */
+    if ((funct === 0x21 || funct === 0x25) && rt === 0) {
+      return { mn: "move", ops: `${R[rd]}, ${R[rs]}`, kind: "" };
+    }
+    return { mn, ops: `${R[rd]}, ${R[rs]}, ${R[rt]}`, kind: "" };
+  }
+
+  if (op === 1) {
+    const mn = MIPS_REGIMM[rt];
+    if (!mn) return { mn: ".word", ops: "0x" + hex(word, 8), kind: "bad" };
+    if (MIPS_TRAPI.has(rt)) {
+      return { mn, ops: `${R[rs]}, 0x${hex(word & 0xFFFF)}`, kind: "trap" };
+    }
+    return { mn, ops: `${R[rs]}, 0x${hex(branch, 8)}`, kind: "branch", target: branch };
+  }
+
+  /* R5900 の MMI。掛け算の下位/上位を別のレジスタ対で扱う命令群 */
+  if (op === 0x1C) {
+    const mn = MIPS_MMI[funct];
+    if (!mn) return { mn: ".word", ops: "0x" + hex(word, 8), kind: "bad" };
+    if (funct === 0x10 || funct === 0x12) return { mn, ops: R[rd], kind: "" };
+    if (funct === 0x11 || funct === 0x13) return { mn, ops: R[rs], kind: "" };
+    if (funct === 0x04) return { mn, ops: `${R[rd]}, ${R[rs]}`, kind: "" };
+    if (funct === 0x18 || funct === 0x19 || funct === 0x1A || funct === 0x1B) {
+      return { mn, ops: `${R[rs]}, ${R[rt]}`, kind: "" };
+    }
+    return { mn, ops: `${R[rd]}, ${R[rs]}, ${R[rt]}`, kind: "" };
+  }
+
+  /* 補助プロセッサ (COP0 = システム制御 / COP1 = 浮動小数 / COP2 = VU0) */
+  if (op === 0x10 || op === 0x11 || op === 0x12) {
+    const n = op - 0x10;
+    if (COP_MOVE[rs] !== undefined) {
+      const dst = n === 1 ? `$f${rd}` : `$${rd}`;
+      return { mn: COP_MOVE[rs] + n, ops: `${R[rt]}, ${dst}`, kind: "cop", reg: rt };
+    }
+    if (rs === 8) {                       /* 条件フラグでの分岐 */
+      const mn = `bc${n}${(rt & 1) ? "t" : "f"}${(rt & 2) ? "l" : ""}`;
+      return { mn, ops: `0x${hex(branch, 8)}`, kind: "branch", target: branch };
+    }
+    if (op === 0x11 && FPU_FMT[rs]) {     /* 浮動小数の演算 */
+      const fmt = FPU_FMT[rs];
+      const fd = sa, fs = rd, ft = rt;
+      if (FPU_OPS[funct]) {
+        const m = `${FPU_OPS[funct]}.${fmt}`;
+        return FPU_1SRC.has(funct)
+          ? { mn: m, ops: `$f${fd}, $f${fs}`, kind: "" }
+          : { mn: m, ops: `$f${fd}, $f${fs}, $f${ft}`, kind: "" };
+      }
+      if (FPU_CVT[funct]) {
+        return { mn: `${FPU_CVT[funct]}.${fmt}`, ops: `$f${fd}, $f${fs}`, kind: "" };
+      }
+      if (funct >= 0x30) {
+        return { mn: `c.${FPU_COND[funct & 15]}.${fmt}`, ops: `$f${fs}, $f${ft}`, kind: "" };
+      }
+    }
+    return { mn: ".word", ops: "0x" + hex(word, 8), kind: "bad" };
+  }
+
+  const mn = MIPS_OPS[op];
+  if (!mn) return { mn: ".word", ops: "0x" + hex(word, 8), kind: "bad" };
+
+  if (op === 0x02 || op === 0x03) {
+    return { mn, ops: "0x" + hex(target >>> 0, 8), kind: op === 3 ? "call" : "jump", target: target >>> 0 };
+  }
+  if (op === 0x04 || op === 0x05 || op === 0x14 || op === 0x15) {
+    /* beq rs, $zero は beqz、beq $zero, $zero は無条件分岐 b と書くのが慣例 */
+    if (rt === 0 && op === 0x04) {
+      return { mn: rs === 0 ? "b" : "beqz",
+               ops: rs === 0 ? `0x${hex(branch, 8)}` : `${R[rs]}, 0x${hex(branch, 8)}`,
+               kind: "branch", target: branch };
+    }
+    if (rt === 0 && op === 0x05) {
+      return { mn: "bnez", ops: `${R[rs]}, 0x${hex(branch, 8)}`, kind: "branch", target: branch };
+    }
+    return { mn, ops: `${R[rs]}, ${R[rt]}, 0x${hex(branch, 8)}`, kind: "branch", target: branch };
+  }
+  if (op === 0x06 || op === 0x07 || op === 0x16 || op === 0x17) {
+    return { mn, ops: `${R[rs]}, 0x${hex(branch, 8)}`, kind: "branch", target: branch };
+  }
+  if (op === 0x0F) return { mn, ops: `${R[rt]}, 0x${hex(word & 0xFFFF)}`, kind: "lui", hi: word & 0xFFFF, reg: rt };
+  if (MIPS_MEM.has(op)) {
+    return { mn, ops: `${R[rt]}, ${imm(off)}(${R[rs]})`, kind: "mem", base: rs, off };
+  }
+  if (op === 0x0C || op === 0x0D || op === 0x0E) {
+    return { mn, ops: `${R[rt]}, ${R[rs]}, 0x${hex(word & 0xFFFF)}`, kind: "logic",
+             lo: word & 0xFFFF, reg: rt, src: rs };
+  }
+  return { mn, ops: `${R[rt]}, ${R[rs]}, ${imm(off)}`, kind: "arith", lo: off, reg: rt, src: rs };
+}
+
+/* ---------- ELF32 ---------- */
+
+function readElf(b) {
+  if (!(b[0] === 0x7F && b[1] === 0x45 && b[2] === 0x4C && b[3] === 0x46)) return null;
+  if (b[4] !== 1 || b[5] !== 1) return null;          /* 32 ビット / リトルエンディアン */
+  const u16 = (p) => b[p] | (b[p + 1] << 8);
+  const elf = {
+    type: u16(16), machine: u16(18), entry: u32le(b, 24),
+    phoff: u32le(b, 28), shoff: u32le(b, 32), flags: u32le(b, 36),
+    phentsize: u16(42), phnum: u16(44), shentsize: u16(46), shnum: u16(48), shstrndx: u16(50),
+    segments: [], sections: [],
+  };
+  for (let i = 0; i < elf.phnum && elf.phoff; i++) {
+    const p = elf.phoff + i * elf.phentsize;
+    if (p + 32 > b.length) break;
+    elf.segments.push({
+      type: u32le(b, p), offset: u32le(b, p + 4), vaddr: u32le(b, p + 8),
+      filesz: u32le(b, p + 16), memsz: u32le(b, p + 20), flags: u32le(b, p + 24),
+    });
+  }
+  for (let i = 0; i < elf.shnum && elf.shoff; i++) {
+    const p = elf.shoff + i * elf.shentsize;
+    if (p + 40 > b.length) break;
+    elf.sections.push({
+      nameOff: u32le(b, p), type: u32le(b, p + 4), flags: u32le(b, p + 8),
+      addr: u32le(b, p + 12), offset: u32le(b, p + 16), size: u32le(b, p + 20),
+    });
+  }
+  const strTab = elf.sections[elf.shstrndx];
+  if (strTab) {
+    for (const sec of elf.sections) {
+      let n = "", p = strTab.offset + sec.nameOff;
+      while (p < b.length && b[p]) { n += String.fromCharCode(b[p]); p++; }
+      sec.name = n;
+    }
+  }
+  return elf;
+}
+
+/** 仮想アドレス → ファイル内の位置 */
+function vaddrToOffset(elf, vaddr) {
+  for (const s of elf.segments) {
+    if (s.type === 1 && vaddr >= s.vaddr && vaddr < s.vaddr + s.filesz) {
+      return s.offset + (vaddr - s.vaddr);
+    }
+  }
+  for (const s of elf.sections) {
+    if (s.addr && vaddr >= s.addr && vaddr < s.addr + s.size && s.type !== 8) {
+      return s.offset + (vaddr - s.addr);
+    }
+  }
+  return -1;
+}
+
+/** そのアドレスに読める文字列があれば返す (コードが指す先の中身) */
+function stringAt(b, elf, vaddr, maxLen) {
+  const off = vaddrToOffset(elf, vaddr);
+  if (off < 0 || off >= b.length) return null;
+  let end = off;
+  const limit = Math.min(b.length, off + (maxLen || 64));
+  while (end < limit && b[end] !== 0) end++;
+  const len = end - off;
+  if (len < 3) return null;
+  const raw = b.subarray(off, end);
+  let printable = 0, wide = 0;
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] >= 0x20 && raw[i] < 0x7F) printable++;
+    else if (SJIS_LEAD(raw[i]) && i + 1 < raw.length && SJIS_TRAIL(raw[i + 1])) { wide++; i++; }
+  }
+  if ((printable + wide * 2) < raw.length * 0.85) return null;
+  let text;
+  try {
+    text = (wide && DECODERS.sjis ? DECODERS.sjis : DECODERS.utf8).decode(raw);
+  } catch (err) {
+    text = ascii(raw);
+  }
+  /* 改行やタブをそのまま出すと 1 行が崩れるので、見えるように書き換える。
+     "index open failed\n" のように末尾が改行の文字列は実物でも普通にある */
+  return text.replace(/[\u0000-\u001F\u007F]/g, (c) =>
+    ({ "\n": "\\n", "\r": "\\r", "\t": "\\t" })[c] || "\\x" + hex(c.charCodeAt(0), 2));
+}
+
+/**
+ * 逆アセンブルする。
+ *
+ * MIPS には 32 ビットの即値を 1 命令で作る方法がないので、
+ * 「lui で上位 16 ビット → addiu / ori で下位 16 ビット」の 2 命令に分かれます。
+ * この組を追いかけると、コードが指しているアドレスが復元でき、そこに文字列が
+ * あれば **どの文字列をどこで使っているか** が分かります。
+ */
+function disassemble(b, elf, startVaddr, count) {
+  const out = [];
+  const hi = new Map();          /* レジスタ番号 -> lui で入れた上位 16 ビット */
+  let vaddr = startVaddr;
+  for (let i = 0; i < count; i++) {
+    const off = vaddrToOffset(elf, vaddr);
+    if (off < 0 || off + 4 > b.length) break;
+    const word = u32le(b, off);
+    const ins = decodeMips(word, vaddr);
+    let note = "";
+
+    if (ins.kind === "lui") {
+      hi.set(ins.reg, ins.hi);
+    } else if ((ins.kind === "arith" || ins.kind === "logic") && hi.has(ins.src)) {
+      const upper = hi.get(ins.src) << 16;
+      const full = ins.kind === "logic" ? (upper | ins.lo) >>> 0 : (upper + ins.lo) >>> 0;
+      const str = stringAt(b, elf, full, 60);
+      note = `→ 0x${hex(full, 8)}` + (str ? `  "${str.slice(0, 40)}"` : "");
+      hi.delete(ins.src);
+    } else if (ins.kind === "mem" && hi.has(ins.base)) {
+      const full = ((hi.get(ins.base) << 16) + ins.off) >>> 0;
+      const str = stringAt(b, elf, full, 60);
+      note = `→ 0x${hex(full, 8)}` + (str ? `  "${str.slice(0, 40)}"` : "");
+    } else if (ins.reg !== undefined && ins.kind !== "lui") {
+      hi.delete(ins.reg);
+    }
+
+    out.push({ vaddr, off, word, ...ins, note });
+    vaddr = (vaddr + 4) >>> 0;
+  }
+  return out;
+}
+
+/* @extract-end mips */
+
 /* ======================= 6. 状態 ======================= */
 
 const state = {
@@ -1419,6 +1776,9 @@ const state = {
   idxBuf: null,     /* 読み込んだ索引ファイルの中身 */
   idxCands: [],     /* 索引の解釈の候補 */
   idxPick: -1,
+  elf: null,        /* ELF として読めた場合のヘッダ */
+  disAddr: null,    /* 逆アセンブルを表示している仮想アドレス */
+  disHist: [],      /* 飛んできた履歴 (戻る用) */
   marks: [],        /* マップに重ねる印 (見つけた構造の位置) */
   lit: -1,          /* 強調中の印 */
   showMarks: true,
@@ -1951,6 +2311,12 @@ async function selectEntry(entry) {
   if (!Number.isFinite(state.hexOff)) state.hexOff = 0;
   $("hexoff").value = hex(state.hexOff);
 
+  state.elf = null;
+  state.disAddr = null;
+  state.disHist = [];
+  $("disback").hidden = true;
+  $("disnote").textContent = "";
+
   state.lit = -1;
   buildMarks();
   renderLegend();
@@ -1962,6 +2328,7 @@ async function selectEntry(entry) {
   renderPointers();
   renderTiles();
   renderFormat();
+  renderDisasm();
   renderDiagnosis();
   updateReadout();
 }
@@ -2007,11 +2374,12 @@ function showTab(name) {
   for (const btn of $("tabs").querySelectorAll("button")) {
     btn.setAttribute("aria-selected", String(btn.dataset.tab === name));
   }
-  for (const key of ["diag", "hex", "strings", "pointers", "index", "gallery", "tiles",
-                     "relative", "format", "report"]) {
+  for (const key of ["diag", "hex", "strings", "pointers", "index", "disasm", "gallery",
+                     "tiles", "relative", "format", "report"]) {
     $("tab-" + key).hidden = key !== name;
   }
   if (name === "diag") renderDiagnosis();
+  else if (name === "disasm") renderDisasm();
   else if (name === "tiles") renderTiles();
   else if (name === "gallery") renderGallery();
   else if (name === "index") refreshSourcePickers();
@@ -2654,6 +3022,24 @@ function buildReport() {
     add("");
   }
 
+  if (state.elf) {
+    const elf = state.elf;
+    add("## 本体プログラム (ELF)");
+    add(`ELF32 / ${elf.machine === 8 ? "MIPS" : hx(elf.machine)} / リトルエンディアン`);
+    add(`入口 0x${hex(elf.entry, 8)}`);
+    for (const s of elf.segments.filter((x) => x.type === 1)) {
+      add(`- PT_LOAD  ファイル ${hx(s.offset)} → メモリ 0x${hex(s.vaddr, 8)}  ${fmtSize(s.filesz)}`);
+    }
+    const refs = scanStringRefs(state.buf, elf, 40);
+    if (refs.length) {
+      add(`コードが指している文字列 (先頭 ${refs.length} 件):`);
+      for (const r of refs) {
+        add(`- 0x${hex(r.from, 8)} → 0x${hex(r.to, 8)}  ${r.text.slice(0, 50)}`);
+      }
+    }
+    add("");
+  }
+
   add("## 絵らしい領域");
   if (!state.tiles.length) {
     add("なし");
@@ -2925,6 +3311,356 @@ $("sigfull").addEventListener("click", async () => {
   });
   btn.disabled = false;
   renderSignatures(hits, `全体 ${fmtSize(entry.size)} を走査 · ${hits.length} 件`);
+});
+
+/* ---------- 逆アセンブル ---------- */
+
+const ELF_TYPES = { 1: "再配置可能", 2: "実行ファイル", 3: "共有ライブラリ", 4: "コアダンプ" };
+const ELF_MACHINES = { 8: "MIPS", 2: "SPARC", 3: "x86", 40: "ARM", 62: "x86-64" };
+const PT_NAMES = { 1: "PT_LOAD (読み込む)", 2: "PT_DYNAMIC", 3: "PT_INTERP", 4: "PT_NOTE" };
+
+/** 本体プログラムらしいファイル名か (PS2 の型番 SLPS_123.45 など) */
+const bootLike = (name) =>
+  /^S[A-Z]{3}_\d{3}\.\d{2}$/i.test(name) || /\.(elf|irx)$/i.test(name);
+
+function renderDisasm() {
+  const box = $("elfbox");
+  if (!box || !state.current) return;
+  box.textContent = "";
+  $("disxrefbox").textContent = "";
+  const elf = readElf(state.buf);
+  state.elf = elf;
+  $("discontrols").hidden = !elf;
+  $("diswrap").hidden = !elf;
+  $("dishelp").hidden = !elf;
+
+  if (!elf) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = state.buf[0] === 0x7F && ascii(state.buf.subarray(1, 4)) === "ELF"
+      ? "ELF ですが 32 ビット・リトルエンディアンではありません。PS2 の本体プログラムは"
+        + "必ず ELF32 / リトルエンディアンなので、これは別物です。"
+      : "このファイルは ELF ではありません。逆アセンブルできるのは本体プログラムだけです。"
+        + "ルートの SYSTEM.CNF に書かれている BOOT2 の行が、その名前を教えてくれます"
+        + " (cdrom0:\\SLPS_123.45;1 のような形)。";
+    box.append(p);
+
+    const cands = state.entries.filter((e) => e !== state.current && bootLike(e.name));
+    if (cands.length) {
+      const label = document.createElement("span");
+      label.className = "eyebrow";
+      label.textContent = "本体プログラムらしいファイル";
+      const row = document.createElement("div");
+      row.className = "controls";
+      for (const e of cands.slice(0, 8)) {
+        const btn = document.createElement("button");
+        btn.className = "btn primary";
+        btn.textContent = `${e.name} (${fmtSize(e.size)})`;
+        btn.addEventListener("click", async () => {
+          await selectEntry(e);
+          showTab("disasm");
+        });
+        row.append(btn);
+      }
+      box.append(label, row);
+    }
+    return;
+  }
+
+  /* --- ELF ヘッダ --- */
+  const dl = document.createElement("dl");
+  dl.className = "kv";
+  const rows = [
+    ["種類", ELF_TYPES[elf.type] || hx(elf.type)],
+    ["命令セット", (ELF_MACHINES[elf.machine] || hx(elf.machine))
+      + (elf.machine === 8 ? " (PS2 は R5900。MIPS III + 独自拡張)" : "")],
+    ["入口 (entry)", "0x" + hex(elf.entry, 8) + "  ← 電源投入後、最初に実行される命令"],
+    ["読み込み区画", `${elf.segments.length} 個`],
+    ["セクション", elf.sections.length ? `${elf.sections.length} 個` : "無し (製品版は削られていることが多い)"],
+  ];
+  for (const [k, v] of rows) {
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v;
+    dl.append(dt, dd);
+  }
+  box.append(dl);
+
+  /* --- 区画とセクション --- */
+  const loads = elf.segments.filter((s) => s.type === 1);
+  if (loads.length) {
+    box.append(disTable(
+      "メモリのどこに載るか",
+      ["種類", "ファイル内", "メモリ上", "大きさ", "権限"],
+      elf.segments.map((s) => [
+        PT_NAMES[s.type] || hx(s.type),
+        hx(s.offset),
+        "0x" + hex(s.vaddr, 8),
+        fmtSize(s.filesz) + (s.memsz > s.filesz ? ` (+${fmtSize(s.memsz - s.filesz)} はゼロ埋め)` : ""),
+        ((s.flags & 4) ? "r" : "-") + ((s.flags & 2) ? "w" : "-") + ((s.flags & 1) ? "x" : "-"),
+      ]),
+      "ファイル内の位置とメモリ上の番地は別です。逆アセンブルはメモリ上の番地で考えるので、"
+      + "この対応表がないと「コードが指しているアドレス」をファイルの中に戻せません。"));
+  }
+  const named = elf.sections.filter((s) => s.name && s.size);
+  if (named.length) {
+    box.append(disTable(
+      "セクション",
+      ["名前", "メモリ上", "大きさ", "ファイル内"],
+      named.map((s) => [s.name, s.addr ? "0x" + hex(s.addr, 8) : "—", fmtSize(s.size), hx(s.offset)]),
+      ".text が命令、.rodata が文字列や定数、.data が書き換わる変数、.bss はファイルに実体が無い領域です。"));
+  }
+
+  if (state.disAddr == null) state.disAddr = elf.entry;
+  $("disaddr").value = "0x" + hex(state.disAddr, 8);
+  drawDisasm();
+}
+
+function disTable(title, head, body, hint) {
+  const wrap = document.createElement("div");
+  wrap.style.display = "grid";
+  wrap.style.gap = "6px";
+  const label = document.createElement("span");
+  label.className = "eyebrow";
+  label.textContent = title;
+  wrap.append(label);
+  const tw = document.createElement("div");
+  tw.className = "tablewrap";
+  const t = document.createElement("table");
+  const thead = document.createElement("thead");
+  const htr = document.createElement("tr");
+  for (const h of head) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    htr.append(th);
+  }
+  thead.append(htr);
+  const tb = document.createElement("tbody");
+  for (const row of body) {
+    const tr = document.createElement("tr");
+    for (const c of row) {
+      const td = document.createElement("td");
+      td.textContent = c;
+      tr.append(td);
+    }
+    tb.append(tr);
+  }
+  t.append(thead, tb);
+  tw.append(t);
+  wrap.append(tw);
+  if (hint) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = hint;
+    wrap.append(p);
+  }
+  return wrap;
+}
+
+/** 分岐や呼び出しの直後の 1 命令。MIPS では分岐が成立してもここは必ず実行される */
+const DELAYED = new Set(["branch", "jump", "call", "jr"]);
+
+function drawDisasm() {
+  const elf = state.elf;
+  if (!elf) return;
+  const view = $("disview");
+  view.textContent = "";
+  const count = parseInt($("discount").value, 10) || 256;
+  const lines = disassemble(state.buf, elf, state.disAddr >>> 0, count);
+  if (!lines.length) {
+    $("disnote").textContent = "そのアドレスはこのファイルの中に入っていません。";
+    return;
+  }
+  $("disnote").textContent =
+    `0x${hex(lines[0].vaddr, 8)} 〜 0x${hex(lines[lines.length - 1].vaddr, 8)}  ·  ${lines.length} 命令`;
+
+  let prevKind = "";
+  for (const ln of lines) {
+    const row = document.createElement("div");
+    row.className = "disrow";
+
+    const a = document.createElement("span");
+    a.className = "off";
+    a.textContent = hex(ln.vaddr, 8);
+    const w = document.createElement("span");
+    w.className = "b zero";
+    w.textContent = hex(ln.word, 8);
+    const mn = document.createElement("span");
+    mn.className = "mn" + (ln.kind === "bad" ? " bad" : "");
+    mn.textContent = ln.mn.padEnd(8, " ");
+    row.append(a, w, mn);
+
+    /* 行き先のあるものはクリックで飛べるようにする */
+    if (ln.target !== undefined) {
+      const at = "0x" + hex(ln.target, 8);
+      const i = ln.ops.indexOf(at);
+      if (i > 0) {
+        const pre = document.createElement("span");
+        pre.className = "op";
+        pre.textContent = ln.ops.slice(0, i);
+        row.append(pre);
+      }
+      const jmp = document.createElement("button");
+      jmp.className = "jmp";
+      jmp.textContent = at;
+      jmp.title = "ここへ飛ぶ";
+      jmp.addEventListener("click", () => gotoVaddr(ln.target));
+      row.append(jmp);
+    } else if (ln.ops) {
+      const o = document.createElement("span");
+      o.className = "op";
+      o.textContent = ln.ops;
+      row.append(o);
+    }
+
+    if (ln.note) {
+      const n = document.createElement("span");
+      n.className = "to";
+      n.textContent = "  " + ln.note;
+      row.append(n);
+    } else if (DELAYED.has(prevKind)) {
+      const n = document.createElement("span");
+      n.className = "slot";
+      n.textContent = "  ← 遅延スロット";
+      row.append(n);
+    }
+    prevKind = ln.kind;
+    view.append(row);
+  }
+}
+
+/** 指定した仮想アドレスへ移動する。戻れるように履歴を積む */
+function gotoVaddr(vaddr) {
+  if (state.disAddr != null) state.disHist.push(state.disAddr);
+  state.disAddr = vaddr >>> 0;
+  $("disaddr").value = "0x" + hex(state.disAddr, 8);
+  $("disback").hidden = state.disHist.length === 0;
+  drawDisasm();
+  /* ファイル内の位置も合わせておくと、16 進タブでそのまま続きが見られる */
+  const off = vaddrToOffset(state.elf, state.disAddr);
+  if (off >= 0) {
+    state.hexOff = off;
+    $("hexoff").value = hex(off);
+    renderHex();
+  }
+  $("diswrap").scrollIntoView({ block: "nearest" });
+}
+
+/**
+ * コード全体を走査して「文字列を指しているアドレス」を集める。
+ *
+ * 逆アセンブルを 1 命令ずつ読むより、これを先に見るほうが早いことが多いです。
+ * 目当ての言葉がどこで使われているかが分かれば、読むべき関数が決まります。
+ */
+function scanStringRefs(b, elf, limit) {
+  const hits = [];
+  const seen = new Set();
+  let regions = elf.segments.filter((s) => s.type === 1 && s.filesz > 4 && (s.flags & 1));
+  if (!regions.length) regions = elf.segments.filter((s) => s.type === 1 && s.filesz > 4);
+  for (const s of regions) {
+    const hi = new Map();
+    const end = Math.min(b.length, s.offset + s.filesz);
+    for (let off = s.offset; off + 4 <= end; off += 4) {
+      const word = u32le(b, off);
+      if (!word) continue;
+      const op = word >>> 26;
+      const rs = (word >>> 21) & 31, rt = (word >>> 16) & 31;
+      if (op === 0x0F) {                       /* lui — 上位 16 ビットを置く */
+        hi.set(rt, word & 0xFFFF);
+        continue;
+      }
+      let full = -1;
+      if ((op === 0x09 || op === 0x0D) && hi.has(rs)) {   /* addiu / ori */
+        const up = hi.get(rs) << 16;
+        full = (op === 0x0D ? (up | (word & 0xFFFF)) : (up + sx16(word & 0xFFFF))) >>> 0;
+      } else if (MIPS_MEM.has(op) && hi.has(rs)) {
+        full = ((hi.get(rs) << 16) + sx16(word & 0xFFFF)) >>> 0;
+      }
+      if (full >= 0) {
+        const text = stringAt(b, elf, full, 80);
+        if (text && !seen.has(full)) {
+          seen.add(full);
+          hits.push({ from: (s.vaddr + (off - s.offset)) >>> 0, to: full, text });
+          if (hits.length >= limit) return hits;
+        }
+      }
+      /* 書き込み先のレジスタは、もう lui の続きではない */
+      if (op === 0) hi.delete((word >>> 11) & 31);
+      else if (op !== 0x28 && op !== 0x29 && op !== 0x2B && op !== 0x3F) hi.delete(rt);
+    }
+  }
+  return hits;
+}
+
+function renderXrefs() {
+  const box = $("disxrefbox");
+  box.textContent = "";
+  if (!state.elf) return;
+  const hits = scanStringRefs(state.buf, state.elf, 4000);
+  const label = document.createElement("span");
+  label.className = "eyebrow";
+  label.textContent = `文字列を指している場所  ${hits.length} 件`;
+  box.append(label);
+  if (!hits.length) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "見つかりませんでした。文字列が圧縮されているか、別のファイルに入っています。";
+    box.append(p);
+    return;
+  }
+  const p = document.createElement("p");
+  p.className = "hint";
+  p.textContent = "行をクリックすると、その文字列を使っているコードへ飛びます。"
+    + "ファイル名やエラーメッセージが並んでいたら、その周りが読み込み処理です。";
+  box.append(p);
+
+  const tw = document.createElement("div");
+  tw.className = "tablewrap";
+  const t = document.createElement("table");
+  const thead = document.createElement("thead");
+  thead.innerHTML = "<tr><th>コードの位置</th><th>文字列の位置</th><th>中身</th></tr>";
+  const tb = document.createElement("tbody");
+  for (const h of hits) {
+    const tr = document.createElement("tr");
+    for (const c of ["0x" + hex(h.from, 8), "0x" + hex(h.to, 8), h.text]) {
+      const td = document.createElement("td");
+      td.textContent = c;
+      tr.append(td);
+    }
+    tr.style.cursor = "pointer";
+    tr.addEventListener("click", () => gotoVaddr(Math.max(0, h.from - 32)));
+    tb.append(tr);
+  }
+  t.append(thead, tb);
+  tw.append(t);
+  box.append(tw);
+}
+
+$("disrun").addEventListener("click", () => {
+  const v = parseOffset($("disaddr").value, state.disAddr || 0);
+  gotoVaddr(v);
+});
+$("disaddr").addEventListener("keydown", (e) => { if (e.key === "Enter") $("disrun").click(); });
+$("discount").addEventListener("change", () => drawDisasm());
+$("disentry").addEventListener("click", () => { if (state.elf) gotoVaddr(state.elf.entry); });
+$("disback").addEventListener("click", () => {
+  const v = state.disHist.pop();
+  if (v == null) return;
+  state.disAddr = v;
+  $("disaddr").value = "0x" + hex(v, 8);
+  $("disback").hidden = state.disHist.length === 0;
+  drawDisasm();
+});
+$("disxref").addEventListener("click", () => {
+  const btn = $("disxref");
+  btn.disabled = true;
+  btn.textContent = "走査中…";
+  setTimeout(() => {
+    renderXrefs();
+    btn.disabled = false;
+    btn.textContent = "文字列を使っている場所を全部探す";
+  }, 16);
 });
 
 /* ---------- 既知の形式 ---------- */

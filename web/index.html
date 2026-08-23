@@ -48,7 +48,7 @@
   </div>
 
   <div class="stages">
-    <span class="eyebrow">解析の五段階</span>
+    <span class="eyebrow">解析の六段階</span>
     <div class="stage">
       <span class="no">01</span>
       <h3>入れ物を開ける</h3>
@@ -74,12 +74,17 @@
       <h3>分かったら読む</h3>
       <p>形式が判明したファイルは本文まで展開する。ここを増やすことでツールが実用になる。</p>
     </div>
+    <div class="stage">
+      <span class="no">06</span>
+      <h3>コードを読む</h3>
+      <p>本体プログラム (ELF32 / MIPS R5900) を命令に戻す。どの文字列をどこで使っているかまで辿る。</p>
+    </div>
   </div>
 
   <div class="limits">
     <span class="eyebrow">できないこと</span>
-    <p>圧縮データの展開。伸張ルーチンはゲームごとに違うため。</p>
-    <p>実行コードの逆アセンブル。</p>
+    <p>圧縮データの展開。伸張ルーチンはゲームごとに違うため。逆アセンブルはできるので、読み解けば道はあります。</p>
+    <p>逆コンパイル (C 風の疑似コードにすること)。そこまでやるなら Ghidra です。</p>
     <p>データの書き戻し。読み取り専用です。</p>
   </div>
 </section>
@@ -133,6 +138,7 @@
         <button role="tab" data-tab="strings" aria-selected="false">文字列</button>
         <button role="tab" data-tab="pointers" aria-selected="false">ポインタ表</button>
         <button role="tab" data-tab="index" aria-selected="false">索引ファイル</button>
+        <button role="tab" data-tab="disasm" aria-selected="false">逆アセンブル</button>
         <button role="tab" data-tab="gallery" aria-selected="false">見つけた絵</button>
         <button role="tab" data-tab="tiles" aria-selected="false">タイル</button>
         <button role="tab" data-tab="relative" aria-selected="false">相対検索</button>
@@ -242,6 +248,48 @@
           </table>
         </div>
         <div id="idxpreview"></div>
+      </div>
+
+      <!-- 逆アセンブル -->
+      <div class="tabpanel" id="tab-disasm" role="tabpanel" hidden>
+        <p class="hint">
+          ここまでの道具は「データがどこにあるか」を見るものでした。ここは<b>そのデータを本体プログラムがどう読んでいるか</b>を見る場所です。PS2 の本体プログラム (<code>SLPS_xxx.xx</code> / <code>SCPS_xxx.xx</code>) は <b>ELF32 / MIPS R5900 / リトルエンディアン</b>。命令は必ず 4 バイト固定長なので、表引きだけで機械語を命令に戻せます。
+        </p>
+        <div id="elfbox"></div>
+
+        <div class="controls" id="discontrols" hidden>
+          <div class="field">
+            <label for="disaddr">読み始めるアドレス</label>
+            <input type="text" id="disaddr" spellcheck="false" style="width:11em">
+          </div>
+          <div class="field">
+            <label for="discount">命令数</label>
+            <select id="discount">
+              <option value="128">128</option>
+              <option value="256" selected>256</option>
+              <option value="512">512</option>
+              <option value="1024">1024</option>
+            </select>
+          </div>
+          <button class="btn primary" id="disrun">ここから読む</button>
+          <button class="btn" id="disentry">入口へ戻る</button>
+          <button class="btn" id="disback" hidden>← 戻る</button>
+          <button class="btn seal" id="disxref">文字列を使っている場所を全部探す</button>
+          <span class="pos" id="disnote"></span>
+        </div>
+
+        <div class="hexwrap" id="diswrap" hidden><pre class="hexview dis" id="disview"></pre></div>
+
+        <div id="disxrefbox"></div>
+
+        <details id="dishelp" hidden>
+          <summary>読み方のとっかかり</summary>
+          <div class="hint">
+            <p><b>MIPS には 32 ビットの値を 1 命令で作る方法がありません。</b>だから住所はいつも <code>lui</code> (上位 16 ビット) と <code>addiu</code> / <code>ori</code> (下位 16 ビット) の 2 命令に割れます。この組を追いかけて復元したアドレスを <code>→</code> の後ろに出しています。そこに文字列があれば中身も並べます。<b>どの文字列をどこで使っているか</b>が、これで分かります。</p>
+            <p><b>分岐や呼び出しの行き先はクリックで飛べます。</b><code>jal</code> が関数呼び出し、<code>jr $ra</code> が関数の終わり。<code>jr $ra</code> の次の 1 命令は<b>遅延スロット</b>といって、戻る前に必ず実行されます (MIPS の癖です)。</p>
+            <p><b>引数は <code>$a0</code>〜<code>$a3</code>、戻り値は <code>$v0</code>。</b>関数の頭で <code>addiu $sp, $sp, -N</code> と <code>sw $ra, ...</code> が出たら、そこが関数の入口です。</p>
+          </div>
+        </details>
       </div>
 
       <!-- 調査メモ -->

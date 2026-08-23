@@ -12,6 +12,7 @@
 中身は疑似ゲームのファイルに、解析の練習向けの性質の違うデータを足したものです。
 
     SYSTEM.CNF          ASCII テキスト (実機の起動設定ファイルに相当)
+    SLPS_900.99         本体プログラム (ELF32 / MIPS)。SYSTEM.CNF の BOOT2 が指す先
     /DATA/SCRIPT.BIN    Shift-JIS のテキスト + ポインタテーブル
     /DATA/MSG_ENC.BIN   独自文字コードのテキスト
     /DATA/FONT.BIN      1bpp のタイル (フォント)
@@ -19,7 +20,9 @@
     /DATA/BGM.ADP       波形風のデータ
     /DATA/PAD.DAT       ゼロ埋め (詰め物)
 
-ブラウザ側の web/ の解析ツールは、この 7 種類を別の種類として色分けできます。
+ブラウザ側の web/ の解析ツールは、これらを別の種類として色分けできます。
+SYSTEM.CNF → BOOT2 → 本体プログラム → 逆アセンブル、という実物と同じ順路を
+このイメージだけで一通り辿れます。
 """
 
 from __future__ import annotations
@@ -194,6 +197,11 @@ def main() -> int:
     data_files.append(("PAD.DAT", b"\x00" * (32 * 1024)))
 
     root_files = [("SYSTEM.CNF", SYSTEM_CNF.encode("ascii"))]
+    # BOOT2 が指す本体プログラム。無ければ入れない (逆アセンブルの練習ができないだけ)
+    boot = os.path.join(args.workdir, "BOOT.ELF")
+    if os.path.exists(boot):
+        with open(boot, "rb") as fh:
+            root_files.append(("SLPS_900.99", fh.read()))
 
     # --- 配置を決める -----------------------------------------------------
     # 16 セクタのシステム領域 → PVD → 終端子 → パステーブル x2 → ルート → DATA → 本体
