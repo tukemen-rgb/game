@@ -486,6 +486,11 @@ tbody tr[aria-current="true"] td { background: var(--seal-soft); color: var(--in
 .conf.low { color: var(--ink-3); }
 .conf.low::before { border: 1px solid var(--ink-3); }
 
+.sigblock {
+  display: grid; gap: 12px; padding-top: 14px; margin-top: 4px;
+  border-top: 1px solid var(--rule);
+}
+
 /* ---------- 見つけた絵の一覧 ---------- */
 .gallery {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px;

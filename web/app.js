@@ -779,6 +779,148 @@ function startHero() {
 
 window.addEventListener("resize", () => { if (!$("intake").hidden) startHero(); });
 
+
+/* ======================= 署名スキャン =======================
+ * 中身の分からないファイルから「これは知っている形式だ」という印を探す。
+ * 実物のゲームディスクでは、これがいちばん最初の足がかりになります。
+ *
+ * ここに載せているのは確実なものだけです。ゲーム独自の形式は当然入っていない
+ * ので、当たりを付けたら「自分で探す」欄に入れて全域を検索してください。
+ */
+
+const SIGNATURES = [
+  { name: "ELF 実行ファイル", note: "PS2 の本体プログラム (SLPS/SCPS...)",
+    bytes: [0x7F, 0x45, 0x4C, 0x46] },
+  { name: "TIM2 テクスチャ", note: "PS2 でいちばん普通の画像形式",
+    bytes: [0x54, 0x49, 0x4D, 0x32] },
+  { name: "VAG 音声", note: "Sony の ADPCM 波形",
+    bytes: [0x56, 0x41, 0x47, 0x70] },
+  { name: "MPEG プログラムストリーム", note: "PSS などの動画。パックごとに出るのでまとめて数える",
+    bytes: [0x00, 0x00, 0x01, 0xBA], collapse: 1 << 20 },
+  { name: "ISO9660 ボリューム記述子", note: "入れ子になったディスクイメージ",
+    bytes: [0x43, 0x44, 0x30, 0x30, 0x31] },
+  { name: "RIFF コンテナ", note: "WAV / AVI など", bytes: [0x52, 0x49, 0x46, 0x46] },
+  { name: "PNG 画像", note: "", bytes: [0x89, 0x50, 0x4E, 0x47] },
+];
+
+function searchBytes(buf, pat, from) {
+  const first = pat[0], last = buf.length - pat.length;
+  outer:
+  for (let i = from; i <= last; i++) {
+    if (buf[i] !== first) continue;
+    for (let k = 1; k < pat.length; k++) if (buf[i + k] !== pat[k]) continue outer;
+    return i;
+  }
+  return -1;
+}
+
+function scanPatterns(buf, patterns, base, into, seen) {
+  for (const pat of patterns) {
+    let i = 0, lastKept = -Infinity, run = 0;
+    while (true) {
+      i = searchBytes(buf, pat.bytes, i);
+      if (i < 0) break;
+      const abs = base + i;
+      const collapse = pat.collapse || 0;
+      if (collapse && abs - lastKept < collapse) {
+        run++;
+        if (into.length) {
+          const prev = into[into.length - 1];
+          if (prev.name === pat.name) prev.more = run;
+        }
+      } else if (!seen.has(pat.name + ":" + abs)) {
+        seen.add(pat.name + ":" + abs);
+        into.push({ name: pat.name, note: pat.note || "", off: abs, more: 0 });
+        lastKept = abs;
+        run = 0;
+      }
+      i += 1;
+      if (into.length > 4000) return;
+    }
+  }
+}
+
+/** 入力を検索するバイト列に直す。16 進とみなせれば 16 進、でなければ文字列 */
+function patternsFromInput(text, mode) {
+  const out = [];
+  const trimmed = text.trim();
+  if (!trimmed) return out;
+  const hexish = /^[0-9A-Fa-f\s]+$/.test(trimmed) && trimmed.replace(/\s/g, "").length % 2 === 0;
+  if (mode === "hex" || (mode === "auto" && hexish)) {
+    const hexStr = trimmed.replace(/\s/g, "");
+    const bytes = [];
+    for (let i = 0; i < hexStr.length; i += 2) bytes.push(parseInt(hexStr.slice(i, i + 2), 16));
+    if (bytes.length) out.push({ name: "16 進 " + hexStr.toUpperCase(), bytes });
+    return out;
+  }
+  /* 文字列は Shift-JIS と UTF-8 の両方で探す。どちらで格納されているか分からないため */
+  const encs = [["Shift-JIS", "shift_jis"], ["UTF-8", "utf-8"]];
+  for (const [label, enc] of encs) {
+    let bytes = null;
+    if (enc === "utf-8") {
+      bytes = Array.from(new TextEncoder().encode(trimmed));
+    } else if (DECODERS.sjis) {
+      /* TextEncoder は UTF-8 専用なので、Shift-JIS は表引きで作る */
+      bytes = [];
+      for (const ch of trimmed) {
+        const code = sjisBytesOf(ch);
+        if (!code) { bytes = null; break; }
+        bytes.push(...code);
+      }
+    }
+    if (bytes && bytes.length) out.push({ name: `${label} 「${trimmed}」`, bytes });
+  }
+  return out;
+}
+
+/** 1 文字を Shift-JIS のバイト列にする (総当たりで作った表を使う) */
+let SJIS_ENC = null;
+function sjisBytesOf(ch) {
+  if (!DECODERS.sjis) return null;
+  if (!SJIS_ENC) {
+    SJIS_ENC = new Map();
+    const one = new Uint8Array(1);
+    for (let b = 0x20; b < 0x100; b++) {
+      if (b >= 0x81 && b <= 0x9F) continue;
+      if (b >= 0xE0 && b <= 0xEF) continue;
+      one[0] = b;
+      const t = DECODERS.sjis.decode(one);
+      if (t && t !== "\uFFFD" && !SJIS_ENC.has(t)) SJIS_ENC.set(t, [b]);
+    }
+    const two = new Uint8Array(2);
+    for (let lead = 0x81; lead <= 0xEF; lead++) {
+      if (lead > 0x9F && lead < 0xE0) continue;
+      for (let trail = 0x40; trail <= 0xFC; trail++) {
+        if (trail === 0x7F) continue;
+        two[0] = lead; two[1] = trail;
+        const t = DECODERS.sjis.decode(two);
+        if (t && t.length === 1 && t !== "\uFFFD" && !SJIS_ENC.has(t)) {
+          SJIS_ENC.set(t, [lead, trail]);
+        }
+      }
+    }
+  }
+  return SJIS_ENC.get(ch) || null;
+}
+
+/** ファイル全体を chunk ごとに読みながら署名を探す (数 GB でもメモリに載せない) */
+async function fullScan(entry, patterns, onProgress) {
+  const CHUNK = 8 * 1024 * 1024;
+  const OVERLAP = 64;
+  const hits = [];
+  const seen = new Set();
+  for (let pos = 0; pos < entry.size; pos += CHUNK) {
+    const len = Math.min(CHUNK + OVERLAP, entry.size - pos);
+    const buf = await readRange(state.file, entry.offset + pos, len);
+    scanPatterns(buf, patterns, pos, hits, seen);
+    if (onProgress) onProgress(Math.min(entry.size, pos + CHUNK), entry.size, hits.length);
+    if (hits.length > 4000) break;
+    await new Promise((r) => setTimeout(r, 0));   /* 画面を固めない */
+  }
+  hits.sort((a, b) => a.off - b.off);
+  return hits;
+}
+
 /* ======================= 6. 状態 ======================= */
 
 const state = {
@@ -1550,6 +1692,22 @@ function highlightPointer(t) {
     + "この並びはポインタテーブルとみて間違いありません。";
   box.append(p);
 
+  /* 索引らしければ、この表でファイルを切り分けられるようにする。
+     実物のゲームでは、独自アーカイブの中身をここから取り出すことになる */
+  const actions = document.createElement("div");
+  actions.className = "controls";
+  const split = document.createElement("button");
+  split.className = "btn primary";
+  split.textContent = `この表で ${t.count} 個に切り分ける`;
+  split.addEventListener("click", () => splitByTable(t));
+  const hint = document.createElement("span");
+  hint.className = "hint";
+  hint.textContent = t.off <= 256
+    ? "ファイルの先頭にある表なので、アーカイブの索引の可能性が高いです。"
+    : "ファイルの途中にある表です。索引でない場合は切り分けても意味がありません。";
+  actions.append(split, hint);
+  box.append(actions);
+
   const wrap = document.createElement("div");
   wrap.className = "tablewrap";
   const table = document.createElement("table");
@@ -1575,6 +1733,44 @@ function highlightPointer(t) {
   table.append(tb);
   wrap.append(table);
   box.append(wrap);
+}
+
+/** ポインタ表を索引とみなして、親ファイルを子の断片に切り分ける */
+async function splitByTable(t) {
+  const parent = state.current;
+  if (!parent) return;
+  const read = t.stride === 4 ? u32le : u16le;
+  const values = [];
+  for (let i = 0; i < t.count; i++) {
+    values.push(t.base + read(state.buf, t.off + i * t.stride));
+  }
+  const limit = parent.size;
+  const prefix = parent.path + "/";
+  /* 同じ親から前に作った断片は捨ててから作り直す */
+  state.entries = state.entries.filter((e) => e.kind !== "part" || e.parentPath !== parent.path);
+
+  const kids = [];
+  for (let i = 0; i < values.length && kids.length < 2048; i++) {
+    const start = values[i];
+    if (start < 0 || start >= limit) continue;
+    let end = i + 1 < values.length ? values[i + 1] : limit;
+    if (end <= start || end > limit) end = limit;
+    const name = "#" + String(i).padStart(4, "0");
+    kids.push({
+      path: prefix + name, name,
+      offset: parent.offset + start, size: end - start,
+      kind: "part", parentPath: parent.path,
+    });
+  }
+  if (!kids.length) return;
+  const at = state.entries.indexOf(parent);
+  state.entries.splice(at + 1, 0, ...kids);
+  renderTree();
+  await selectEntry(kids[0]);
+  $("capnote").textContent =
+    `${parent.name} を ${kids.length} 個に切り分けました。`
+    + "一覧から選ぶと、それぞれを 1 つのファイルとして解析できます。";
+  classifyEntries();
 }
 
 /* ---------- タイル ---------- */
@@ -1747,6 +1943,75 @@ $("reluse").addEventListener("click", () => {
   $("hexenc").value = "table";
   renderFormat();
   showTab("hex");
+});
+
+/* ---------- 署名 ---------- */
+function renderSignatures(hits, label) {
+  const body = $("sigbody");
+  body.textContent = "";
+  $("sigprogress").textContent = label || "";
+  if (!hits.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.textContent = "見つかりませんでした。";
+    tr.append(td);
+    body.append(tr);
+    return;
+  }
+  for (const hit of hits.slice(0, 500)) {
+    const tr = document.createElement("tr");
+    const note = hit.more ? `${hit.note}${hit.note ? " / " : ""}この先に ${hit.more} 個続く`
+                          : hit.note;
+    for (const [text, cls] of [[hx(hit.off), ""], [hit.name, "jp"], [note, "jp"]]) {
+      const td = document.createElement("td");
+      if (cls) td.className = cls;
+      td.textContent = text;
+      tr.append(td);
+    }
+    tr.addEventListener("click", () => { gotoOffset(hit.off); showTab("hex"); });
+    body.append(tr);
+  }
+}
+
+function currentPatterns() {
+  const text = $("sigq").value;
+  const custom = patternsFromInput(text, $("sigmode").value);
+  return custom.length ? custom : SIGNATURES;
+}
+
+$("sigscan").addEventListener("click", () => {
+  const hits = [];
+  scanPatterns(state.buf, SIGNATURES, 0, hits, new Set());
+  hits.sort((a, b) => a.off - b.off);
+  renderSignatures(hits, `先頭 ${fmtSize(state.buf.length)} を走査`);
+});
+
+$("sigfind").addEventListener("click", async () => {
+  const patterns = patternsFromInput($("sigq").value, $("sigmode").value);
+  if (!patterns.length) {
+    renderSignatures([], "探す語を入れてください");
+    return;
+  }
+  const hits = [];
+  scanPatterns(state.buf, patterns, 0, hits, new Set());
+  hits.sort((a, b) => a.off - b.off);
+  renderSignatures(hits,
+    `${patterns.map((p) => p.name).join(" / ")} — 先頭 ${fmtSize(state.buf.length)}`);
+});
+
+$("sigfull").addEventListener("click", async () => {
+  const entry = state.current;
+  if (!entry) return;
+  const patterns = currentPatterns();
+  const btn = $("sigfull");
+  btn.disabled = true;
+  const hits = await fullScan(entry, patterns, (done, total, found) => {
+    $("sigprogress").textContent =
+      `走査中 ${fmtSize(done)} / ${fmtSize(total)} · ${found} 件`;
+  });
+  btn.disabled = false;
+  renderSignatures(hits, `全体 ${fmtSize(entry.size)} を走査 · ${hits.length} 件`);
 });
 
 /* ---------- 既知の形式 ---------- */
