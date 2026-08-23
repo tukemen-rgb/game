@@ -542,6 +542,13 @@ tbody tr[aria-current="true"] td { background: var(--seal-soft); color: var(--in
   font-family: var(--font-mono); font-size: 10.5px; color: var(--seal); font-weight: 500;
 }
 
+.textpreview {
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.85;
+  margin: 0; padding: 11px 13px; max-height: 340px; overflow: auto;
+  background: var(--bg); border: 1px solid var(--rule-soft);
+  white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2);
+}
+
 /* ---------- 見つけた絵の一覧 ---------- */
 .gallery {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px;

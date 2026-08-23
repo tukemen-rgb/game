@@ -185,8 +185,10 @@ function classifyStats(s) {
   if (s.printRatio > 0.85) return "ascii";
   /* 隣のバイトとの差が小さいものは波形。乱数の平均差は 85 前後になるので混ざらない */
   if (s.entropy > 4.5 && s.meanDiff < 24) return "wave";
+  /* 標本数から出した期待値と比べる。下限を固定値で切ると、細かいマスのときに
+     乱数を取りこぼす (エントロピーは標本が少ないほど小さく出るため) */
   const expectedRandom = 8 - 255 / (2 * s.n * Math.LN2);
-  if (s.entropy > Math.max(6, expectedRandom - 0.3)) return "high";
+  if (s.n >= 192 && s.entropy > expectedRandom - 0.3) return "high";
   return "tile";
 }
 
@@ -215,15 +217,72 @@ function commonJp(ch) {
          c === 0x266A || c === 0x2192 || (c >= 0x2018 && c <= 0x201D);
 }
 
-/** 2 バイト文字のうち、よく使われる範囲に入っている割合 */
-function jpPlausibility(text) {
-  let wide = 0, good = 0;
+/** 全角の仮名だけを仮名と数える。半角カナは乱数でも 25% の確率で出るので証拠にならない */
+function isKana(c) {
+  return (c >= 0x3041 && c <= 0x309F) || (c >= 0x30A0 && c <= 0x30FF);
+}
+
+/**
+ * 日本語らしさ。よく使う範囲の割合に加えて **仮名の割合** を見る。
+ *
+ * Shift-JIS の 2 バイト領域は漢字が大半を占めるので、乱数がたまたま成立すると
+ * ほぼ必ず珍しい漢字の羅列になります (梳Hz噫_束 のような並び)。「常用の範囲か」
+ * だけでは漢字ブロック全体が通ってしまうので落とせません。
+ * 実際の日本語は仮名が半分前後を占めるのに対し、乱数由来では 3% 程度です。
+ */
+function jpQuality(text) {
+  let wide = 0, good = 0, kana = 0, latin = 0;
   for (const ch of text) {
-    if (ch.codePointAt(0) < 0x80) continue;
+    const c = ch.codePointAt(0);
+    if (c < 0x80) {
+      if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) latin++;
+      continue;
+    }
     wide++;
+    if (c >= 0xFF61 && c <= 0xFF9F) continue;   /* 半角カナは数に入れるだけ */
     if (commonJp(ch)) good++;
+    if (isKana(c)) kana++;
   }
-  return wide ? good / wide : 0;
+  return { wide, latin, plaus: wide ? good / wide : 0, kana: wide ? kana / wide : 0 };
+}
+
+/**
+ * 文字列を探してよい範囲を返す。
+ *
+ * 圧縮や波形と分類された区画は走査しません。乱数は確率的に Shift-JIS として
+ * 成立する並びを含みますし、波形の下り勾配は連続した ASCII に見えます
+ * (`|xuqmiea]ZVROKG` のような並び)。文字列側でいくら弾いても限界があるので、
+ * そもそも見ない ── バイトの統計のほうが信用できる、という原則の適用です。
+ */
+function scannableRanges() {
+  const m = state.map;
+  const end = state.buf.length;
+  if (!m || !m.nBlocks) return [[0, end]];
+  const ranges = [];
+  let start = -1;
+  for (let i = 0; i <= m.nBlocks; i++) {
+    const skip = i < m.nBlocks && (m.cells[i] === "high" || m.cells[i] === "wave");
+    if (!skip && start < 0) start = i;
+    else if (skip && start >= 0) {
+      ranges.push([start * m.blockSize, Math.min(end, i * m.blockSize)]);
+      start = -1;
+    }
+  }
+  if (start >= 0) ranges.push([start * m.blockSize, end]);
+  return ranges.filter(([a, b2]) => b2 - a >= 16);
+}
+
+/** 範囲を絞って文字列を集める */
+function collectStrings(minChars) {
+  const out = [];
+  for (const [from, to] of scannableRanges()) {
+    if (from >= state.buf.length) break;
+    const slice = state.buf.subarray(from, Math.min(to, state.buf.length));
+    for (const hit of scanStrings(slice, minChars)) { hit.off += from; out.push(hit); }
+    for (const hit of scanUtf8(slice, minChars)) { hit.off += from; out.push(hit); }
+    if (out.length > 40000) break;
+  }
+  return out.sort((a, b) => a.off - b.off);
 }
 
 /** Shift-JIS / ASCII として読める並びを探す */
@@ -248,7 +307,16 @@ function scanStrings(b, minChars) {
       catch { text = ascii(slice); }
       /* 割り当てのないコードは U+FFFD になる。乱数がたまたま Shift-JIS の
          バイト対に見えるだけの並びは、これでほぼ全部落ちる */
-      if (jp >= 3 && (text.includes("\uFFFD") || jpPlausibility(text) < 0.6)) { i++; continue; }
+      if (jp >= 3) {
+        const q = jpQuality(text);
+        /* 仮名がまったく無い長い並びは、まず乱数由来 */
+        const noKana = q.wide >= 4 && q.kana < 0.25;
+        const tooLatin = q.latin >= 6 && q.latin > q.wide * 1.5;
+        if (text.includes("\uFFFD") || q.plaus < 0.6 || noKana || tooLatin) {
+          i++;
+          continue;
+        }
+      }
       out.push({
         off: i, byteLen: j - i, chars,
         kind: jp >= 3 ? "jp" : "ascii",
@@ -475,7 +543,8 @@ function tileScore(b, off, len) {
     const ratio = lagRatio(win, lag);
     if (!best || ratio < best.ratio) best = { lag, ratio };
   }
-  if (!best || best.ratio > TILE_RATIO_MAX) return null;
+  /* 相関が 0 に近いのは「ずっと同じ値」なだけで、絵の証拠にはならない */
+  if (!best || best.ratio > TILE_RATIO_MAX || best.ratio < 0.06) return null;
   return { lag: best.lag, ratio: best.ratio, st };
 }
 
@@ -1082,7 +1151,8 @@ function guessEndian(b) {
     if (l < 0x1000000) le++;
     if (g < 0x1000000) be++;
   }
-  if (n < 16) return null;
+  /* 標本が少ないまま並び順を断定しない */
+  if (n < 64 || le + be < 24) return null;
   const ratio = (le + 1) / (be + 1);
   if (ratio > 1.6) return { order: "le", label: "リトルエンディアン", le, be, n };
   if (ratio < 0.62) return { order: "be", label: "ビッグエンディアン", le, be, n };
@@ -1111,6 +1181,16 @@ function layoutSegments(maxSegments) {
   return keep;
 }
 
+/** 地図全体での分類の内訳。先頭 4KB だけでは大きな塊を見誤る */
+function classDistribution() {
+  const m = state.map;
+  if (!m || !m.nBlocks) return null;
+  const counts = {};
+  for (const c of m.cells) counts[c] = (counts[c] || 0) + 1;
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  return { sorted, total: m.nBlocks, top: sorted[0][0], topRatio: sorted[0][1] / m.nBlocks };
+}
+
 function diagnose() {
   const entry = state.current;
   const b = state.buf;
@@ -1122,6 +1202,10 @@ function diagnose() {
   const strongTables = state.pointers.filter((t) => t.confidence === "high");
   const headTable = strongTables.find((t) => t.off <= 256);
   const endian = guessEndian(b);
+  const dist = classDistribution();
+  /* 大きなファイルは先頭 4KB だけでは判断できない。地図全体の内訳を主に使う */
+  const mainCls = dist && dist.topRatio >= 0.6 ? dist.top : entry.cls;
+  const mixed = !!dist && dist.topRatio < 0.6 && entry.size > 1024 * 1024;
 
   const say = (title, detail, why, learn) => facts.push({ title, detail, why, learn });
 
@@ -1153,36 +1237,53 @@ function diagnose() {
   } else if (headTable) {
     verdict = "索引つきのアーカイブ";
     sub = "先頭の表が中身の位置を指しています。切り分ければ個別のファイルになります。";
-  } else if (entry.cls === "high") {
+  } else if (mixed) {
+    verdict = "いろいろな種類が混ざった大きな塊";
+    sub = "1 つの形式ではありません。中に別々のデータが詰め込まれた、いわゆるアーカイブです。"
+        + "索引ファイルを見つけて切り分けるのが先決です。";
+  } else if (mainCls === "high") {
     verdict = "圧縮または暗号化されたデータ";
     sub = "この道具では中身に届きません。伸張ルーチンを解くか、展開後のメモリを見る必要があります。";
-  } else if (entry.cls === "wave") {
+  } else if (mainCls === "wave") {
     verdict = "音声らしいデータ";
     sub = "隣り合うバイトの差が小さく、波形の性質があります。";
-  } else if (entry.cls === "zero") {
+  } else if (mainCls === "zero") {
     verdict = "ほとんどがゼロ埋め";
     sub = "詰め物か、未使用の領域です。";
-  } else if (entry.cls === "jp" || jp.length >= 20) {
+  } else if (mainCls === "jp") {
     verdict = "日本語テキストの塊";
     sub = "Shift-JIS がそのまま入っています。索引は見つかりませんでした。";
-  } else if (entry.cls === "ascii") {
+  } else if (mainCls === "ascii") {
     verdict = "ASCII のテキスト";
     sub = "英数字だけの文章です。設定ファイルやスクリプトのことが多い形です。";
-    const head = ascii(b.subarray(0, 60)).replace(/\s+/g, " ").trim();
-    if (head) {
-      say("そのまま読める", head.slice(0, 48),
-          "表示できる文字が 85% 以上を占めています。",
-          "設定ファイルは中身がそのまま読めるので、まずここから当たると全体の構成が分かります。");
-    }
   } else if (state.tiles.length && state.tiles[0].ratio < 0.7) {
     verdict = "画像またはフォントのデータ";
     sub = "縦に相関のある領域があります。タイルとして並べると絵になります。";
-  } else if (entry.cls === "tile") {
+  } else if (mainCls === "tile") {
     verdict = "独自の形式 (テキストか画像か判定できず)";
     sub = "統計だけでは、独自文字コードのテキストと画像を区別できません。相対検索で確かめます。";
   }
 
   /* --- 根拠を並べる --- */
+  if (dist && dist.sorted.length > 1) {
+    const parts = dist.sorted.slice(0, 5)
+      .map(([k, n]) => `${CLASSES[k].label} ${Math.round((n / dist.total) * 100)}%`);
+    say("中身の内訳", parts.join(" / "),
+        `ファイル全体を ${dist.total.toLocaleString("ja-JP")} 区画に分けて数えた結果です。`,
+        "大きなファイルは先頭だけを見ても分かりません。全体の内訳を見て、1 種類なのか"
+        + "詰め合わせなのかを先に判断します。詰め合わせなら、まず切り分けです。");
+  }
+
+  const known = SIGNATURES.find((sig) =>
+    sig.bytes.every((v, i) => b[i] === v));
+  if (known) {
+    say(`先頭が ${known.name}`, known.note || "",
+        "この形式が持つ決まった目印と、先頭のバイトが一致しました。",
+        "先頭が既知の形式でも、ファイル全体がその形式とは限りません。詰め合わせの"
+        + "1 個目がたまたまそれ、ということがよくあります。全体を走査して"
+        + "同じ目印がいくつあるか数えると分かります。");
+    next.push(`「既知の形式」タブで ${known.name} の目印を全体走査し、何個あるか数える`);
+  }
   if (magic.trim() && /^[\x20-\x7E]{3,4}$/.test(magic)) {
     say("先頭 4 バイトが読める文字", `"${magic}"`,
         "自作の形式でも、先頭に短い名札を置くのが普通です。",
@@ -1226,7 +1327,10 @@ function diagnose() {
         + "確率的に Shift-JIS として成立する組み合わせを必ず含みます。",
         "文字列の件数だけで判定してはいけません。バイトの統計 (分類) のほうが信用できます。件数が多くても、内容が意味を成していなければテキストではありません。");
   } else if (jp.length >= 5) {
-    say(`日本語が ${jp.length} 件`, jp.slice(0, 3).map((x) => x.text.slice(0, 18)).join(" / "),
+    const sample = [...jp]
+      .sort((a, c2) => (jpQuality(c2.text).kana * c2.chars) - (jpQuality(a.text).kana * a.chars))
+      .slice(0, 3);
+    say(`日本語が ${jp.length} 件`, sample.map((x) => x.text.slice(0, 18)).join(" / "),
         "Shift-JIS として成立するバイト対が並んでいます。",
         "そのまま読めるということは、ゲームが標準の文字コードを使っているということです。独自コードなら読めません。");
     next.push("「文字列」タブで全体を眺め、ゲーム内で見た言葉があるか確かめる");
@@ -1253,6 +1357,10 @@ function diagnose() {
         "改行や色替えなどの指示は、文字コードが使っていないバイト値に割り当てます。だから未使用の範囲に固まって出ます。");
   }
 
+  if (mixed) {
+    next.push("同じフォルダに索引ファイル (.IDX / .TBL など) が無いか探す");
+    next.push("「索引ファイル」タブで索引と本体を指定して解析する");
+  }
   if (!facts.length) {
     next.push("「16 進」タブで先頭を眺め、繰り返しの形が無いか探す");
   }
@@ -1260,7 +1368,21 @@ function diagnose() {
     next.push("圧縮の可能性が高いので、PCSX2 などで動かして展開後のメモリを見るほうが早い");
   }
 
-  return { verdict, sub, facts, next, layout: layoutSegments(8), endian };
+  /* テキストなら中身をそのまま見せる。設定ファイルは読むのが一番早い */
+  let preview = null;
+  if (mainCls === "ascii" || mainCls === "jp") {
+    const raw = state.buf.subarray(0, 4096);
+    try {
+      preview = (mainCls === "jp" && DECODERS.sjis ? DECODERS.sjis : DECODERS.utf8)
+        .decode(raw).replace(/\u0000+/g, "\n");
+    } catch (err) {
+      preview = ascii(raw);
+    }
+    preview = preview.replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F]/g, "·");
+    if (state.buf.length > 4096) preview += "\n…(先頭 4KB まで)";
+  }
+
+  return { verdict, sub, facts, next, layout: layoutSegments(8), endian, preview };
 }
 
 /** 文字コードが使っていない範囲に集中しているバイト値を探す */
@@ -1577,17 +1699,17 @@ async function buildMap(entry) {
   const size = entry.size;
   const blockSize = Math.max(64, Math.ceil(size / MAP_CELLS / 64) * 64);
   const nBlocks = Math.max(1, Math.ceil(size / blockSize));
-  const sampleLen = Math.min(blockSize, 4096);
+  const sampleLen = Math.min(Math.max(256, blockSize), 4096);
   const cells = new Array(nBlocks);
 
   if (size <= ANALYZE_CAP) {
-    /* 全部読めているので、標本ではなくブロック全体で判定する。
-       ブロックが小さいと統計は粗くなるが、しきい値を標本数から出しているので
-       「乱数なのにタイル扱い」程度のずれで済む */
+    /* 見た目のマスは細かくしたいが、統計は標本数が要る。
+       判定用の窓だけ最低 256 バイトに広げる (マス同士で少し重なる) */
     const all = state.buf;
+    const statLen = Math.max(256, blockSize);
     for (let i = 0; i < nBlocks; i++) {
       const s = i * blockSize;
-      cells[i] = classifyStats(blockStats(all.subarray(s, Math.min(all.length, s + blockSize))));
+      cells[i] = classifyStats(blockStats(all.subarray(s, Math.min(all.length, s + statLen))));
     }
   } else {
     /* 大きいイメージは全部読まず、各ブロックの先頭だけを拾う */
@@ -1810,12 +1932,12 @@ async function selectEntry(entry) {
     ? `このファイルは大きいので、詳しい解析は先頭 ${fmtSize(ANALYZE_CAP)} までに限っています。`
     : "";
 
-  state.strings = scanStrings(state.buf, parseInt($("strmin").value, 10) || 6)
-    .concat(scanUtf8(state.buf, parseInt($("strmin").value, 10) || 6))
-    .sort((a, b) => a.off - b.off);
+  entry.cls = classifyStats(blockStats(state.buf.subarray(0, 4096)));
+  /* 地図を先に作る。どこを文字列走査の対象にするかを分類で決めるため */
+  state.map = await buildMap(entry);
+  state.strings = collectStrings(parseInt($("strmin").value, 10) || 6);
   state.pointers = findPointerTables(state.buf, entry.size);
   state.tiles = findTileRegions(state.buf);
-  entry.cls = classifyStats(blockStats(state.buf.subarray(0, 4096)));
 
   /* 先頭がゼロ埋めのことが多いので、最初に意味のある位置へ寄せておく */
   const firstHigh = state.pointers.find((t) => t.confidence === "high");
@@ -1829,7 +1951,6 @@ async function selectEntry(entry) {
   if (!Number.isFinite(state.hexOff)) state.hexOff = 0;
   $("hexoff").value = hex(state.hexOff);
 
-  state.map = await buildMap(entry);
   state.lit = -1;
   buildMarks();
   renderLegend();
@@ -2005,9 +2126,7 @@ for (const btn of document.querySelectorAll("[data-strfilter]")) {
   });
 }
 $("strrescan").addEventListener("click", () => {
-  const min = parseInt($("strmin").value, 10) || 4;
-  state.strings = scanStrings(state.buf, min).concat(scanUtf8(state.buf, min))
-    .sort((a, b) => a.off - b.off);
+  state.strings = collectStrings(parseInt($("strmin").value, 10) || 6);
   renderStrings();
   renderFindings();
 });
@@ -2385,6 +2504,16 @@ function renderDiagnosis() {
     }
     wrap.append(label, band);
     box.append(wrap);
+  }
+
+  if (d.preview) {
+    const label = document.createElement("span");
+    label.className = "eyebrow";
+    label.textContent = "そのまま読める中身";
+    const pre = document.createElement("pre");
+    pre.className = "textpreview";
+    pre.textContent = d.preview;
+    box.append(label, pre);
   }
 
   /* 根拠と、そこで覚えること */
