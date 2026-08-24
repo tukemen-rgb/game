@@ -3137,6 +3137,103 @@ $("idxrun").addEventListener("click", async () => {
   renderIndexCands(dataEntry);
 });
 
+/**
+ * 総当たりで当たらなかったときに、行き止まりで終わらせないための表示。
+ *
+ * 「候補なし」とだけ言われても次の手が打てません。何を見て諦めたのかと、
+ * 索引の中身そのものを出します。**名前が入っていると固定間隔では当たりません** —
+ * これが実物でいちばん多い外れ方なので、名前らしき並びを数えて教えます。
+ */
+function explainIndexMiss() {
+  const box = $("idxpreview");
+  box.textContent = "";
+  const b = state.idxBuf;
+  if (!b || !b.length) return;
+
+  const magic = ascii(b.subarray(0, 4)).trim();
+  const names = shortNames(b, 24);
+
+  const p = document.createElement("p");
+  p.className = "hint";
+  p.textContent =
+    "レコード長 4〜32 バイト・先頭を飛ばす量 0〜32 バイト・位置の列と長さの列・"
+    + "バイト単位とセクタ単位を、すべて組み合わせて試しました。"
+    + "どれも「位置が減らずに増えて、本体をはみ出さない」並びになりませんでした。"
+    + (names.length >= 8
+      ? "　この索引には名前らしき文字列が入っています。名前が混ざると 1 件あたりの長さが"
+        + "揃わないので、固定間隔の総当たりでは当たりません。"
+      : "");
+  box.append(p);
+
+  const dl = document.createElement("dl");
+  dl.className = "kv";
+  const rows = [
+    ["索引の大きさ", fmtBytes(b.length)],
+    ["先頭 4 バイト", [...b.subarray(0, 4)].map((v) => hex(v, 2)).join(" ")
+      + (magic ? `  ("${magic}")` : "")],
+  ];
+  /* 目印があるなら、それを本体プログラムの中で探せる。答えはコードにある */
+  if (/^[A-Za-z0-9]{3,4}$/.test(magic)) {
+    rows.push(["次の一手", `本体プログラムの「文字列を使っている場所」で "${magic}" を探し、`
+      + "そのコードを逆アセンブルする"]);
+  }
+  for (const [k, v] of rows) {
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v;
+    dl.append(dt, dd);
+  }
+  box.append(dl);
+
+  if (names.length) {
+    const label = document.createElement("span");
+    label.className = "eyebrow";
+    label.textContent = `中に入っている名前らしき文字列  ${names.length} 件 (先頭 24 件)`;
+    const pre = document.createElement("pre");
+    pre.className = "textpreview";
+    pre.textContent = names.map((n) => `${hx(n.off)}  ${n.text}`).join("\n");
+    box.append(label, pre);
+  }
+
+  /* 先頭をそのまま見せる。ここを目で見るのがいちばん早いことが多い */
+  const label2 = document.createElement("span");
+  label2.className = "eyebrow";
+  label2.textContent = "索引の先頭 256 バイト";
+  const wrap = document.createElement("div");
+  wrap.className = "hexwrap";
+  const pre2 = document.createElement("pre");
+  pre2.className = "hexview";
+  const lines = [];
+  for (let off = 0; off < Math.min(256, b.length); off += 16) {
+    const row = b.subarray(off, Math.min(off + 16, b.length));
+    lines.push(hex(off, 6) + "  "
+      + [...row].map((v) => hex(v, 2)).join(" ").padEnd(47, " ")
+      + "  " + ascii(row).replace(/ /g, "."));
+  }
+  pre2.textContent = lines.join("\n");
+  wrap.append(pre2);
+  box.append(label2, wrap);
+}
+
+/** 索引に埋まっている短い名前 (ファイル名らしき ASCII) を拾う */
+function shortNames(b, limit) {
+  const out = [];
+  let start = -1;
+  for (let i = 0; i < b.length && out.length < limit; i++) {
+    const c = b[i];
+    const ok = (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5A)
+            || (c >= 0x61 && c <= 0x7A) || c === 0x2E || c === 0x5F || c === 0x2F;
+    if (ok) {
+      if (start < 0) start = i;
+    } else {
+      if (start >= 0 && i - start >= 4) out.push({ off: start, text: ascii(b.subarray(start, i)) });
+      start = -1;
+    }
+  }
+  return out;
+}
+
 function renderIndexCands(dataEntry) {
   const body = $("idxbody");
   body.textContent = "";
@@ -3145,9 +3242,10 @@ function renderIndexCands(dataEntry) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
     td.colSpan = 7;
-    td.textContent = "候補なし。索引が別の形か、圧縮されているかもしれません。";
+    td.textContent = "候補なし。総当たりでは形が当たりませんでした。";
     tr.append(td);
     body.append(tr);
+    explainIndexMiss();
     return;
   }
   state.idxCands.forEach((c, i) => {
