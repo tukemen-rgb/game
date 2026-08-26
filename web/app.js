@@ -2442,8 +2442,11 @@ function renderHex() {
     frag.append(line);
   }
   view.append(frag);
+  /* どのファイルを見ているかを必ず添える。タブを移ると選択が変わるので、
+     位置だけ出していると別のファイルを見ていることに気づけない */
   $("hexpos").textContent =
-    `${hx(start)} 〜 ${hx(Math.max(start, end - 1))} / 全体 ${fmtBytes(state.buf.length)}`
+    (state.current ? `${state.current.path}  ·  ` : "")
+    + `${hx(start)} 〜 ${hx(Math.max(start, end - 1))} / 全体 ${fmtBytes(state.buf.length)}`
     + (abs ? `  (イメージ上では ${hx(abs + start)})` : "");
 }
 
