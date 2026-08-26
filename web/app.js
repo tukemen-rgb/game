@@ -3130,12 +3130,150 @@ $("idxrun").addEventListener("click", async () => {
   state.idxBuf = await readRange(idxEntry.file, idxEntry.offset,
                                  Math.min(idxEntry.size, 32 * 1024 * 1024));
   state.idxCands = analyzeIndex(state.idxBuf, dataEntry.size);
+  /* 位置と長さだけの形で当たらなければ、名前つきの形を試す */
+  if (!state.idxCands.length) {
+    state.idxCands = analyzeNamedIndex(state.idxBuf, dataEntry.size);
+  }
   state.idxPick = -1;
+  const named = state.idxCands.length && state.idxCands[0].named;
   note.textContent = state.idxCands.length
     ? `${idxEntry.name} → ${dataEntry.name} · 候補 ${state.idxCands.length} 件`
+      + (named ? " (名前つきの索引)" : "")
     : `${idxEntry.name} からは索引らしい並びが見つかりませんでした`;
   renderIndexCands(dataEntry);
 });
+
+/* @extract-start named-index */
+/**
+ * 名前が入っている索引を読む。
+ *
+ * 位置と長さだけの索引なら固定間隔の総当たりで当たりますが、実物には
+ * **ファイル名を持つ索引**があります。名前そのものは長さがまちまちなので、
+ * レコードには「名前の置き場所」を指す値だけが入り、名前は末尾の文字列置き場に
+ * まとめて並びます。この形はレコード自体は固定長なので、
+ * **「その列が指す先に読める名前があるか」**を手がかりにすれば当てられます。
+ *
+ * 僕の夏休み 2 の BOKU2.IDX (先頭が "DFI") がこの形でした。
+ */
+
+/** その位置にヌル終端の短い名前があれば長さを返す */
+function isNameAt(b, p, maxLen) {
+  if (p < 0 || p + 1 >= b.length) return 0;
+  let n = 0;
+  const limit = Math.min(b.length - p, maxLen || 64);
+  while (n < limit) {
+    const c = b[p + n];
+    if (c === 0) break;
+    /* 空白は名前に使わない。記号は . _ - / くらい */
+    if (c < 0x21 || c > 0x7E) return 0;
+    n++;
+  }
+  return (n >= 2 && n < limit && b[p + n] === 0) ? n : 0;
+}
+
+function nameAt(b, p) {
+  const n = isNameAt(b, p, 64);
+  return n ? ascii(b.subarray(p, p + n)) : "";
+}
+
+function analyzeNamedIndex(idx, dataSize) {
+  const cands = [];
+  const RECS = [8, 12, 16, 20, 24, 28, 32];
+  const SKIPS = [0, 4, 8, 12, 16, 20, 24, 32];
+
+  for (const rec of RECS) {
+    for (const skip of SKIPS) {
+      const count = Math.floor((idx.length - skip) / rec);
+      if (skip >= idx.length || count < 8) continue;
+      const slots = [];
+      for (let f = 0; f + 4 <= rec; f += 4) slots.push(f);
+
+      for (const nameField of slots) {
+        /* まず名前の列を決める。
+           レコードの並びは途中で終わり、そのあとに名前の置き場が続きます。
+           だから「全体の何割」ではなく **先頭から何件続くか** を数えます。
+           ここを間違えると、名前の置き場までレコードとして数えてしまいます。 */
+        let run = 0, hits = 0, solid = 0;
+        for (let i = 0; i < count; i++) {
+          const base = skip + i * rec;
+          let zero = true;
+          for (let k = 0; k < rec; k++) { if (idx[base + k]) { zero = false; break; } }
+          if (zero) { run++; continue; }          /* 詰め物のレコードは飛ばす */
+          solid++;
+          if (!isNameAt(idx, u32le(idx, base + nameField), 64)) break;
+          hits++; run++;
+        }
+        if (hits < 8 || hits < solid * 0.9) continue;
+        const scan = run;
+
+        /* レコードの並びの直後から名前の置き場が始まっているか。
+           ポインタ表と同じ原則で、**表は自分の外側を指す**。
+           これを見ないと、1 レコードずれた読み方も同じくらい正しく見えて、
+           名前と中身が 1 つずつずれた一覧ができあがります。 */
+        let nameStart = Infinity;
+        for (let i = 0; i < run; i++) {
+          const v = u32le(idx, skip + i * rec + nameField);
+          if (isNameAt(idx, v, 64) && v < nameStart) nameStart = v;
+        }
+        const gap = Number.isFinite(nameStart)
+          ? Math.abs(nameStart - (skip + run * rec)) : Infinity;
+        if (gap > 4096) continue;
+        for (const atField of slots) {
+          if (atField === nameField) continue;
+          for (const lenField of slots) {
+            if (lenField === nameField || lenField === atField) continue;
+            for (const mult of [2048, 1]) {
+              let files = 0, ok = 0, used = 0;
+              const seen = new Set();
+              for (let i = 0; i < scan; i++) {
+                const base = skip + i * rec;
+                const a = u32le(idx, base + atField);
+                const n = u32le(idx, base + lenField);
+                if (!a && !n) continue;          /* ディレクトリや空きレコード */
+                files++;
+                const at = a * mult;
+                if (n > 0 && at < dataSize && at + n <= dataSize) {
+                  ok++; used += n; seen.add(at);
+                }
+              }
+              /* 同じ位置ばかりを指すなら、それは位置の列ではない */
+              if (files < 8 || ok < files * 0.9 || seen.size < ok * 0.8) continue;
+              /* 種別や連番のような小さい値の列も「長さ」として通ってしまう。
+                 索引は本体をだいたい使い切るものなので、合計で見て弾く */
+              if (used < dataSize * 0.05) continue;
+              cands.push({
+                named: true, rec, skip, nameField, atField, lenField, mult,
+                count: run, files: ok, gap,
+                coverage: Math.min(1, used / Math.max(1, dataSize)),
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /* 本体をよく使い切っていて、名前の置き場がレコードの直後から始まるものを上に */
+  cands.sort((a, b) =>
+    (b.coverage - a.coverage) || (a.gap - b.gap) || (b.files - a.files) || (a.rec - b.rec));
+  return cands.slice(0, 8);
+}
+
+/** 名前つき索引を実際に読み出す */
+function namedEntries(idx, c, dataSize, limit) {
+  const out = [];
+  for (let i = 0; i < c.count && out.length < limit; i++) {
+    const base = c.skip + i * c.rec;
+    const a = u32le(idx, base + c.atField);
+    const n = u32le(idx, base + c.lenField);
+    if (!a && !n) continue;
+    const at = a * c.mult;
+    if (!(n > 0 && at < dataSize && at + n <= dataSize)) continue;
+    out.push({ i, at, len: n, name: nameAt(idx, u32le(idx, base + c.nameField)) });
+  }
+  return out;
+}
+/* @extract-end named-index */
 
 /**
  * 総当たりで当たらなかったときに、行き止まりで終わらせないための表示。
@@ -3250,7 +3388,12 @@ function renderIndexCands(dataEntry) {
   }
   state.idxCands.forEach((c, i) => {
     const tr = document.createElement("tr");
-    const cells = [
+    const cells = c.named ? [
+      `${c.rec} バイト`, c.skip ? `${c.skip} バイト` : "なし",
+      `+${c.atField}`, c.mult === 1 ? "バイト" : "セクタ (2048)",
+      `+${c.lenField}  (名前 +${c.nameField})`,
+      `${c.files} / ${c.count}`, `${Math.round(c.coverage * 100)}%`,
+    ] : [
       `${c.rec} バイト`, c.skip ? `${c.skip} バイト` : "なし",
       `+${c.field}`, c.mult === 1 ? "バイト" : "セクタ (2048)",
       c.size ? `+${c.size.field}${c.size.mult === 2048 ? " (セクタ)" : ""}` : "隣との差",
@@ -3276,18 +3419,22 @@ async function previewIndex(dataEntry) {
   box.textContent = "";
   if (!c) return;
 
-  const items = indexEntries(state.idxBuf, c, dataEntry.size, 24);
+  const items = c.named
+    ? namedEntries(state.idxBuf, c, dataEntry.size, 24)
+    : indexEntries(state.idxBuf, c, dataEntry.size, 24);
   const head = document.createElement("p");
   head.className = "hint";
   head.textContent = "先頭 24 件の中身を実際に読んで確かめています。"
-    + "内容がそれらしければ、この解釈で合っています。";
+    + (c.named
+      ? "名前と中身が噛み合っていれば (.tm2 が画像、.msg が日本語テキストなど)、この解釈で合っています。"
+      : "内容がそれらしければ、この解釈で合っています。");
   box.append(head);
 
   const wrap = document.createElement("div");
   wrap.className = "tablewrap";
   const table = document.createElement("table");
-  table.innerHTML = "<thead><tr><th>番号</th><th>位置</th><th>長さ</th>"
-    + "<th>先頭のバイト</th><th>見当</th></tr></thead>";
+  table.innerHTML = "<thead><tr><th>" + (c.named ? "名前" : "番号") + "</th>"
+    + "<th>位置</th><th>長さ</th><th>先頭のバイト</th><th>見当</th></tr></thead>";
   const tb = document.createElement("tbody");
   for (const it of items) {
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, Math.min(64, it.len || 64));
@@ -3296,7 +3443,7 @@ async function previewIndex(dataEntry) {
     const kind = st ? CLASSES[classifyStats(st)].label : "—";
     const tr = document.createElement("tr");
     const cells = [
-      String(it.i), hx(it.at), fmtSize(it.len),
+      c.named ? (it.name || `#${it.i}`) : String(it.i), hx(it.at), fmtSize(it.len),
       [...bytes.subarray(0, 8)].map((v) => hex(v, 2)).join(" ") + (magic ? `  "${magic}"` : ""),
       kind,
     ];
@@ -3315,18 +3462,21 @@ async function previewIndex(dataEntry) {
   actions.className = "controls";
   const go = document.createElement("button");
   go.className = "btn primary";
-  go.textContent = `この解釈で ${c.count} 個に切り分ける`;
+  go.textContent = `この解釈で ${c.named ? c.files : c.count} 個に切り分ける`;
   go.addEventListener("click", () => splitByIndex(dataEntry, c));
   actions.append(go);
   box.append(actions);
 }
 
 function splitByIndex(dataEntry, c) {
-  const items = indexEntries(state.idxBuf, c, dataEntry.size, 4096);
+  const items = c.named
+    ? namedEntries(state.idxBuf, c, dataEntry.size, 4096)
+    : indexEntries(state.idxBuf, c, dataEntry.size, 4096);
   const prefix = dataEntry.path + "/";
   state.entries = state.entries.filter((e) => e.kind !== "part" || e.parentPath !== dataEntry.path);
   const kids = items.filter((it) => it.len > 0).map((it) => {
-    const name = "#" + String(it.i).padStart(4, "0");
+    /* 名前が分かっているならそれを使う。拡張子から中身の見当がつく */
+    const name = it.name || ("#" + String(it.i).padStart(4, "0"));
     return {
       path: prefix + name, name, file: dataEntry.file,
       offset: dataEntry.offset + it.at, size: it.len,
