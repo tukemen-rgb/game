@@ -3133,15 +3133,20 @@ $("idxrun").addEventListener("click", async () => {
   state.idxBuf = await readRange(idxEntry.file, idxEntry.offset,
                                  Math.min(idxEntry.size, 32 * 1024 * 1024));
   state.idxCands = analyzeIndex(state.idxBuf, dataEntry.size);
-  /* 位置と長さだけの形で当たらなければ、名前つきの形を試す */
+  /* 位置と長さだけの形で当たらなければ、名前つきの形を試す。
+     分かっている形 (DFI など) は当てにいかず、そのまま読む */
   if (!state.idxCands.length) {
-    state.idxCands = analyzeNamedIndex(state.idxBuf, dataEntry.size);
+    const known = readDfi(state.idxBuf, dataEntry.size);
+    state.idxCands = known ? [known] : [];
+    state.idxCands = state.idxCands.concat(
+      analyzeNamedIndex(state.idxBuf, dataEntry.size).filter((c) => !known));
   }
   state.idxPick = -1;
-  const named = state.idxCands.length && state.idxCands[0].named;
+  const top = state.idxCands[0];
   note.textContent = state.idxCands.length
     ? `${idxEntry.name} → ${dataEntry.name} · 候補 ${state.idxCands.length} 件`
-      + (named ? " (名前つきの索引)" : "")
+      + (top.known ? ` (${top.known} 形式として読みました)`
+                   : top.named ? " (名前つきの索引)" : "")
     : `${idxEntry.name} からは索引らしい並びが見つかりませんでした`;
   renderIndexCands(dataEntry);
 });
@@ -3177,6 +3182,67 @@ function isNameAt(b, p, maxLen) {
 function nameAt(b, p) {
   const n = isNameAt(b, p, 64);
   return n ? ascii(b.subarray(p, p + n)) : "";
+}
+
+/**
+ * 分かっている索引の形は、当てるのではなく **そのまま読む**。
+ *
+ * "DFI" は僕の夏休み 2 (SCPS-15026) の BOKU2.IDX が使っている形です。
+ * 本体プログラムの 0x001293D8 の関数が「先頭 4 バイトが DFI なら、
+ * バッファ + 0x10 を一覧の先頭とする」と書いていました。
+ *
+ *   ヘッダ 16 バイト   "DFI\0" + 版 (0x00000100) + 予備 8 バイト
+ *   レコード 16 バイト
+ *     +0  u16  種別 (ディレクトリは 1)
+ *     +2  u16  種別 (ファイルは 1)
+ *     +4  u32  名前の位置 — この索引ファイルの先頭からのバイト数
+ *     +8  u32  データ本体でのセクタ番号 (×2048)   ディレクトリは 0
+ *     +12 u32  長さ (バイト)                       ディレクトリは 0
+ *
+ * 名前は最後にまとめて並びます。**並び順はレコードの順とは限りません**
+ * (同じ作りのファイルが続く区間では、後ろから前へ下がっていきます)。
+ */
+function readDfi(idx, dataSize) {
+  if (idx.length < 32) return null;
+  if (!(idx[0] === 0x44 && idx[1] === 0x46 && idx[2] === 0x49 && idx[3] === 0x00)) return null;
+
+  const out = [];
+  let miss = 0;
+  for (let p = 16; p + 16 <= idx.length; p += 16) {
+    let zero = true;
+    for (let k = 0; k < 16; k++) { if (idx[p + k]) { zero = false; break; } }
+    if (zero) continue;
+
+    const name = nameAt(idx, u32le(idx, p + 4));
+    if (!name) {                       /* 名前の置き場に入ったら、そこで終わり */
+      if (++miss >= 8) break;
+      continue;
+    }
+    miss = 0;
+    const lba = u32le(idx, p + 8), len = u32le(idx, p + 12);
+    if (!lba && !len) continue;        /* ディレクトリ */
+    const at = lba * 2048;
+    if (len > 0 && at < dataSize && at + len <= dataSize) {
+      out.push({ i: out.length, at, len, name });
+    }
+  }
+  if (out.length < 8) return null;
+
+  /* 読めたことにする前に、範囲が互いに食い込んでいないかだけ確かめる */
+  const sorted = out.slice().sort((a, b) => a.at - b.at);
+  let overlap = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].at < sorted[i - 1].at + sorted[i - 1].len) overlap++;
+  }
+  if (overlap > out.length * 0.05) return null;
+
+  const used = out.reduce((sum, x) => sum + x.len, 0);
+  return {
+    named: true, known: "DFI", rec: 16, skip: 16,
+    nameField: 4, atField: 8, lenField: 12, atMult: 2048, lenMult: 1,
+    count: Math.floor((idx.length - 16) / 16), files: out.length, gap: 0,
+    coverage: Math.min(1, used / Math.max(1, dataSize)),
+  };
 }
 
 function analyzeNamedIndex(idx, dataSize) {
@@ -3281,10 +3347,11 @@ function scoreNamedLayout(idx, dataSize, c) {
      長さらしい値かどうかを、中央値と値のばらけ方で見る */
   const lens = items.map((x) => x.len).sort((x, y) => x - y);
   if (lens[lens.length >> 1] < 32) return null;
-  /* 種別のような数種類しか値を取らない列を外す。
-     ただし本物の長さも似た値に固まることがあるので、割合ではなく実数で見る */
-  const needDistinct = Math.max(3, Math.min(8, Math.floor(items.length * 0.1)));
-  if (new Set(lens).size < needDistinct) return null;
+  /* まったく同じ値しか取らない列は長さではない。
+     ただし **本物の長さも数種類しかないことがあります** (同じ作りのデータが
+     並んでいる領域など)。実物の索引でここを厳しくしすぎて正解を落としました。
+     種別の列を外す仕事は、下の重なりの検査と被覆率の順位に任せます。 */
+  if (new Set(lens).size < 2) return null;
   if (new Set(items.map((x) => x.at)).size < items.length * 0.8) return null;
 
   /* 範囲が互いに食い込んでいたら、その単位は大きすぎる */
