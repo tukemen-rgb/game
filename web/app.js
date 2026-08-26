@@ -3192,60 +3192,54 @@ function analyzeNamedIndex(idx, dataSize) {
         /* まず名前の列を決める。
            レコードの並びは途中で終わり、そのあとに名前の置き場が続きます。
            だから「全体の何割」ではなく **先頭から何件続くか** を数えます。
-           ここを間違えると、名前の置き場までレコードとして数えてしまいます。 */
-        let run = 0, hits = 0, solid = 0;
+           ここを間違えると、名前の置き場までレコードとして数えてしまいます。
+           途中に名前を持たないレコードが混ざることもあるので、
+           数件続けて外れたところで打ち切ります。 */
+        let run = 0, hits = 0, seenRec = 0, miss = 0;
         for (let i = 0; i < count; i++) {
           const base = skip + i * rec;
           let zero = true;
           for (let k = 0; k < rec; k++) { if (idx[base + k]) { zero = false; break; } }
-          if (zero) { run++; continue; }          /* 詰め物のレコードは飛ばす */
-          solid++;
-          if (!isNameAt(idx, u32le(idx, base + nameField), 64)) break;
-          hits++; run++;
+          if (zero) continue;                     /* 詰め物のレコード */
+          seenRec++;
+          if (isNameAt(idx, u32le(idx, base + nameField), 64)) {
+            hits++; miss = 0; run = i + 1;
+          } else if (++miss >= 8) {
+            break;
+          }
         }
-        if (hits < 8 || hits < solid * 0.9) continue;
-        const scan = run;
+        if (hits < 8 || hits < seenRec * 0.8) continue;
 
         /* レコードの並びの直後から名前の置き場が始まっているか。
            ポインタ表と同じ原則で、**表は自分の外側を指す**。
            これを見ないと、1 レコードずれた読み方も同じくらい正しく見えて、
            名前と中身が 1 つずつずれた一覧ができあがります。 */
-        let nameStart = Infinity;
+        const recEnd = skip + run * rec;
+        let after = 0, total = 0, nameStart = Infinity;
         for (let i = 0; i < run; i++) {
           const v = u32le(idx, skip + i * rec + nameField);
-          if (isNameAt(idx, v, 64) && v < nameStart) nameStart = v;
+          if (!isNameAt(idx, v, 64)) continue;
+          total++;
+          /* 最小値をそのまま使うと、名前を持たない 1 件 (値が 0) に引きずられて
+             判定が壊れます。**レコードの外を指しているものだけ**で測ります */
+          if (v >= recEnd) { after++; if (v < nameStart) nameStart = v; }
         }
-        const gap = Number.isFinite(nameStart)
-          ? Math.abs(nameStart - (skip + run * rec)) : Infinity;
+        if (!total || after < total * 0.9 || !Number.isFinite(nameStart)) continue;
+        const gap = nameStart - recEnd;
         if (gap > 4096) continue;
+
         for (const atField of slots) {
           if (atField === nameField) continue;
           for (const lenField of slots) {
             if (lenField === nameField || lenField === atField) continue;
-            for (const mult of [2048, 1]) {
-              let files = 0, ok = 0, used = 0;
-              const seen = new Set();
-              for (let i = 0; i < scan; i++) {
-                const base = skip + i * rec;
-                const a = u32le(idx, base + atField);
-                const n = u32le(idx, base + lenField);
-                if (!a && !n) continue;          /* ディレクトリや空きレコード */
-                files++;
-                const at = a * mult;
-                if (n > 0 && at < dataSize && at + n <= dataSize) {
-                  ok++; used += n; seen.add(at);
-                }
+            /* 位置も長さも、バイト単位とセクタ単位の両方がありえます。
+               どちらかに決め打ちすると、正しい形なのに当たりません */
+            for (const atMult of [2048, 1]) {
+              for (const lenMult of [1, 2048]) {
+                const c = scoreNamedLayout(idx, dataSize,
+                  { rec, skip, nameField, atField, lenField, atMult, lenMult, count: run });
+                if (c) { c.gap = gap; cands.push(c); }
               }
-              /* 同じ位置ばかりを指すなら、それは位置の列ではない */
-              if (files < 8 || ok < files * 0.9 || seen.size < ok * 0.8) continue;
-              /* 種別や連番のような小さい値の列も「長さ」として通ってしまう。
-                 索引は本体をだいたい使い切るものなので、合計で見て弾く */
-              if (used < dataSize * 0.05) continue;
-              cands.push({
-                named: true, rec, skip, nameField, atField, lenField, mult,
-                count: run, files: ok, gap,
-                coverage: Math.min(1, used / Math.max(1, dataSize)),
-              });
             }
           }
         }
@@ -3259,6 +3253,50 @@ function analyzeNamedIndex(idx, dataSize) {
   return cands.slice(0, 8);
 }
 
+/**
+ * ひとつの解釈を採点する。単位を決め打ちしないぶん、判定はここが要になります。
+ *
+ * いちばん効くのが **重なりの検査** です。長さの単位を取り違えると、
+ * 大きすぎるほうは範囲が互いに食い込み、小さすぎるほうは本体をほとんど
+ * 使い切りません。前者は重なりで落とし、後者は被覆率の順位で下がります。
+ */
+function scoreNamedLayout(idx, dataSize, c) {
+  const items = [];
+  let bad = 0;
+  for (let i = 0; i < c.count; i++) {
+    const base = c.skip + i * c.rec;
+    const a = u32le(idx, base + c.atField);
+    const n = u32le(idx, base + c.lenField);
+    if (!a && !n) continue;                       /* ディレクトリや空きレコード */
+    const at = a * c.atMult, len = n * c.lenMult;
+    if (len > 0 && at < dataSize && at + len <= dataSize) items.push({ at, len });
+    else bad++;
+  }
+  if (items.length < 8 || bad > items.length * 0.1) return null;
+
+  /* 種別や連番のような小さい値の列も「長さ」として通ってしまう。
+     長さらしい値かどうかを、中央値と値のばらけ方で見る */
+  const lens = items.map((x) => x.len).sort((x, y) => x - y);
+  if (lens[lens.length >> 1] < 32) return null;
+  /* 種別のような数種類しか値を取らない列を外す。
+     ただし本物の長さも似た値に固まることがあるので、割合ではなく実数で見る */
+  const needDistinct = Math.max(3, Math.min(8, Math.floor(items.length * 0.1)));
+  if (new Set(lens).size < needDistinct) return null;
+  if (new Set(items.map((x) => x.at)).size < items.length * 0.8) return null;
+
+  /* 範囲が互いに食い込んでいたら、その単位は大きすぎる */
+  const sorted = items.slice().sort((x, y) => x.at - y.at);
+  let overlap = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].at < sorted[i - 1].at + sorted[i - 1].len) overlap++;
+  }
+  if (overlap > items.length * 0.1) return null;
+
+  const used = items.reduce((sum, x) => sum + x.len, 0);
+  return Object.assign({ named: true, files: items.length,
+    coverage: Math.min(1, used / Math.max(1, dataSize)) }, c);
+}
+
 /** 名前つき索引を実際に読み出す */
 function namedEntries(idx, c, dataSize, limit) {
   const out = [];
@@ -3267,9 +3305,9 @@ function namedEntries(idx, c, dataSize, limit) {
     const a = u32le(idx, base + c.atField);
     const n = u32le(idx, base + c.lenField);
     if (!a && !n) continue;
-    const at = a * c.mult;
-    if (!(n > 0 && at < dataSize && at + n <= dataSize)) continue;
-    out.push({ i, at, len: n, name: nameAt(idx, u32le(idx, base + c.nameField)) });
+    const at = a * c.atMult, len = n * c.lenMult;
+    if (!(len > 0 && at < dataSize && at + len <= dataSize)) continue;
+    out.push({ i, at, len, name: nameAt(idx, u32le(idx, base + c.nameField)) });
   }
   return out;
 }
@@ -3390,8 +3428,8 @@ function renderIndexCands(dataEntry) {
     const tr = document.createElement("tr");
     const cells = c.named ? [
       `${c.rec} バイト`, c.skip ? `${c.skip} バイト` : "なし",
-      `+${c.atField}`, c.mult === 1 ? "バイト" : "セクタ (2048)",
-      `+${c.lenField}  (名前 +${c.nameField})`,
+      `+${c.atField}`, c.atMult === 1 ? "バイト" : "セクタ (2048)",
+      `+${c.lenField}${c.lenMult === 2048 ? " (セクタ)" : ""}  ·  名前 +${c.nameField}`,
       `${c.files} / ${c.count}`, `${Math.round(c.coverage * 100)}%`,
     ] : [
       `${c.rec} バイト`, c.skip ? `${c.skip} バイト` : "なし",

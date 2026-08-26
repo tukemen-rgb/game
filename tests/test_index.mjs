@@ -71,7 +71,8 @@ const ascii2 = (bytes) => {
   return s;
 };
 const named = new Function("u32le", "ascii",
-  src.slice(nstart, nend) + "\nreturn { analyzeNamedIndex, namedEntries, isNameAt };")(
+  src.slice(nstart, nend)
+  + "\nreturn { analyzeNamedIndex, namedEntries, isNameAt, scoreNamedLayout };")(
   u32le, ascii2);
 
 /* 実物と同じ形の索引を組み立てる。
@@ -125,12 +126,14 @@ const dfiDataSize = lba * 2048;
 const nc = named.analyzeNamedIndex(dfi, dfiDataSize);
 if (!nc.length) fail("名前つき索引の候補が 1 件も出ない");
 const nbest = nc[0];
+/* 先頭を飛ばす量と列の位置は、丸ごと 1 レコードずらしても同じ読み方になります
+   (ヘッダを 1 件目として数えるかどうかの違い)。だから位置そのものではなく、
+   **列の並びと単位、そして読み出した結果**を固定します。 */
 if (nbest.rec !== 16) fail(`レコード長が ${nbest.rec} (期待 16)`);
-if (nbest.skip !== 16) fail(`先頭を飛ばす量が ${nbest.skip} (期待 16)`);
-if (nbest.nameField !== 4) fail(`名前の列が +${nbest.nameField} (期待 +4)`);
-if (nbest.atField !== 8) fail(`位置の列が +${nbest.atField} (期待 +8)`);
-if (nbest.lenField !== 12) fail(`長さの列が +${nbest.lenField} (期待 +12)`);
-if (nbest.mult !== 2048) fail(`位置の単位が ${nbest.mult} (期待 2048)`);
+if (nbest.atField !== nbest.nameField + 4) fail("名前の次が位置の列になっていない");
+if (nbest.lenField !== nbest.atField + 4) fail("位置の次が長さの列になっていない");
+if (nbest.atMult !== 2048) fail(`位置の単位が ${nbest.atMult} (期待 2048 = セクタ)`);
+if (nbest.lenMult !== 1) fail(`長さの単位が ${nbest.lenMult} (期待 1 = バイト)`);
 if (nbest.files !== dfiFiles.length) fail(`件数が ${nbest.files} (期待 ${dfiFiles.length})`);
 
 const nitems = named.namedEntries(dfi, nbest, dfiDataSize, 4096);
@@ -155,5 +158,71 @@ if (named.analyzeNamedIndex(junk, dfiDataSize).length) {
 }
 
 console.log(`OK  名前つき索引 = レコード${nbest.rec} ヘッダ${nbest.skip} `
-  + `名前+${nbest.nameField} 位置+${nbest.atField}(x${nbest.mult}) 長さ+${nbest.lenField} `
+  + `名前+${nbest.nameField} 位置+${nbest.atField}(x${nbest.atMult}) 長さ+${nbest.lenField} `
   + `${nbest.files} 件`);
+
+/* 長さもセクタ単位で持つ索引 (単位を決め打ちすると当たらない形) */
+function buildDfiSectorLen(files, dirs) {
+  const recCount = files.length + dirs.length;
+  const recEnd = 16 + recCount * 16;
+  const names = [];
+  let nameOff = recEnd;
+  const nameBuf = [];
+  for (const n of [...dirs, ...files.map((f) => f.name)]) {
+    names.push(nameOff);
+    for (const ch of n) nameBuf.push(ch.charCodeAt(0));
+    nameBuf.push(0);
+    nameOff += n.length + 1;
+  }
+  const buf = new Uint8Array(recEnd + nameBuf.length);
+  const dv = new DataView(buf.buffer);
+  buf.set([0x44, 0x46, 0x49, 0x00], 0);
+  dv.setUint32(4, 0x00000100, true);
+  let p = 16, ni = 0;
+  for (let d = 0; d < dirs.length; d++, ni++) {
+    dv.setUint32(p, 1, true);
+    dv.setUint32(p + 4, names[ni], true);
+    p += 16;
+  }
+  for (const f of files) {
+    dv.setUint32(p, 2, true);
+    dv.setUint32(p + 4, names[ni++], true);
+    dv.setUint32(p + 8, f.lba, true);
+    dv.setUint32(p + 12, f.sectors, true);      /* 長さもセクタ数 */
+    p += 16;
+  }
+  buf.set(nameBuf, recEnd);
+  return buf;
+}
+
+const secFiles = [];
+let slba = 4;
+for (let i = 0; i < 40; i++) {
+  const sectors = 2 + (i % 7);
+  secFiles.push({ name: `map${String(i).padStart(3, "0")}.bin`, lba: slba, sectors });
+  slba += sectors;
+}
+const dfi2 = buildDfiSectorLen(secFiles, ["data", "map"]);
+const nc2 = named.analyzeNamedIndex(dfi2, slba * 2048);
+if (!nc2.length) fail("長さがセクタ単位の索引で候補が出ない");
+if (nc2[0].lenMult !== 2048) fail(`長さの単位が ${nc2[0].lenMult} (期待 2048 = セクタ)`);
+const items2 = named.namedEntries(dfi2, nc2[0], slba * 2048, 4096);
+if (items2.length !== secFiles.length) fail(`件数が ${items2.length}`);
+for (let i = 0; i < secFiles.length; i++) {
+  if (items2[i].name !== secFiles[i].name) fail(`#${i} の名前が ${items2[i].name}`);
+  if (items2[i].len !== secFiles[i].sectors * 2048) fail(`#${i} の長さが ${items2[i].len}`);
+}
+console.log(`OK  長さがセクタ単位の索引も当てられる (${items2.length} 件)`);
+
+/* 名前を持たないレコード (名前の位置が 0) が混ざっていても壊れないこと。
+   0 番地には "DFI" があるので、素朴に最小値を取ると判定が吹き飛ぶ */
+const poisoned = buildDfi(dfiFiles, ["00diary", "system", "insect"]);
+new DataView(poisoned.buffer).setUint32(16 + 4, 0, true);        /* 1 件目の名前を 0 に */
+new DataView(poisoned.buffer).setUint32(16 + 5 * 16 + 4, 0, true);
+const nc3 = named.analyzeNamedIndex(poisoned, dfiDataSize);
+if (!nc3.length) fail("名前を持たないレコードが混ざると候補が出なくなる");
+const items3 = named.namedEntries(poisoned, nc3[0], dfiDataSize, 4096);
+if (items3.length !== dfiFiles.length) fail(`件数が ${items3.length} (期待 ${dfiFiles.length})`);
+if (items3[0].name !== dfiFiles[0].name) fail(`名前がずれている: ${items3[0].name}`);
+console.log("OK  名前を持たないレコードが混ざっても読める");
+
