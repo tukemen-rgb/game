@@ -3206,24 +3206,29 @@ function readDfi(idx, dataSize) {
   if (idx.length < 32) return null;
   if (!(idx[0] === 0x44 && idx[1] === 0x46 && idx[2] === 0x49 && idx[3] === 0x00)) return null;
 
+  /* 構造は逆アセンブルで確定しているので、**セクタと長さだけを信じて読みます**。
+     名前は「読めれば付ける」だけ。名前の並びがどうであっても関係ありません。
+     終わりの見分け方: 本物のレコードは必ず「セクタ×2048 + 長さ」が本体の中に
+     収まります。レコードの並びを過ぎて名前の置き場に入ると、そこを 16 バイトずつ
+     レコードとみなして読んでも範囲に収まらなくなる (名前の文字が巨大な数に化ける)
+     ので、そういう行が続いたら打ち切ります。 */
   const out = [];
-  let miss = 0;
+  let junk = 0;
   for (let p = 16; p + 16 <= idx.length; p += 16) {
-    let zero = true;
-    for (let k = 0; k < 16; k++) { if (idx[p + k]) { zero = false; break; } }
-    if (zero) continue;
-
-    const name = nameAt(idx, u32le(idx, p + 4));
-    if (!name) {                       /* 名前の置き場に入ったら、そこで終わり */
-      if (++miss >= 8) break;
-      continue;
-    }
-    miss = 0;
+    const np = u32le(idx, p + 4);
     const lba = u32le(idx, p + 8), len = u32le(idx, p + 12);
-    if (!lba && !len) continue;        /* ディレクトリ */
     const at = lba * 2048;
-    if (len > 0 && at < dataSize && at + len <= dataSize) {
-      out.push({ i: out.length, at, len, name });
+    const isDir = lba === 0 && len === 0;                       /* 位置も長さも 0 */
+    const isFile = len > 0 && at < dataSize && at + len <= dataSize;
+
+    if (isFile) {
+      junk = 0;
+      const name = nameAt(idx, np);
+      out.push({ i: out.length, at, len, name: name || `#${out.length}` });
+    } else if (isDir) {
+      junk = 0;                                                 /* フォルダは飛ばす */
+    } else if (++junk >= 32) {
+      break;                                                    /* 名前の置き場に入った */
     }
   }
   if (out.length < 8) return null;
@@ -3377,7 +3382,9 @@ function namedEntries(idx, c, dataSize, limit) {
     if (!a && !n) continue;
     const at = a * c.atMult, len = n * c.lenMult;
     if (!(len > 0 && at < dataSize && at + len <= dataSize)) continue;
-    out.push({ i, at, len, name: nameAt(idx, u32le(idx, base + c.nameField)) });
+    /* 名前が読めなくても番号で並べる。読み取りと切り分けの件数を揃えるため */
+    const name = nameAt(idx, u32le(idx, base + c.nameField));
+    out.push({ i, at, len, name: name || `#${out.length}` });
   }
   return out;
 }
