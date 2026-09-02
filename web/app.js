@@ -872,6 +872,78 @@ const SIGNATURES = [
   { name: "PNG 画像", note: "", bytes: [0x89, 0x50, 0x4E, 0x47] },
 ];
 
+/* @extract-start sniff */
+/**
+ * 名前の無いファイルに **中身から見当を付ける**。
+ *
+ * 索引から切り分けた結果が `#0012` のような番号だけだと、1951 個の中から
+ * テキストを探しようがありません。そこで先頭のバイトを見て種類を決め、
+ * 拡張子のように名前の末尾へ付けます (`#0012.tm2`)。
+ *
+ * 決め方は二段階。まず **決まった魔法数** (TIM2 / VAGp / ELF …) を見る。
+ * これは確実。当たらなければバイトの性質 (日本語らしい・ゼロ埋め・乱数的)
+ * から見当を付ける。こちらは「らしい」止まりで、名前にも `?` を付けない代わりに
+ * 説明の側で「見当」と明記します。
+ *
+ * **圧縮の見当** が一つ特別です。ゲームの圧縮データは先頭 4 バイトに
+ * 「伸張後の大きさ」を置くことが非常に多い (LZSS 系の定番)。先頭の u32 が
+ * ファイル自身より大きく、かつ 32 倍以内なら、その形だと見ます。テキストが
+ * 圧縮されているゲーム (僕の夏休み 2 など) では、`.msg` はこの `packed` の
+ * 中にあるはずです。
+ */
+const MAGICS = [
+  { ext: "elf",  label: "本体プログラム (ELF)",  bytes: [0x7F, 0x45, 0x4C, 0x46] },
+  { ext: "tm2",  label: "画像 (TIM2)",           bytes: [0x54, 0x49, 0x4D, 0x32] },
+  { ext: "vag",  label: "音声 (VAG)",            bytes: [0x56, 0x41, 0x47, 0x70] },
+  { ext: "rxws", label: "音声バンク (RXWS)",      bytes: [0x52, 0x58, 0x57, 0x53] },
+  { ext: "sshd", label: "音声ヘッダ (SShd)",      bytes: [0x53, 0x53, 0x68, 0x64] },
+  { ext: "pss",  label: "動画 (MPEG PS)",        bytes: [0x00, 0x00, 0x01, 0xBA] },
+  { ext: "dfi",  label: "索引 (DFI)",            bytes: [0x44, 0x46, 0x49, 0x00] },
+  { ext: "riff", label: "RIFF (WAV など)",       bytes: [0x52, 0x49, 0x46, 0x46] },
+  { ext: "png",  label: "画像 (PNG)",            bytes: [0x89, 0x50, 0x4E, 0x47] },
+];
+
+const SNIFF_BY_CLASS = {
+  jp:    { ext: "txt",    label: "日本語テキストらしい" },
+  ascii: { ext: "txt",    label: "ASCII テキストらしい" },
+  zero:  { ext: "zero",   label: "ゼロ埋め" },
+  high:  { ext: "packed", label: "圧縮らしい (乱数に近い並び)" },
+  wave:  { ext: "wave",   label: "波形らしい (ヘッダ無しの音声など)" },
+  tile:  { ext: "bin",    label: "不明 (タイル・表など)" },
+};
+
+/**
+ * @param head  先頭のバイト (64 バイト以上あれば十分)
+ * @param cls   classifyStats の結果 ("jp" / "high" など)。無ければ "tile" 扱い
+ * @param size  ファイル全体の長さ (圧縮の見当に使う)
+ * @returns {{ext, label, sure}}  sure は魔法数で決まったときだけ true
+ */
+function sniffKind(head, cls, size) {
+  for (const m of MAGICS) {
+    if (head.length < m.bytes.length) continue;
+    let hit = true;
+    for (let i = 0; i < m.bytes.length; i++) if (head[i] !== m.bytes[i]) { hit = false; break; }
+    if (hit) return { ext: m.ext, label: m.label, sure: true };
+  }
+  if (size && head.length >= 8) {
+    const n = (head[0] | (head[1] << 8) | (head[2] << 16) | (head[3] << 24)) >>> 0;
+    if (n > size && n <= size * 32) {
+      return { ext: "packed", label: "圧縮らしい (先頭が伸張後の大きさに見える)", sure: false };
+    }
+  }
+  const by = SNIFF_BY_CLASS[cls] || SNIFF_BY_CLASS.tile;
+  return { ext: by.ext, label: by.label, sure: false };
+}
+
+/** 見当の集計を「tm2 1200 · packed 400 · bin 51」のような 1 行にする */
+function sniffSummary(kinds) {
+  const count = new Map();
+  for (const k of kinds) count.set(k.ext, (count.get(k.ext) || 0) + 1);
+  return [...count.entries()].sort((a, b) => b[1] - a[1])
+    .map(([ext, n]) => `${ext} ${n}`).join(" · ");
+}
+/* @extract-end sniff */
+
 function searchBytes(buf, pat, from) {
   const first = pat[0], last = buf.length - pat.length;
   outer:
@@ -1902,11 +1974,21 @@ function cssColor(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";
 }
 
+/** 絞り込み欄の文字列にパスが当たるか。空なら全部通す。大小文字は区別しない */
+function treeMatch(entry, q) {
+  if (!q) return true;
+  const hay = (entry.path + (entry.sniff ? " " + entry.sniff.ext : "")).toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
+}
+
 function renderTree() {
   const ul = $("tree");
   ul.textContent = "";
-  let lastDir = null;
+  const q = $("treeq").value.trim();
+  let lastDir = null, shown = 0;
   for (const entry of state.entries) {
+    if (!treeMatch(entry, q)) continue;
+    shown++;
     const dir = entry.kind === "image" ? null : entry.path.slice(0, entry.path.lastIndexOf("/") + 1);
     if (dir && dir !== lastDir) {
       const li = document.createElement("li");
@@ -1931,14 +2013,23 @@ function renderTree() {
     const sz = document.createElement("span");
     sz.className = "sz";
     sz.textContent = fmtSize(entry.size);
+    if (entry.sniff) btn.title = entry.sniff.label;
     btn.append(sw, nm, sz);
     btn.addEventListener("click", () => selectEntry(entry));
     li.append(btn);
     ul.append(li);
   }
-  $("treecount").textContent = state.iso
-    ? state.iso.entries.length + " ファイル" : "1 ファイル";
+  const total = state.entries.length;
+  $("treecount").textContent = q ? `${shown} / ${total} ファイル`
+    : total > 1 ? `${total} ファイル` : "1 ファイル";
+  if (q && !shown) {
+    const li = document.createElement("li");
+    li.innerHTML = '<p class="empty">当てはまるファイルがありません。</p>';
+    ul.append(li);
+  }
 }
+
+$("treeq").addEventListener("input", renderTree);
 
 /** ファイル一覧に色の帯を出すため、各ファイルの先頭 4KB だけ見て分類する */
 async function classifyEntries() {
@@ -3583,7 +3674,7 @@ async function previewIndex(dataEntry) {
   box.append(actions);
 }
 
-function splitByIndex(dataEntry, c) {
+async function splitByIndex(dataEntry, c) {
   const items = c.named
     ? namedEntries(state.idxBuf, c, dataEntry.size, 4096)
     : indexEntries(state.idxBuf, c, dataEntry.size, 4096);
@@ -3591,22 +3682,47 @@ function splitByIndex(dataEntry, c) {
   state.entries = state.entries.filter((e) => e.kind !== "part" || e.parentPath !== dataEntry.path);
   const kids = items.filter((it) => it.len > 0).map((it) => {
     /* 名前が分かっているならそれを使う。拡張子から中身の見当がつく */
-    const name = it.name || ("#" + String(it.i).padStart(4, "0"));
+    const bare = !it.name || /^#\d+$/.test(it.name);
+    const name = bare ? ("#" + String(it.i).padStart(4, "0")) : it.name;
     return {
       path: prefix + name, name, file: dataEntry.file,
       offset: dataEntry.offset + it.at, size: it.len,
-      kind: "part", parentPath: dataEntry.path,
+      kind: "part", parentPath: dataEntry.path, bare,
     };
   });
   if (!kids.length) return;
+
+  /* 名前が番号だけなら、中身を見て種類を末尾に付ける (#0012 → #0012.tm2)。
+     1951 個でも先頭 4KB ずつなので数秒で終わる */
+  const note = $("capnote");
+  const kinds = [];
+  for (let i = 0; i < kids.length; i++) {
+    const k = kids[i];
+    const head = await readRange(k.file, k.offset, Math.min(k.size, 4096));
+    k.cls = classifyStats(blockStats(head));
+    const kind = sniffKind(head, k.cls, k.size);
+    k.sniff = kind;
+    kinds.push(kind);
+    if (k.bare) { k.name += "." + kind.ext; k.path = prefix + k.name; }
+    if ((i & 127) === 127) {
+      note.textContent = `中身を見て種類を付けています… ${i + 1} / ${kids.length}`;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+
   const at = state.entries.indexOf(dataEntry);
   state.entries.splice(at + 1, 0, ...kids);
   renderTree();
+  const bareCount = kids.filter((k) => k.bare).length;
+  const packed = kinds.filter((k) => k.ext === "packed").length;
   selectEntry(kids[0]).then(() => {
-    $("capnote").textContent =
+    note.textContent =
       `${dataEntry.name} を索引に従って ${kids.length} 個に切り分けました`
       + (items.length > kids.length ? ` (長さ 0 の ${items.length - kids.length} 件は除外)` : "")
-      + "。";
+      + `。中身の見当: ${sniffSummary(kinds)}。`
+      + (bareCount ? `名前が無い ${bareCount} 件は種類を末尾に付けました。` : "")
+      + (packed ? `圧縮らしい ${packed} 件 (packed) の中にテキストがある見込みです。`
+                  + "上の絞り込みに packed と入れると並びます。" : "");
     classifyEntries();
   });
 }

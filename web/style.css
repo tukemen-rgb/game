@@ -279,6 +279,14 @@ code { font-family: var(--font-mono); font-size: .92em; }
 }
 
 /* ---------- ファイル一覧 ---------- */
+.treefilter { padding: 8px 12px 4px; }
+.treefilter input {
+  width: 100%; padding: 5px 8px;
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--ink); background: var(--bg);
+  border: 1px solid var(--rule); border-radius: 3px;
+}
+.treefilter input:focus { outline: 1px solid var(--seal); border-color: var(--seal); }
 .tree { list-style: none; margin: 0; padding: 0; }
 .tree .dir {
   padding: 9px 16px 3px;

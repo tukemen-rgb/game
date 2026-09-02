@@ -719,6 +719,22 @@ class TestLzssInBrowser(unittest.TestCase):
         self.assertIn("OK", res.stdout)
 
 
+class TestSniffInBrowser(unittest.TestCase):
+    """名前の無いファイルに中身から見当を付ける sniffKind."""
+
+    def test_sniff(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        res = subprocess.run([node, os.path.join(REPO, "tests", "test_sniff.mjs")],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK", res.stdout)
+
+
 class TestDisassemblerInBrowser(unittest.TestCase):
     """ブラウザ側の逆アセンブラも同じ答えと突き合わせる."""
 
