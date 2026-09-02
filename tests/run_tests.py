@@ -701,6 +701,24 @@ class TestLzss(unittest.TestCase):
         self.lzss.decompress(os.urandom(2000))     # 例外を出さずに返る
 
 
+class TestLzssInBrowser(unittest.TestCase):
+    """ブラウザ側 LZSS が Python の圧縮を伸張できることを突き合わせる."""
+
+    def test_browser_matches_python(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        subprocess.run([sys.executable, os.path.join(REPO, "tests", "gen_lzss_cases.py")],
+                       capture_output=True, cwd=REPO)
+        res = subprocess.run([node, os.path.join(REPO, "tests", "test_lzss.mjs")],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK", res.stdout)
+
+
 class TestDisassemblerInBrowser(unittest.TestCase):
     """ブラウザ側の逆アセンブラも同じ答えと突き合わせる."""
 

@@ -3,3 +3,4 @@ work/
 
 __pycache__/
 *.py[cod]
+tests/lzss_cases.json

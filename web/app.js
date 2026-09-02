@@ -4104,6 +4104,137 @@ $("disxref").addEventListener("click", () => {
   }, 16);
 });
 
+/* ---------- LZSS 伸張 (圧縮の壁に効く) ----------
+ * 日本のコンシューマ機で最も普及した奥村版 LZSS。tools/lzss.py と同じ実装で、
+ * tests/test_lzss.mjs が Python の圧縮出力を伸張して突き合わせている。 */
+/* @extract-start lzss */
+const LZSS_RING = 4096, LZSS_THRESHOLD = 2, LZSS_MATCHMAX = 18, LZSS_FILL = 0x20;
+
+function lzssDecompress(data, start, outLimit, fill) {
+  start = start || 0;
+  fill = fill == null ? LZSS_FILL : fill;
+  const out = [];
+  const ring = new Uint8Array(LZSS_RING).fill(fill);
+  let r = LZSS_RING - LZSS_MATCHMAX, i = start, flags = 0;
+  const n = data.length;
+  while (i < n) {
+    flags >>= 1;
+    if (!(flags & 0x100)) {
+      flags = data[i++] | 0xFF00;
+      if (i > n) break;
+    }
+    if (flags & 1) {
+      if (i >= n) break;
+      const c = data[i++];
+      out.push(c); ring[r] = c; r = (r + 1) & (LZSS_RING - 1);
+    } else {
+      if (i + 1 >= n) break;
+      const b0 = data[i], b1 = data[i + 1]; i += 2;
+      const pos = b0 | ((b1 & 0xF0) << 4);
+      const length = (b1 & 0x0F) + LZSS_THRESHOLD + 1;
+      for (let k = 0; k < length; k++) {
+        const c = ring[(pos + k) & (LZSS_RING - 1)];
+        out.push(c); ring[r] = c; r = (r + 1) & (LZSS_RING - 1);
+      }
+    }
+    if (outLimit && out.length >= outLimit) return Uint8Array.from(out.slice(0, outLimit));
+  }
+  return Uint8Array.from(out);
+}
+
+/** 伸張結果の「日本語テキストらしさ」を 0..1 で返す (種類が少なすぎるものは 0) */
+function lzssTextScore(b) {
+  if (!b.length) return 0;
+  const kinds = new Set();
+  for (let k = 0; k < b.length && kinds.size < 8; k++) kinds.add(b[k]);
+  if (kinds.size < 8) return 0;
+  let ok = 0, i = 0;
+  const n = b.length;
+  while (i < n) {
+    const c = b[i];
+    if ((c >= 0x20 && c < 0x7F) || c === 0x0A || c === 0x0D) { ok++; i++; }
+    else if ((SJIS_LEAD(c)) && i + 1 < n && SJIS_TRAIL(b[i + 1])) { ok += 2; i += 2; }
+    else i++;
+  }
+  return ok / n;
+}
+
+/** ファイル全体を総当たりで伸張し、テキストになる場所を返す */
+function lzssScan(data, step, minOut) {
+  step = step || 0x800; minOut = minOut || 256;
+  const hits = [];
+  for (let off = 0; off < Math.max(1, data.length - 4); off += step) {
+    const out = lzssDecompress(data, off, 4096);
+    if (out.length < minOut) continue;
+    const score = lzssTextScore(out);
+    if (score >= 0.85) hits.push({ off, len: out.length, score, head: out.subarray(0, 48) });
+  }
+  return hits;
+}
+/* @extract-end lzss */
+
+$("lzsstry").addEventListener("click", () => {
+  const box = $("lzssbox");
+  box.textContent = "";
+  const out = lzssDecompress(state.buf, state.hexOff, 8192);
+  const score = lzssTextScore(out);
+  const note = $("lzssnote");
+  if (out.length < 16) { note.textContent = "伸張できませんでした (この位置は LZSS ではなさそう)"; return; }
+  note.textContent = `${fmtSize(out.length)} 伸張 · テキストらしさ ${score.toFixed(2)}`;
+  const label = document.createElement("span");
+  label.className = "eyebrow";
+  label.textContent = score >= 0.6 ? "伸張できました (テキストらしい)" : "伸張はできたが、テキストには見えない";
+  const pre = document.createElement("pre");
+  pre.className = "textpreview";
+  try { pre.textContent = DECODERS.sjis.decode(out.subarray(0, 800)); }
+  catch (e) { pre.textContent = ascii(out.subarray(0, 800)); }
+  box.append(label, pre);
+  if (score < 0.6) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "定番の LZSS では読めませんでした。独自変種の可能性が高いです。"
+      + "PCSX2 で動かして展開後のメモリを見るのが近道です (調査メモ参照)。";
+    box.append(p);
+  }
+});
+
+$("lzssscan").addEventListener("click", () => {
+  const box = $("lzssbox");
+  box.textContent = "";
+  const btn = $("lzssscan");
+  btn.disabled = true; btn.textContent = "走査中…";
+  setTimeout(() => {
+    const hits = lzssScan(state.buf.subarray(0, Math.min(state.buf.length, 8 * 1024 * 1024)));
+    btn.disabled = false; btn.textContent = "ファイル全体から伸張できる場所を探す";
+    $("lzssnote").textContent = `${hits.length} 件`;
+    if (!hits.length) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.textContent = "LZSS で伸張してテキストになる場所は見つかりませんでした。"
+        + "独自変種の可能性が高いので、PCSX2 のメモリダンプへ。";
+      box.append(p);
+      return;
+    }
+    const tw = document.createElement("div");
+    tw.className = "tablewrap";
+    const t = document.createElement("table");
+    t.innerHTML = "<thead><tr><th>位置</th><th>伸張後</th><th>らしさ</th><th>先頭</th></tr></thead>";
+    const tb = document.createElement("tbody");
+    for (const h of hits.slice(0, 40)) {
+      const tr = document.createElement("tr");
+      let head = "";
+      try { head = DECODERS.sjis.decode(h.head); } catch (e) { head = ascii(h.head); }
+      for (const c of [hx(h.off), fmtSize(h.len), h.score.toFixed(2), head]) {
+        const td = document.createElement("td"); td.textContent = c; tr.append(td);
+      }
+      tr.style.cursor = "pointer";
+      tr.addEventListener("click", () => { gotoOffset(h.off); $("lzsstry").click(); });
+      tb.append(tr);
+    }
+    t.append(tb); tw.append(t); box.append(tw);
+  }, 16);
+});
+
 /* ---------- 既知の形式 ---------- */
 function renderFormat() {
   const box = $("formatbox");

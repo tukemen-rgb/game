@@ -391,6 +391,17 @@
         <div id="formatbox"></div>
 
         <div class="sigblock">
+          <span class="eyebrow">圧縮を解く (LZSS)</span>
+          <p class="hint">このゲームのテキストは<b>圧縮</b>されています (英語化した先人が「独自の圧縮を書く必要があった」と明言)。だから生のまま検索しても出てきません。日本のゲームで最も多い <b>LZSS (奥村版)</b> で伸張を試します。当たれば読め、外れれば独自変種なので PCSX2 のメモリを見るのが近道です。</p>
+          <div class="controls">
+            <button class="btn seal" id="lzsstry">今の位置から LZSS 伸張を試す</button>
+            <button class="btn" id="lzssscan">ファイル全体から伸張できる場所を探す</button>
+            <span class="pos" id="lzssnote"></span>
+          </div>
+          <div id="lzssbox"></div>
+        </div>
+
+        <div class="sigblock">
           <span class="eyebrow">署名を探す</span>
           <p class="hint">確実に分かっている形式の目印だけを載せています。ゲーム独自の形式は当然入っていないので、当たりを付けたら下の欄に入れて全体を検索してください。文字列は Shift-JIS と UTF-8 の両方で探します。</p>
           <div class="controls">
