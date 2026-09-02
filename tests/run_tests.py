@@ -658,6 +658,49 @@ class TestDisassembler(unittest.TestCase):
                         f"文字列の注記が出ていません: {notes}")
 
 
+class TestLzss(unittest.TestCase):
+    """LZSS (奥村版) の伸張・圧縮・探索."""
+
+    @classmethod
+    def setUpClass(cls):
+        import lzss
+        cls.lzss = lzss
+
+    def test_round_trip(self):
+        cases = [
+            b"",
+            b"a",
+            "ぼくのなつやすみ。むしとりにいこう。".encode("cp932"),
+            ("こんにちは、" * 60).encode("cp932"),
+            b"AAAAAAAAAAAA" + bytes(range(256)) + b"BCBCBCBCBC",
+            bytes(i % 11 for i in range(4000)),
+        ]
+        for s in cases:
+            packed = self.lzss.compress(s)
+            self.assertEqual(self.lzss.decompress(packed), s,
+                             f"round-trip 失敗 (len={len(s)})")
+
+    def test_compression_actually_shrinks_repeats(self):
+        rep = ("こんにちは、" * 60).encode("cp932")
+        self.assertLess(len(self.lzss.compress(rep)), len(rep) * 0.5)
+
+    def test_scan_finds_text_block(self):
+        text = "きょうはいいてんきです。むしとりにいこう。".encode("cp932") * 10
+        blob = bytes(0x800) + self.lzss.compress(text)
+        hits = self.lzss.scan(blob, step=0x400)
+        offs = [h[0] for h in hits]
+        self.assertIn(0x800, offs, "圧縮テキストの位置を見つけられていない")
+
+    def test_zero_fill_is_not_text(self):
+        # ゼロ埋めを伸張すると空白の羅列になる。これをテキストと誤判定しないこと
+        self.assertEqual(self.lzss.looks_like_text(b"\x20" * 4096), 0.0)
+        self.assertEqual(self.lzss.looks_like_text(b"\x00" * 4096), 0.0)
+
+    def test_broken_input_does_not_crash(self):
+        import os
+        self.lzss.decompress(os.urandom(2000))     # 例外を出さずに返る
+
+
 class TestDisassemblerInBrowser(unittest.TestCase):
     """ブラウザ側の逆アセンブラも同じ答えと突き合わせる."""
 
