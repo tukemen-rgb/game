@@ -3297,32 +3297,67 @@ function readDfi(idx, dataSize) {
   if (idx.length < 32) return null;
   if (!(idx[0] === 0x44 && idx[1] === 0x46 && idx[2] === 0x49 && idx[3] === 0x00)) return null;
 
-  /* 構造は逆アセンブルで確定しているので、**セクタと長さだけを信じて読みます**。
-     名前は「読めれば付ける」だけ。名前の並びがどうであっても関係ありません。
-     終わりの見分け方: 本物のレコードは必ず「セクタ×2048 + 長さ」が本体の中に
-     収まります。レコードの並びを過ぎて名前の置き場に入ると、そこを 16 バイトずつ
-     レコードとみなして読んでも範囲に収まらなくなる (名前の文字が巨大な数に化ける)
-     ので、そういう行が続いたら打ち切ります。 */
+  /* 名前の付き方は、英語化パッチ (Hilltop Works) の公開ソースで確定しました。
+     **+4 の値は名前の位置ではありません** (向こうの展開器も読むだけで使っていない)。
+     名前はレコードの並びが終わった直後から、**レコードと同じ順番で** ヌル終端の
+     文字列が並んでいるだけです。先頭は根のディレクトリ "/"。
+
+     レコードの終わりは、種別 (u16) が 0 でも 1 でもなくなった行。名前の文字が
+     そこに来るので、必ずそこで止まります。 */
+  let recEnd = 16;
+  while (recEnd + 16 <= idx.length) {
+    const t = idx[recEnd] | (idx[recEnd + 1] << 8);
+    if (t !== 0 && t !== 1) break;
+    recEnd += 16;
+  }
+  const recCount = (recEnd - 16) / 16;
+  if (recCount < 8) return null;
+
+  const names = [];
+  let q = recEnd;
+  while (names.length < recCount && q < idx.length) {
+    let n = 0;
+    while (q + n < idx.length && idx[q + n] !== 0) {
+      const c = idx[q + n];
+      if (c < 0x21 || c > 0x7E || n >= 127) { n = -1; break; }
+      n++;
+    }
+    if (n < 0 || q + n >= idx.length) break;                   /* 名前でないものに当たった */
+    names.push(ascii(idx.subarray(q, q + n)));
+    q += n + 1;
+  }
+
+  /* フォルダの入れ子。+2 の値 (u16) は「同じフォルダにまだ項目が続くか」。
+     ファイルで 0 なら、そのフォルダの最後の項目なので一つ上に戻る。
+     フォルダで 0 なら、そのフォルダ自体が親の最後の項目なので、閉じるときに
+     親も一緒に閉じる (Hilltop の展開器の「二つ戻る」を一般化した規則)。 */
   const out = [];
-  let junk = 0;
-  for (let p = 16; p + 16 <= idx.length; p += 16) {
-    const np = u32le(idx, p + 4);
+  const stack = [];
+  let bad = 0;
+  for (let k = 0; k < recCount; k++) {
+    const p = 16 + k * 16;
+    const isDir = (idx[p] | (idx[p + 1] << 8)) === 1;
+    const more = idx[p + 2] | (idx[p + 3] << 8);
+    const name = names[k] || "";
+    if (isDir) {
+      stack.push({ name: name === "/" ? "" : name, more });     /* 名前が無いフォルダは省く */
+      continue;
+    }
     const lba = u32le(idx, p + 8), len = u32le(idx, p + 12);
     const at = lba * 2048;
-    const isDir = lba === 0 && len === 0;                       /* 位置も長さも 0 */
-    const isFile = len > 0 && at < dataSize && at + len <= dataSize;
-
-    if (isFile) {
-      junk = 0;
-      const name = nameAt(idx, np);
-      out.push({ i: out.length, at, len, name: name || `#${out.length}` });
-    } else if (isDir) {
-      junk = 0;                                                 /* フォルダは飛ばす */
-    } else if (++junk >= 32) {
-      break;                                                    /* 名前の置き場に入った */
+    const base = name || `#${out.length}`;
+    const path = stack.map((d) => d.name).filter(Boolean).concat(base).join("/");
+    if (len > 0 && at < dataSize && at + len <= dataSize) {
+      out.push({ i: out.length, at, len, name: path, base, bare: !name });
+    } else {
+      bad++;
+    }
+    if (more === 0) {
+      let d = stack.pop();
+      while (d && d.more === 0 && stack.length > 1) d = stack.pop();
     }
   }
-  if (out.length < 8) return null;
+  if (out.length < 8 || bad > out.length * 0.05) return null;
 
   /* 読めたことにする前に、範囲が互いに食い込んでいないかだけ確かめる */
   const sorted = out.slice().sort((a, b) => a.at - b.at);
@@ -3336,8 +3371,10 @@ function readDfi(idx, dataSize) {
   return {
     named: true, known: "DFI", rec: 16, skip: 16,
     nameField: 4, atField: 8, lenField: 12, atMult: 2048, lenMult: 1,
-    count: Math.floor((idx.length - 16) / 16), files: out.length, gap: 0,
+    count: recCount, files: out.length, dirs: recCount - out.length - bad, gap: 0,
+    named_ok: out.filter((x) => !x.bare).length,
     coverage: Math.min(1, used / Math.max(1, dataSize)),
+    entries: out,
   };
 }
 
@@ -3465,6 +3502,7 @@ function scoreNamedLayout(idx, dataSize, c) {
 
 /** 名前つき索引を実際に読み出す */
 function namedEntries(idx, c, dataSize, limit) {
+  if (c.entries) return c.entries.slice(0, limit);            /* 分かっている形は読み済み */
   const out = [];
   for (let i = 0; i < c.count && out.length < limit; i++) {
     const base = c.skip + i * c.rec;
@@ -3597,7 +3635,8 @@ function renderIndexCands(dataEntry) {
     const cells = c.named ? [
       `${c.rec} バイト`, c.skip ? `${c.skip} バイト` : "なし",
       `+${c.atField}`, c.atMult === 1 ? "バイト" : "セクタ (2048)",
-      `+${c.lenField}${c.lenMult === 2048 ? " (セクタ)" : ""}  ·  名前 +${c.nameField}`,
+      `+${c.lenField}${c.lenMult === 2048 ? " (セクタ)" : ""}  ·  `
+        + (c.known === "DFI" ? "名前は末尾に順番どおり" : `名前 +${c.nameField}`),
       `${c.files} / ${c.count}`, `${Math.round(c.coverage * 100)}%`,
     ] : [
       `${c.rec} バイト`, c.skip ? `${c.skip} バイト` : "なし",
@@ -3681,11 +3720,11 @@ async function splitByIndex(dataEntry, c) {
   const prefix = dataEntry.path + "/";
   state.entries = state.entries.filter((e) => e.kind !== "part" || e.parentPath !== dataEntry.path);
   const kids = items.filter((it) => it.len > 0).map((it) => {
-    /* 名前が分かっているならそれを使う。拡張子から中身の見当がつく */
-    const bare = !it.name || /^#\d+$/.test(it.name);
-    const name = bare ? ("#" + String(it.i).padStart(4, "0")) : it.name;
+    /* 名前が分かっているならそれを使う (フォルダ付きのこともある)。拡張子から中身の見当がつく */
+    const bare = it.bare || !it.name || /^#\d+$/.test(it.base || it.name);
+    const rel = bare ? ("#" + String(it.i).padStart(4, "0")) : it.name;
     return {
-      path: prefix + name, name, file: dataEntry.file,
+      path: prefix + rel, name: rel.slice(rel.lastIndexOf("/") + 1), file: dataEntry.file,
       offset: dataEntry.offset + it.at, size: it.len,
       kind: "part", parentPath: dataEntry.path, bare,
     };
@@ -3703,7 +3742,7 @@ async function splitByIndex(dataEntry, c) {
     const kind = sniffKind(head, k.cls, k.size);
     k.sniff = kind;
     kinds.push(kind);
-    if (k.bare) { k.name += "." + kind.ext; k.path = prefix + k.name; }
+    if (k.bare) { k.name += "." + kind.ext; k.path += "." + kind.ext; }
     if ((i & 127) === 127) {
       note.textContent = `中身を見て種類を付けています… ${i + 1} / ${kids.length}`;
       await new Promise((r) => setTimeout(r, 0));
@@ -4288,6 +4327,133 @@ function lzssScan(data, step, minOut) {
   return hits;
 }
 /* @extract-end lzss */
+
+/* @extract-start bokumsg */
+/**
+ * 僕の夏休み 2 の会話テキスト (.msg)。
+ *
+ * 英語化パッチ (Hilltop Works) の公開ソースを読んで確定した形です。**圧縮ではありません**。
+ *
+ *   u32  件数 N
+ *   N 個の位置表  IMG 内の .msg は 8 バイト刻み (u32 位置 + u32 予備)
+ *                 マップ内の表は 4 バイト刻み (u32 位置)。位置 0 は空の項目
+ *   本文          2 バイトの並び (リトルエンディアン)
+ *                   0x8000 = 終わり   0x8001 = 改行   0x8002 + u16 = 待ち時間
+ *                   0xCDCD = 4 バイト揃えの詰め物
+ *                   それ以外 = フォント画像 (bk_font.tms) の何番目の文字か
+ *
+ * つまり Shift-JIS ではなく **フォントの並び順そのものが文字コード**。だから生の
+ * バイトを日本語で検索しても出てきません。フォント画像を見て文字の並びを
+ * 書き出せば、その表でそのまま読めます (docs/03 の「テーブル」の実物)。
+ */
+function parseBokuMsg(b, stride) {
+  if (b.length < 8) return null;
+  const n = u32le(b, 0);
+  if (n < 1 || n > 20000) return null;
+  const tab = 4 + n * stride;
+  if (tab > b.length) return null;
+  const starts = [];
+  for (let i = 0; i < n; i++) starts.push(u32le(b, 4 + i * stride));
+  let prev = 0, nonEmpty = 0;
+  for (const s of starts) {
+    if (!s) continue;
+    if (s < tab || s >= b.length || s < prev || (s & 1)) return null;
+    prev = s;
+    nonEmpty++;
+  }
+  if (!nonEmpty) return null;
+  const items = [];
+  for (let i = 0; i < n; i++) {
+    const s = starts[i];
+    if (!s) { items.push({ i, at: 0, codes: [] }); continue; }
+    let e = b.length;
+    for (let j = i + 1; j < n; j++) if (starts[j]) { e = starts[j]; break; }
+    const codes = [];
+    for (let p = s; p + 1 < e; p += 2) codes.push(u16le(b, p));
+    items.push({ i, at: s, codes });
+  }
+  return { count: n, stride, items };
+}
+
+/** 8 バイト刻みと 4 バイト刻みの両方を試す */
+function detectBokuMsg(b) {
+  for (const stride of [8, 4]) {
+    const r = parseBokuMsg(b, stride);
+    if (r) return r;
+  }
+  return null;
+}
+
+/** 2 バイトの並びを文字にする。glyphs はフォントの並び (配列)。無ければ番号のまま */
+function bokuMsgText(codes, glyphs) {
+  let s = "";
+  for (let i = 0; i < codes.length; i++) {
+    const c = codes[i];
+    if (c === 0x8000) { s += "{END}"; break; }
+    if (c === 0x8001) { s += "\n"; continue; }
+    if (c === 0x8002) { s += `{WAIT ${codes[i + 1] ?? 0}}`; i++; continue; }
+    if (c === 0xCDCD) continue;
+    if (c >= 0x8000) { s += `{${c.toString(16).toUpperCase()}}`; continue; }
+    s += (glyphs && c < glyphs.length) ? glyphs[c] : `[${c}]`;
+  }
+  return s;
+}
+/* @extract-end bokumsg */
+
+$("msgparse").addEventListener("click", () => {
+  const box = $("msgbox");
+  box.textContent = "";
+  const note = $("msgnote");
+  if (!state.buf || !state.buf.length) { note.textContent = "ファイルを選んでください"; return; }
+  const r = detectBokuMsg(state.buf);
+  if (!r) {
+    note.textContent = "この形では読めませんでした (先頭が「件数 + 位置表」になっていない)";
+    return;
+  }
+  const glyphText = $("msgglyphs").value.replace(/\r?\n/g, "");
+  const glyphs = glyphText ? Array.from(glyphText) : null;
+  const filled = r.items.filter((it) => it.codes.length);
+  let maxCode = 0;
+  for (const it of filled) {
+    for (let i = 0; i < it.codes.length; i++) {
+      const c = it.codes[i];
+      if (c === 0x8002) { i++; continue; }                    /* 待ち時間の値は文字番号ではない */
+      if (c < 0x8000 && c > maxCode) maxCode = c;
+    }
+  }
+  note.textContent = `${r.count} 件 (位置表は ${r.stride} バイト刻み) · 本文あり ${filled.length} 件`
+    + ` · 文字番号の最大 ${maxCode}`
+    + (glyphs ? ` · 文字表 ${glyphs.length} 字` : " · 文字表なし (番号のまま表示)");
+
+  const wrap = document.createElement("div");
+  wrap.className = "tablewrap";
+  const table = document.createElement("table");
+  table.innerHTML = "<thead><tr><th>#</th><th>位置</th><th>長さ</th><th>内容</th></tr></thead>";
+  const tb = document.createElement("tbody");
+  for (const it of filled.slice(0, 400)) {
+    const tr = document.createElement("tr");
+    const cells = [String(it.i), hx(it.at), `${it.codes.length} 字`, bokuMsgText(it.codes, glyphs)];
+    cells.forEach((text, ci) => {
+      const td = document.createElement("td");
+      if (ci === 3) { td.className = "jp"; td.style.whiteSpace = "pre-wrap"; }
+      td.textContent = text;
+      tr.append(td);
+    });
+    tr.addEventListener("click", () => { gotoOffset(it.at); showTab("hex"); });
+    tb.append(tr);
+  }
+  table.append(tb);
+  wrap.append(table);
+  box.append(wrap);
+  if (!glyphs) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "番号を文字にするには、フォント画像 (bk_font.tms) を「見つけた絵」で見て、"
+      + "左上から右へ順に文字を書き出し、上の欄に貼ってください。"
+      + `番号は 0 から ${maxCode} まで使われています。`;
+    box.append(p);
+  }
+});
 
 $("lzsstry").addEventListener("click", () => {
   const box = $("lzssbox");

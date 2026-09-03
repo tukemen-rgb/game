@@ -395,8 +395,22 @@
         <div id="formatbox"></div>
 
         <div class="sigblock">
+          <span class="eyebrow">会話テキストを読む (.msg / 僕の夏休み 2)</span>
+          <p class="hint">この作品のテキストは圧縮ではなく、<b>フォント画像の並び順をそのまま文字コードにした 2 バイトの並び</b>でした (英語化パッチの公開ソースで確認)。だから Shift-JIS で検索しても出てきません。ファイルは「件数 + 位置表 + 本文」の形で、本文の <code>0x8000</code> が終わり、<code>0x8001</code> が改行、<code>0x8002</code> が待ち時間です。<code>.msg</code> を選んでから押してください。</p>
+          <div class="controls">
+            <button class="btn seal" id="msgparse">このファイルを .msg として読む</button>
+            <span class="pos" id="msgnote"></span>
+          </div>
+          <div class="field" style="margin-top:8px">
+            <label for="msgglyphs">フォントの文字の並び (bk_font.tms を「見つけた絵」で見て、左上から順に書き出す。改行は無視)</label>
+            <textarea id="msgglyphs" rows="3" spellcheck="false" placeholder="例: 。、，．・：；？！゛゜…"></textarea>
+          </div>
+          <div id="msgbox"></div>
+        </div>
+
+        <div class="sigblock">
           <span class="eyebrow">圧縮を解く (LZSS)</span>
-          <p class="hint">このゲームのテキストは<b>圧縮</b>されています (英語化した先人が「独自の圧縮を書く必要があった」と明言)。だから生のまま検索しても出てきません。日本のゲームで最も多い <b>LZSS (奥村版)</b> で伸張を試します。当たれば読め、外れれば独自変種なので PCSX2 のメモリを見るのが近道です。</p>
+          <p class="hint">圧縮されたデータ一般のための道具です。日本のゲームで最も多い <b>LZSS (奥村版)</b> で伸張を試します。当たれば読め、外れれば独自変種です。(僕の夏休み 2 のテキストは圧縮ではないと分かったので、この作品では上の .msg 読みを使ってください。)</p>
           <div class="controls">
             <button class="btn seal" id="lzsstry">今の位置から LZSS 伸張を試す</button>
             <button class="btn" id="lzssscan">ファイル全体から伸張できる場所を探す</button>

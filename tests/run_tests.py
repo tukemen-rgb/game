@@ -719,6 +719,22 @@ class TestLzssInBrowser(unittest.TestCase):
         self.assertIn("OK", res.stdout)
 
 
+class TestBokuMsgInBrowser(unittest.TestCase):
+    """僕の夏休み 2 の .msg 読み (件数 + 位置表 + 2 バイトの並び)."""
+
+    def test_msg(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        res = subprocess.run([node, os.path.join(REPO, "tests", "test_bokumsg.mjs")],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK", res.stdout)
+
+
 class TestSniffInBrowser(unittest.TestCase):
     """名前の無いファイルに中身から見当を付ける sniffKind."""
 

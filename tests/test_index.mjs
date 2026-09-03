@@ -228,62 +228,72 @@ console.log("OK  名前を持たないレコードが混ざっても読める");
 
 /* ---------- 実物と同じ形 ("DFI") ---------- */
 
-/* 実物の BOKU2.IDX を忠実に真似る。効いてくる癖が 3 つある。
-     - ディレクトリとファイルで先頭 4 バイトの形が違う
-     - 名前の位置は、走りの中では後ろから前へ下がっていく
+/* 実物の BOKU2.IDX を忠実に真似る。英語化パッチ (Hilltop Works) の公開ソースで
+   確定した形。効いてくる癖が 4 つある。
+     - 先頭 u16 が種別 (1 = フォルダ)、次の u16 が「この後にまだ続くか」
+       (ファイルで 0 ならフォルダの最後。フォルダで 0 なら空フォルダ)
+     - **名前はレコードの直後に、レコードと同じ順で** ヌル終端で並ぶ。根は "/"
+     - +4 の値は名前の位置ではない (向こうも使っていない)。減っていく雑音を入れる
      - 同じ作りのデータが並ぶ区間では **長さが数種類しかない**
-   3 つ目でいちど正解を落とした (長さの値のばらけ方で弾いていた)。 */
-function buildRealDfi(dirCount, fileCount) {
-  const recEnd = 16 + (dirCount + fileCount) * 16;
-  const nameBuf = [];
-  const offs = new Map();
-  const push = (n) => {
-    offs.set(n, recEnd + nameBuf.length);
-    for (const ch of n) nameBuf.push(ch.charCodeAt(0));
-    nameBuf.push(0);
-  };
-  for (let i = 0; i < dirCount; i++) push(`dir${String(i).padStart(4, "0")}`);
-  for (let i = 0; i < fileCount; i++) push(String(i).padStart(4, "0"));
+   最初は +4 を名前の位置だと思い込んで、実データで #N 表示になっていた。 */
+function buildRealDfi(dirCount, filesPerDir) {
+  const recs = [];                         /* {dir, more, name, lba, size} */
+  const want = [];
+  let lba = 16;
+  recs.push({ dir: true, more: 1, name: "/" });
+  for (let d = 0; d < dirCount; d++) {
+    const dname = `dir${String(d).padStart(3, "0")}`;
+    recs.push({ dir: true, more: 1, name: dname });
+    for (let i = 0; i < filesPerDir; i++) {
+      const fname = `f${String(i).padStart(3, "0")}.tm2`;
+      const size = (i % 3) ? 355360 : 401392;      /* 長さは 2 種類だけ */
+      recs.push({ dir: false, more: i === filesPerDir - 1 ? 0 : 1, name: fname, lba, size });
+      want.push({ name: `${dname}/${fname}`, at: lba * 2048, len: size });
+      lba += Math.ceil(size / 2048);
+    }
+  }
+  /* 入れ子の最後: outer の最後の項目がフォルダ inner (more=0)。inner の最後の
+     ファイルで inner と outer が一緒に閉じ、次の tail.bin は根に戻る */
+  recs.push({ dir: true, more: 1, name: "outer" });
+  recs.push({ dir: true, more: 0, name: "inner" });
+  for (let i = 0; i < 2; i++) {
+    recs.push({ dir: false, more: i ? 0 : 1, name: `g${i}.bin`, lba, size: 2048 });
+    want.push({ name: `outer/inner/g${i}.bin`, at: lba * 2048, len: 2048 });
+    lba += 1;
+  }
+  recs.push({ dir: false, more: 0, name: "tail.bin", lba, size: 4096 });
+  want.push({ name: "tail.bin", at: lba * 2048, len: 4096 });
+  lba += 2;
 
+  const recEnd = 16 + recs.length * 16;
+  const nameBuf = [];
+  for (const r of recs) { for (const ch of r.name) nameBuf.push(ch.charCodeAt(0)); nameBuf.push(0); }
   const buf = new Uint8Array(recEnd + nameBuf.length);
   const dv = new DataView(buf.buffer);
   buf.set([0x44, 0x46, 0x49, 0x00], 0);
   dv.setUint32(4, 0x00000100, true);
-  let p = 16;
-  for (let i = 0; i < dirCount; i++) {
-    dv.setUint16(p, 1, true);
-    dv.setUint16(p + 2, i, true);
-    dv.setUint32(p + 4, offs.get(`dir${String(i).padStart(4, "0")}`), true);
-    p += 16;
-  }
-  const want = [];
-  let lba = 16;
-  for (let i = 0; i < fileCount; i++) {
-    /* 走りの中で名前の位置が下がっていく並べ方 */
-    const block = Math.floor(i / 24) * 24;
-    const j = block + 24 <= fileCount ? block + (23 - (i % 24)) : i;
-    const name = String(j).padStart(4, "0");
-    const size = (i % 3) ? 355360 : 401392;         /* 長さは 2 種類だけ */
-    dv.setUint16(p, 0, true);
-    dv.setUint16(p + 2, 1, true);
-    dv.setUint32(p + 4, offs.get(name), true);
-    dv.setUint32(p + 8, lba, true);
-    dv.setUint32(p + 12, size, true);
-    want.push({ name, at: lba * 2048, len: size });
-    lba += Math.ceil(size / 2048);
+  let p = 16, noise = 0x8130;
+  for (const r of recs) {
+    dv.setUint16(p, r.dir ? 1 : 0, true);
+    dv.setUint16(p + 2, r.more, true);
+    dv.setUint32(p + 4, noise, true);              /* 名前の位置ではない値 */
+    noise = noise > 0x100 ? noise - 7 : 0x8130;
+    if (!r.dir) { dv.setUint32(p + 8, r.lba, true); dv.setUint32(p + 12, r.size, true); }
     p += 16;
   }
   buf.set(nameBuf, recEnd);
-  return { buf, want, dataSize: lba * 2048 };
+  return { buf, want, dataSize: lba * 2048, recCount: recs.length };
 }
 
-const real = buildRealDfi(120, 1900);
+const real = buildRealDfi(80, 24);
 
 /* 分かっている形は当てにいかず、そのまま読む */
 const dfiCand = named.readDfi(real.buf, real.dataSize);
 if (!dfiCand) fail("DFI として読めない");
 if (dfiCand.known !== "DFI") fail("既知の形式として印が付いていない");
+if (dfiCand.count !== real.recCount) fail(`レコード数が ${dfiCand.count} (期待 ${real.recCount})`);
 if (dfiCand.files !== real.want.length) fail(`件数が ${dfiCand.files} (期待 ${real.want.length})`);
+if (dfiCand.named_ok !== real.want.length) fail(`名前が付いたのが ${dfiCand.named_ok} 件だけ`);
 
 const got = named.namedEntries(real.buf, dfiCand, real.dataSize, 4096);
 if (got.length !== real.want.length) fail(`読み出した件数が ${got.length}`);
@@ -292,21 +302,22 @@ for (let i = 0; i < real.want.length; i++) {
   if (got[i].at !== real.want[i].at) fail(`#${i} の位置が ${got[i].at}`);
   if (got[i].len !== real.want[i].len) fail(`#${i} の長さが ${got[i].len}`);
 }
+if (got[0].name !== "dir000/f000.tm2") fail(`先頭のパスが ${got[0].name}`);
+if (got[got.length - 2].name !== "outer/inner/g1.bin") fail(`入れ子のパスが ${got[got.length - 2].name}`);
+if (got[got.length - 1].name !== "tail.bin") fail(`入れ子が閉じた後のパスが ${got[got.length - 1].name}`);
 
-/* 目印を知らなくても、総当たりで同じ答えにたどり着けること */
-const blind = named.analyzeNamedIndex(real.buf, real.dataSize);
-if (!blind.length) fail("総当たりで候補が出ない");
-const bg = named.namedEntries(real.buf, blind[0], real.dataSize, 4096);
-if (bg.length !== real.want.length) fail(`総当たりの件数が ${bg.length}`);
-for (let i = 0; i < real.want.length; i++) {
-  if (bg[i].name !== real.want[i].name || bg[i].at !== real.want[i].at
-      || bg[i].len !== real.want[i].len) {
-    fail(`総当たりの #${i} が食い違う: ${bg[i].name} @${bg[i].at} len${bg[i].len}`);
-  }
-}
+/* 名前の置き場が壊れていても、位置と長さは読めて #N で並ぶこと */
+const broken = real.buf.slice();
+broken.fill(0xFF, 16 + real.recCount * 16);
+const bc = named.readDfi(broken, real.dataSize);
+if (!bc) fail("名前が壊れていると読めなくなる");
+if (bc.files !== real.want.length) fail(`名前が壊れていると件数が ${bc.files}`);
+const bgot = named.namedEntries(broken, bc, real.dataSize, 4096);
+if (!/^#\d+$/.test(bgot[0].name) || !bgot[0].bare) fail(`名前が壊れているときの表示が ${bgot[0].name}`);
+if (bgot[5].at !== real.want[5].at) fail("名前が壊れていると位置がずれる");
 
 /* DFI でないものを DFI として読まないこと */
 if (named.readDfi(junk, real.dataSize)) fail("無関係なデータを DFI として読んでいる");
 
-console.log(`OK  DFI をそのまま読める (${got.length} 件) / 総当たりでも同じ答えになる`);
+console.log(`OK  DFI をそのまま読める (${got.length} 件 / フォルダ付きの名前 ${dfiCand.named_ok} 件 / 名前が壊れていても #N で読める)`);
 
