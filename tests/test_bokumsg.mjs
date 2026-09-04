@@ -11,7 +11,7 @@ if (s < 0 || e < 0) { console.error("app.js に bokumsg マーカーが無い");
 const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
-  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv };")(u32le, u16le);
+  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -160,6 +160,9 @@ if (lines.some((l) => l.split("\t").length !== 5)) fail("TSV の列数が揃っ�
 /* 音声の番号は TSV に入れない (校正の対象ではない) */
 const withVoice = m.bokuMsgTsv([{ i: 0, at: 0x10, codes: voiceCodes }, { i: 1, at: 0x20, codes: entries[0] }], glyphs);
 if (withVoice.trimEnd().split("\n").length !== 2) fail("音声の行を TSV に入れてしまった");
+/* 7. 使われている文字番号 (制御コード・待ち時間の値・音声は除く) */
+const used = m.bokuMsgUsed(r8.items.concat([{ i: 9, at: 0, codes: voiceCodes }]));
+if (used.join(",") !== "0,1,5,6,7,9") fail(`使われている番号が ${used.join(",")}`);
 fs.mkdirSync(path.join(repo, "work"), { recursive: true });
 fs.writeFileSync(path.join(repo, "work", "MSG_EXPORT.tsv"), tsv);
 

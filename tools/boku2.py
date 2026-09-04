@@ -283,6 +283,28 @@ def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> 
     return rows
 
 
+def used_codes(paths: list[str]) -> list[int]:
+    """複数ファイルで実際に使われている文字番号 (昇順)。制御コードと待ち時間の値、音声は除く.
+
+    フォント画像を全部書き出さなくても、この番号だけ書き出せば本文は読める."""
+    used: set[int] = set()
+    for path in paths:
+        for _, _, _, text in text_rows(path, None):
+            # 文字表なしの復号は [番号] の形なので、そこから拾う
+            i = 0
+            while True:
+                i = text.find("[", i)
+                if i < 0:
+                    break
+                j = text.find("]", i)
+                if j < 0:
+                    break
+                if text[i + 1:j].isdigit():
+                    used.add(int(text[i + 1:j]))
+                i = j + 1
+    return sorted(used)
+
+
 def write_tsv(rows, out) -> None:
     out.write("id\toffset\tsize\toriginal\ttranslation\n")
     for rid, off, size, text in rows:
@@ -304,6 +326,8 @@ def main(argv=None) -> int:
     p.add_argument("--keep-voice", action="store_true", help="音声の番号の項目も残す")
     p = sub.add_parser("fontlist", help="フォントの並びを校正ツールのフォント一覧にする")
     p.add_argument("font"); p.add_argument("-o", "--out")
+    p = sub.add_parser("used", help="本文で使われている文字番号だけを並べる (書き出す手間を減らす)")
+    p.add_argument("files", nargs="+")
     args = ap.parse_args(argv)
 
     if args.cmd == "unpack":
@@ -326,6 +350,10 @@ def main(argv=None) -> int:
             print(f"{len(rows)} 行 → {args.out}" + ("" if glyphs else " (文字表なし: 番号のまま)"))
         else:
             write_tsv(rows, sys.stdout)
+    elif args.cmd == "used":
+        used = used_codes(args.files)
+        print(" ".join(str(u) for u in used))
+        print(f"# {len(used)} 種 (最大 {used[-1] if used else 0})。フォント画像のこの番号だけ書き出せば本文は読める", file=sys.stderr)
     elif args.cmd == "fontlist":
         glyphs = load_font(args.font) or []
         lines = ["# フォント画像の並び (tools/boku2.py fontlist)"] + [g for g in glyphs if g.strip()]

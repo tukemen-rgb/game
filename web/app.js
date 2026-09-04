@@ -4491,6 +4491,23 @@ function bokuMsgText(codes, glyphs, tags) {
 }
 
 /**
+ * 本文で実際に使われている文字番号の一覧 (昇順)。制御コードと待ち時間の値は除く。
+ * フォント画像の全部を書き出さなくても、この番号だけ書き出せば読める
+ */
+function bokuMsgUsed(items) {
+  const used = new Set();
+  for (const it of items) {
+    if (bokuMsgVoice(it.codes)) continue;
+    for (let i = 0; i < it.codes.length; i++) {
+      const c = it.codes[i];
+      if (c === 0x8002) { i++; continue; }
+      if (c < 0x8000) used.add(c);
+    }
+  }
+  return [...used].sort((a, b) => a - b);
+}
+
+/**
  * 読めた行を校正ツール向けの TSV にする (docs/04 の exercises/qa_target.tsv と同じ列)。
  * translation の列は original の写し。ここを直したものが校正の対象になる
  */
@@ -4547,9 +4564,21 @@ $("msgparse").addEventListener("click", () => {
       if (c < 0x8000 && c > maxCode) maxCode = c;
     }
   }
+  const used = bokuMsgUsed(filled);
+  state.usedGlyphs = new Set(used);                            /* TIM2 の目盛りで強調する */
   note.textContent = tablesInfo + `${r.count} 件 (位置表は ${r.stride} バイト刻み) · 本文あり ${filled.length} 件`
-    + ` · 文字番号の最大 ${maxCode}`
+    + ` · 文字番号の最大 ${maxCode} · 使われている番号 ${used.length} 種`
     + (glyphs ? ` · 文字表 ${glyphs.length} 字` : " · 文字表なし (番号のまま表示)");
+
+  /* 書き出す手間を減らす: 使われている番号だけ並べる */
+  const usedBox = document.createElement("details");
+  const sum = document.createElement("summary");
+  sum.textContent = `使われている文字番号 ${used.length} 種 (フォント画像からはこれだけ書き出せば足りる)`;
+  const usedTa = document.createElement("textarea");
+  usedTa.readOnly = true; usedTa.spellcheck = false; usedTa.rows = 3;
+  usedTa.value = used.join(" ");
+  usedBox.append(sum, usedTa);
+  box.append(usedBox);
 
   const wrap = document.createElement("div");
   wrap.className = "tablewrap";
@@ -4932,8 +4961,12 @@ function renderTim2(b, at) {
       g.font = `${Math.max(8, 5 * z)}px ui-monospace, monospace`;
       g.textBaseline = "top";
       let n = 0;
+      const usedSet = state.usedGlyphs || null;
       for (let y = oy; y + ch <= pic.height; y += ch) {
         for (let x = ox; x + cw <= pic.width; x += cw) {
+          const isUsed = usedSet && usedSet.has(n);
+          g.strokeStyle = isUsed ? "rgba(60,200,120,.9)" : "rgba(255,80,40,.5)";
+          g.lineWidth = isUsed ? 2 : 1;
           g.strokeRect(x * z + .5, y * z + .5, cw * z, ch * z);
           const label = String(n++);
           const tw = g.measureText(label).width + 3;
@@ -4941,7 +4974,8 @@ function renderTim2(b, at) {
           g.fillStyle = "#ffd28a"; g.fillText(label, x * z + 2, y * z + 2);
         }
       }
-      hint.textContent = `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の 0 から順に文字を書き出して、.msg 読みの文字表に貼ってください。`;
+      hint.textContent = `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の 0 から順に文字を書き出して、.msg 読みの文字表に貼ってください。`
+        + (usedSet && usedSet.size ? ` 緑の枠は、直前に読んだ .msg で使われている ${usedSet.size} 字 (まずここだけ書き出せば読めます)。` : "");
     }
   };
   for (const el of [zoomIn, cwIn, chIn, oxIn, oyIn]) el.addEventListener("input", draw);

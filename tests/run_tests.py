@@ -846,6 +846,10 @@ class TestBoku2Cli(unittest.TestCase):
             rows3 = boku2.text_rows(os.path.join(out, "system", "system.msg"), glyphs)
             self.assertEqual([r[3] for r in rows3], ["かき<BR>く", "<WAIT:12>こ"])
 
+            # 使われている文字番号だけを並べる (音声・制御コード・待ち時間の値は除く)
+            self.assertEqual(boku2.used_codes([map_path, os.path.join(out, "system", "system.msg")]),
+                             [0, 1, 2, 3, 5, 6, 7, 9])
+
             # CLI で TSV にして、校正ツールが読めること
             font_path = os.path.join(tmp, "font.txt")
             with open(font_path, "w", encoding="utf-8") as fh:
