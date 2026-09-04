@@ -1125,6 +1125,21 @@ class TestSniffInBrowser(unittest.TestCase):
         self.assertIn("OK", res.stdout)
 
 
+class TestBrowserEndToEnd(unittest.TestCase):
+    """構造探査台を実際にブラウザで操作する検査 (tests/e2e/)。playwright が無ければ skip."""
+
+    def test_all_scenarios(self):
+        import subprocess
+        try:
+            import playwright  # noqa: F401
+        except ImportError:
+            self.skipTest("playwright がありません")
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tests", "e2e", "run_all.py")],
+                             capture_output=True, text=True, cwd=REPO, timeout=1500)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn("NG ", res.stdout)
+
+
 class TestDisassemblerInBrowser(unittest.TestCase):
     """ブラウザ側の逆アセンブラも同じ答えと突き合わせる."""
 
