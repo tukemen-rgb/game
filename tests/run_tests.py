@@ -965,6 +965,62 @@ class TestBoku2Sample(unittest.TestCase):
                 self.assertEqual(h % 23, 0)
 
 
+class TestDocs(unittest.TestCase):
+    """文書が壊れていないこと: 参照先が実在し、画面のタブが全部説明されている."""
+
+    @staticmethod
+    def _docs():
+        import glob
+        return sorted(glob.glob(os.path.join(REPO, "docs", "*.md"))) + [os.path.join(REPO, "README.md")]
+
+    def test_referenced_files_exist(self):
+        import re
+        pat = re.compile(r"(?<![\w/])((?:docs|tools|tests|exercises|answers|data|web)/[\w\-.]+\.[a-z]+)")
+        missing = []
+        for path in self._docs():
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            for ref in set(pat.findall(text)):
+                if "*" in ref or ref.endswith((".tsv.po",)):
+                    continue
+                if not os.path.exists(os.path.join(REPO, ref)):
+                    missing.append(f"{os.path.relpath(path, REPO)} → {ref}")
+        self.assertEqual(missing, [])
+
+    def test_markdown_links_resolve(self):
+        import re
+        broken = []
+        for path in self._docs():
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            for target in re.findall(r"\]\(([^)#]+\.md)(?:#[^)]*)?\)", text):
+                full = os.path.normpath(os.path.join(os.path.dirname(path), target))
+                if not os.path.exists(full):
+                    broken.append(f"{os.path.relpath(path, REPO)} → {target}")
+        self.assertEqual(broken, [])
+
+    def test_every_tab_is_documented(self):
+        import re
+        with open(os.path.join(REPO, "web", "index.html"), encoding="utf-8") as fh:
+            html = fh.read()
+        tabs = re.findall(r'role="tab" data-tab="\w+"[^>]*>([^<]+)<', html)
+        self.assertGreaterEqual(len(tabs), 10)
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        undocumented = [t for t in tabs if t.replace(" ", "") not in doc.replace(" ", "")]
+        self.assertEqual(undocumented, [])
+
+    def test_recipe_commands_use_existing_tools(self):
+        import re
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        tools = set(re.findall(r"python3 (tools/[\w]+\.py)", doc))
+        self.assertIn("tools/boku2.py", tools)
+        self.assertIn("tools/make_boku2_sample.py", tools)
+        for t in tools:
+            self.assertTrue(os.path.exists(os.path.join(REPO, t)), t)
+
+
 class TestTim2(unittest.TestCase):
     """TIM2 の組み立て (tools/make_tim2.py) と、ブラウザ側の読み取りの突き合わせ."""
 
