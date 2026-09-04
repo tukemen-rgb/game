@@ -399,8 +399,10 @@
           <p class="hint">この作品のテキストは圧縮ではなく、<b>フォント画像の並び順をそのまま文字コードにした 2 バイトの並び</b>でした (英語化パッチの公開ソースで確認)。だから Shift-JIS で検索しても出てきません。ファイルは「件数 + 位置表 + 本文」の形で、本文の <code>0x8000</code> が終わり、<code>0x8001</code> が改行、<code>0x8002</code> が待ち時間です。<code>.msg</code> を選んでから押してください。</p>
           <div class="controls">
             <button class="btn seal" id="msgparse">このファイルを .msg として読む</button>
+            <button class="btn" id="mapsplit">マップの入れ物を切り分ける</button>
             <span class="pos" id="msgnote"></span>
           </div>
+          <p class="hint">物語の会話は <code>MAP</code> フォルダの各ファイルにあります。それは「項目数 + 位置と長さの表」の<b>入れ物</b>で、切り分けた <code>1.bin</code> に表が複数入った会話ファイルが入っています (公開ソースで確認)。メニュー類は <code>BOKU2.IMG</code> 内の <code>.msg</code> です。</p>
           <div class="field" style="margin-top:8px">
             <label for="msgglyphs">フォントの文字の並び (bk_font.tms を「見つけた絵」で見て、左上から順に書き出す。改行は無視)</label>
             <textarea id="msgglyphs" rows="3" spellcheck="false" placeholder="例: 。、，．・：；？！゛゜…"></textarea>

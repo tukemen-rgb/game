@@ -3717,6 +3717,15 @@ async function splitByIndex(dataEntry, c) {
   const items = c.named
     ? namedEntries(state.idxBuf, c, dataEntry.size, 4096)
     : indexEntries(state.idxBuf, c, dataEntry.size, 4096);
+  await addParts(dataEntry, items, "索引に従って");
+}
+
+/**
+ * 一つのファイルを部品に切り分けて一覧にぶら下げる。索引からでも、入れ物の形が
+ * 分かっているファイル (マップの入れ物など) からでも同じ道を通る。
+ * items: [{ i, at, len, name?, base?, bare? }]
+ */
+async function addParts(dataEntry, items, how) {
   const prefix = dataEntry.path + "/";
   state.entries = state.entries.filter((e) => e.kind !== "part" || e.parentPath !== dataEntry.path);
   const kids = items.filter((it) => it.len > 0).map((it) => {
@@ -3756,7 +3765,7 @@ async function splitByIndex(dataEntry, c) {
   const packed = kinds.filter((k) => k.ext === "packed").length;
   selectEntry(kids[0]).then(() => {
     note.textContent =
-      `${dataEntry.name} を索引に従って ${kids.length} 個に切り分けました`
+      `${dataEntry.name} を${how} ${kids.length} 個に切り分けました`
       + (items.length > kids.length ? ` (長さ 0 の ${items.length - kids.length} 件は除外)` : "")
       + `。中身の見当: ${sniffSummary(kinds)}。`
       + (bareCount ? `名前が無い ${bareCount} 件は種類を末尾に付けました。` : "")
@@ -4384,6 +4393,61 @@ function detectBokuMsg(b) {
   return null;
 }
 
+/**
+ * マップの会話ファイル (map/*.* の入れ物の 1 番)。表が複数入っている。
+ *   u32 表の数 T
+ *   T 個の項目 (12 バイト): u32 不明 / u16 表の長さ / u16 不明 (番号?) / u16 表の位置 / u16 予備
+ *   各表 = 上の .msg と同じ「u32 件数 + 4 バイト刻みの位置表 + 本文」(位置は表の先頭から)
+ */
+function parseBokuMsgTables(b) {
+  if (b.length < 16) return null;
+  const t = u32le(b, 0);
+  if (t < 1 || t > 2000) return null;
+  const head = 4 + t * 12;
+  if (head > b.length) return null;
+  const tables = [];
+  let prev = 0;
+  for (let i = 0; i < t; i++) {
+    const p = 4 + i * 12;
+    const size = u16le(b, p + 4), off = u16le(b, p + 8);
+    if (off < head || off + size > b.length || off < prev) return null;
+    prev = off;
+    const msg = size >= 8 ? parseBokuMsg(b.subarray(off, off + size), 4) : null;
+    tables.push({ i, off, size, id: u16le(b, p + 6), msg });
+  }
+  if (!tables.some((x) => x.msg)) return null;
+  return { count: t, tables };
+}
+
+/**
+ * マップの入れ物 (map/*.* と、IMG 内の map ファイル)。
+ *   u32 項目数 N
+ *   N 個の項目 (8 バイト: u32 位置 / u32 長さ。まれに 12 バイト)。位置 0 は空
+ *   最初の項目の位置が見出しの長さ (だいたい 0x80)。各部品は 16 バイト揃え
+ */
+function parseBokuMap(b) {
+  if (b.length < 16) return null;
+  const n = u32le(b, 0);
+  if (n < 1 || n > 64) return null;
+  for (const rec of [8, 12]) {
+    const head = 4 + n * rec;
+    if (head > b.length) continue;
+    const items = [];
+    let prev = 0, ok = true, first = 0;
+    for (let i = 0; i < n; i++) {
+      const off = u32le(b, 4 + i * rec), len = u32le(b, 8 + i * rec);
+      if (!off && !len) { items.push({ i, at: 0, len: 0 }); continue; }
+      if (off < head || off + len > b.length || off < prev || (off & 15)) { ok = false; break; }
+      if (!first) first = off;
+      prev = off + len;
+      items.push({ i, at: off, len });
+    }
+    if (!ok || !first) continue;
+    return { count: n, rec, headLen: first, items };
+  }
+  return null;
+}
+
 /** 2 バイトの並びを文字にする。glyphs はフォントの並び (配列)。無ければ番号のまま */
 function bokuMsgText(codes, glyphs) {
   let s = "";
@@ -4405,9 +4469,28 @@ $("msgparse").addEventListener("click", () => {
   box.textContent = "";
   const note = $("msgnote");
   if (!state.buf || !state.buf.length) { note.textContent = "ファイルを選んでください"; return; }
-  const r = detectBokuMsg(state.buf);
+  const map = parseBokuMap(state.buf);
+  if (map) {
+    note.textContent = `これはマップの入れ物です (${map.count} 個)。下の「入れ物を切り分ける」で部品にしてから、1 番を選んで読んでください。`;
+    return;
+  }
+  let r = detectBokuMsg(state.buf);
+  let tablesInfo = "";
   if (!r) {
-    note.textContent = "この形では読めませんでした (先頭が「件数 + 位置表」になっていない)";
+    /* マップの会話ファイルは表が複数。表番号を付けて一つの並びにする */
+    const mt = parseBokuMsgTables(state.buf);
+    if (mt) {
+      const items = [];
+      for (const tb of mt.tables) {
+        if (!tb.msg) continue;
+        for (const it of tb.msg.items) items.push({ i: `${tb.i}-${it.i}`, at: tb.off + it.at, codes: it.codes });
+      }
+      r = { count: items.length, stride: 4, items };
+      tablesInfo = `表 ${mt.tables.filter((x) => x.msg).length} / ${mt.count} · `;
+    }
+  }
+  if (!r) {
+    note.textContent = "この形では読めませんでした (先頭が「件数 + 位置表」にも「表の数 + 表の一覧」にもなっていない)";
     return;
   }
   const glyphText = $("msgglyphs").value.replace(/\r?\n/g, "");
@@ -4421,7 +4504,7 @@ $("msgparse").addEventListener("click", () => {
       if (c < 0x8000 && c > maxCode) maxCode = c;
     }
   }
-  note.textContent = `${r.count} 件 (位置表は ${r.stride} バイト刻み) · 本文あり ${filled.length} 件`
+  note.textContent = tablesInfo + `${r.count} 件 (位置表は ${r.stride} バイト刻み) · 本文あり ${filled.length} 件`
     + ` · 文字番号の最大 ${maxCode}`
     + (glyphs ? ` · 文字表 ${glyphs.length} 字` : " · 文字表なし (番号のまま表示)");
 
@@ -4453,6 +4536,21 @@ $("msgparse").addEventListener("click", () => {
       + `番号は 0 から ${maxCode} まで使われています。`;
     box.append(p);
   }
+});
+
+$("mapsplit").addEventListener("click", async () => {
+  const note = $("msgnote");
+  const entry = state.current;
+  if (!entry || !state.buf || !state.buf.length) { note.textContent = "ファイルを選んでください"; return; }
+  const map = parseBokuMap(state.buf);
+  if (!map) {
+    note.textContent = "マップの入れ物には見えませんでした (先頭が「項目数 + 位置と長さの表」になっていない)";
+    return;
+  }
+  const items = map.items.filter((it) => it.len > 0)
+    .map((it) => ({ i: it.i, at: it.at, len: it.len, name: `${it.i}.bin`, base: `${it.i}.bin`, bare: false }));
+  await addParts(entry, items, "マップの入れ物として");
+  note.textContent = `${items.length} 個に切り分けました。会話はふつう 1.bin にあります。`;
 });
 
 $("lzsstry").addEventListener("click", () => {

@@ -11,7 +11,7 @@ if (s < 0 || e < 0) { console.error("app.js に bokumsg マーカーが無い");
 const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
-  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText };")(u32le, u16le);
+  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -82,4 +82,65 @@ dv.setUint32(4, u32le(bad, 4 + 16), true);
 dv.setUint32(4 + 16, 4 + 4 * 8, true);
 if (m.parseBokuMsg(bad, 8)) fail("位置が減る表を通した");
 
-console.log("OK  .msg 8 バイト刻み / 4 バイト刻み / 制御コード / 誤認しない");
+/* 4. マップの会話ファイル (表が複数)。表の一覧 12 バイト × T の後に各表 */
+function buildTables(tables) {
+  const head = 4 + tables.length * 12;
+  const bodies = tables.map((t) => buildMsg(t, 4));
+  const total = head + bodies.reduce((a, b) => a + b.length, 0);
+  const buf = new Uint8Array(total);
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(0, tables.length, true);
+  let p = head;
+  bodies.forEach((body, i) => {
+    dv.setUint32(4 + i * 12, 0xDEAD, true);          /* 不明 */
+    dv.setUint16(8 + i * 12, body.length, true);      /* 表の長さ */
+    dv.setUint16(10 + i * 12, 100 + i, true);         /* 番号? */
+    dv.setUint16(12 + i * 12, p, true);               /* 表の位置 */
+    buf.set(body, p);
+    p += body.length;
+  });
+  return buf;
+}
+const mt = m.parseBokuMsgTables(buildTables([entries, [[0, 0x8000]], [[2, 3, 0x8000]]]));
+if (!mt) fail("表が複数の会話ファイルを読めない");
+if (mt.count !== 3 || mt.tables.filter((t) => t.msg).length !== 3) fail(`表の数が ${mt.count}`);
+if (m.bokuMsgText(mt.tables[0].msg.items[0].codes, glyphs) !== "かき\nく{END}") fail("表 0 の復号が違う");
+if (m.bokuMsgText(mt.tables[2].msg.items[0].codes, glyphs) !== "うえ{END}") fail("表 2 の復号が違う");
+if (mt.tables[1].id !== 101) fail("表の番号が読めていない");
+/* 単体の .msg を表の一覧と誤認しない、逆も */
+if (m.parseBokuMsgTables(msg8)) fail("単体の .msg を表の一覧と誤認した");
+if (m.detectBokuMsg(buildTables([entries]))) fail("表の一覧を単体の .msg と誤認した");
+
+/* 5. マップの入れ物: u32 項目数 + (u32 位置, u32 長さ)。部品は 16 バイト揃え */
+function buildMap(parts, rec) {
+  const n = parts.length;
+  const headLen = Math.ceil((4 + n * rec) / 16) * 16;
+  let total = headLen;
+  const offs = parts.map((p) => { if (!p) return 0; const o = total; total += Math.ceil(p.length / 16) * 16; return o; });
+  const buf = new Uint8Array(total);
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(0, n, true);
+  parts.forEach((p, i) => {
+    if (!p) return;
+    dv.setUint32(4 + i * rec, offs[i], true);
+    dv.setUint32(8 + i * rec, p.length, true);
+    buf.set(p, offs[i]);
+  });
+  return buf;
+}
+const partA = new Uint8Array(40).fill(0x11);
+const partText = buildTables([entries]);
+const mapBuf = buildMap([partA, partText, null, new Uint8Array(3).fill(0x22)], 8);
+const mp = m.parseBokuMap(mapBuf);
+if (!mp) fail("マップの入れ物を読めない");
+if (mp.count !== 4 || mp.rec !== 8) fail(`入れ物の項目数 ${mp.count} / 刻み ${mp.rec}`);
+if (mp.items[2].len !== 0) fail("空の項目が空になっていない");
+if (mp.items[1].len !== partText.length) fail("1 番の長さが違う");
+const inner = mapBuf.subarray(mp.items[1].at, mp.items[1].at + mp.items[1].len);
+if (!m.parseBokuMsgTables(inner)) fail("入れ物の 1 番から会話ファイルを読めない");
+const mp12 = m.parseBokuMap(buildMap([partA, partText], 12));
+if (!mp12 || mp12.rec !== 12) fail("12 バイト刻みの入れ物を読めない");
+if (m.parseBokuMap(msg8)) fail(".msg を入れ物と誤認した");
+if (m.parseBokuMap(sjis)) fail("テキストを入れ物と誤認した");
+
+console.log("OK  .msg 8 バイト刻み / 4 バイト刻み / 制御コード / 表が複数の会話ファイル / マップの入れ物 / 誤認しない");
