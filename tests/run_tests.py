@@ -22,6 +22,7 @@ import scrp
 import make_sample
 import proofread
 import relative_search
+import boku2  # noqa: F401  (TestBoku2Cli で使う。読み込めることも確認)
 
 
 SOURCE = os.path.join(REPO, "data", "script_source.tsv")
@@ -717,6 +718,171 @@ class TestLzssInBrowser(unittest.TestCase):
                              capture_output=True, text=True, cwd=REPO)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("OK", res.stdout)
+
+
+class TestBoku2Cli(unittest.TestCase):
+    """一括抽出 (tools/boku2.py) を、実物と同じ形の合成データで通す."""
+
+    @staticmethod
+    def build_dfi(tree):
+        """tree: [(is_dir, more, name, data or None)] → (idx, img, 期待する path→data)."""
+        import struct
+        recs, img, want = [], b"", {}
+        stack = []
+        for is_dir, more, name, data in tree:
+            if is_dir:
+                recs.append((1, more, 0, 0))
+                stack.append(("" if name == "/" else name, more))
+                continue
+            lba = len(img) // 2048
+            recs.append((0, more, lba, len(data)))
+            padded = data + b"\0" * ((2048 - len(data) % 2048) % 2048)
+            img += padded
+            want["/".join([d for d, _ in stack if d] + [name])] = data
+            if more == 0:
+                d = stack.pop()
+                while d and d[1] == 0 and len(stack) > 1:
+                    d = stack.pop()
+        idx = b"DFI\0" + struct.pack("<I", 0x100) + b"\0" * 8
+        noise = 0x8130
+        for kind, more, lba, size in recs:
+            idx += struct.pack("<HHIII", kind, more, noise, lba, size)
+            noise -= 7
+        idx += b"".join(name.encode() + b"\0" for _, _, name, _ in tree)
+        return idx, img, want
+
+    @staticmethod
+    def build_msg(entries, stride):
+        import struct
+        tab = 4 + len(entries) * stride
+        head = struct.pack("<I", len(entries))
+        body, p = b"", tab
+        for e in entries:
+            head += struct.pack("<I", p if e else 0) + (b"\0" * (stride - 4))
+            body += struct.pack(f"<{len(e)}H", *e)
+            p += len(e) * 2
+        return head + body
+
+    @classmethod
+    def build_tables(cls, tables):
+        import struct
+        head = 4 + len(tables) * 12
+        bodies = [cls.build_msg(t, 4) for t in tables]
+        out, p, data = struct.pack("<I", len(tables)), head, b""
+        for i, b in enumerate(bodies):
+            out += struct.pack("<IHHHH", 0xDEAD, len(b), 100 + i, p, 0)
+            data += b
+            p += len(b)
+        return out + data
+
+    @staticmethod
+    def build_map(parts):
+        import struct
+        n = len(parts)
+        head_len = ((4 + n * 8 + 15) // 16) * 16
+        out, data, off = struct.pack("<I", n), b"", head_len
+        for part in parts:
+            if part is None:
+                out += struct.pack("<II", 0, 0)
+                continue
+            padded = part + b"\0" * ((16 - len(part) % 16) % 16)
+            out += struct.pack("<II", off, len(part))
+            data += padded
+            off += len(padded)
+        return out + b"\0" * (head_len - len(out)) + data
+
+    def test_unpack_maps_text_end_to_end(self):
+        import boku2
+        import subprocess
+
+        glyphs = list("あいうえおかきくけこ")
+        menu = self.build_msg([[5, 6, 0x8001, 7, 0x8000], [], [0x8002, 0x12, 9, 0x8000, 0xCDCD]], 8)
+        talk = self.build_tables([[[0, 1, 0x8000]], [[0x3130, 0x3332, 0x3534, 0x3736], [2, 3, 0x8000]]])
+        map_file = self.build_map([b"\x11" * 40, talk, None])
+        tree = [
+            (True, 1, "/", None),
+            (True, 1, "system", None),
+            (False, 1, "system.msg", menu),
+            (True, 0, "sub", None),
+            (False, 0, "deep.bin", b"\x22" * 10),
+            (True, 1, "photo", None),
+        ] + [(False, 0 if i == 7 else 1, f"p{i}.tm2", bytes([0x40 + i]) * (100 + i)) for i in range(8)] + [
+            (False, 0, "tail.bin", b"\x33" * 3000),
+        ]
+        idx, img, want = self.build_dfi(tree)
+        self.assertEqual(len(want), 11)
+        for key in ["system/sub/deep.bin", "system/system.msg", "photo/p0.tm2", "photo/p7.tm2", "tail.bin"]:
+            self.assertIn(key, want)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            idx_path, img_path = os.path.join(tmp, "BOKU2.IDX"), os.path.join(tmp, "BOKU2.IMG")
+            with open(idx_path, "wb") as fh:
+                fh.write(idx)
+            with open(img_path, "wb") as fh:
+                fh.write(img)
+            out = os.path.join(tmp, "out")
+            n = boku2.unpack(idx_path, img_path, out)
+            self.assertEqual(n, 11)
+            for path, data in want.items():
+                with open(os.path.join(out, *path.split("/")), "rb") as fh:
+                    self.assertEqual(fh.read(), data, path)
+
+            # マップの入れ物 → 部品 → 会話 (表が複数、音声つき)
+            map_path = os.path.join(tmp, "M_A11000.BIN")
+            with open(map_path, "wb") as fh:
+                fh.write(map_file)
+            parts = boku2.split_map(map_path, os.path.join(tmp, "maps", "M_A11000"))
+            self.assertEqual(parts, 2)
+            rows = boku2.text_rows(os.path.join(tmp, "maps", "M_A11000", "1.bin"), glyphs)
+            self.assertEqual([r[0] for r in rows], ["1:0-0", "1:1-0", "1:1-1"])
+            self.assertEqual([r[3] for r in rows], ["あい", "<VOICE:01234567>", "うえ"])
+            # 入れ物のまま渡しても 1 番を読む (位置は入れ物の先頭から)
+            rows2 = boku2.text_rows(map_path, glyphs)
+            self.assertEqual([r[3] for r in rows2], ["あい", "<VOICE:01234567>", "うえ"])
+            self.assertGreater(rows2[0][1], rows[0][1])
+            # 単体の .msg
+            rows3 = boku2.text_rows(os.path.join(out, "system", "system.msg"), glyphs)
+            self.assertEqual([r[3] for r in rows3], ["かき<BR>く", "<WAIT:12>こ"])
+
+            # CLI で TSV にして、校正ツールが読めること
+            font_path = os.path.join(tmp, "font.txt")
+            with open(font_path, "w", encoding="utf-8") as fh:
+                fh.write("あいうえお\nかきくけこ\n")
+            tsv = os.path.join(tmp, "all.tsv")
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), "text",
+                                  os.path.join(out, "system", "system.msg"), map_path,
+                                  "-f", font_path, "-o", tsv], capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            got = scrp.read_tsv(tsv)
+            self.assertEqual(len(got), 5)
+            self.assertEqual(got[0]["id"], "system:0")
+            fl = os.path.join(tmp, "font_chars.txt")
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), "fontlist",
+                                  font_path, "-o", fl], capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertEqual(proofread.load_font_chars(fl), set("あいうえおかきくけこ"))
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "proofread.py"), tsv,
+                                  "--font-chars", fl], capture_output=True, text=True, cwd=REPO)
+            self.assertIn(res.returncode, (0, 1), res.stdout + res.stderr)
+            self.assertNotIn("Traceback", res.stderr)
+
+            # ブラウザ側の索引読みと同じ答えになること (同じ合成データを node で読む)
+            import shutil
+            node = shutil.which("node")
+            if node:
+                script = ("const fs=require('fs');const src=fs.readFileSync('web/app.js','utf8');"
+                          "const s=src.indexOf('/* @extract-start named-index */'),e=src.indexOf('/* @extract-end named-index */');"
+                          "const u32le=(b,p)=>(b[p]|(b[p+1]<<8)|(b[p+2]<<16)|(b[p+3]<<24))>>>0;"
+                          "const ascii=(b)=>{let t='';for(const c of b)t+=String.fromCharCode(c);return t;};"
+                          "const m=new Function('u32le','ascii',src.slice(s,e)+'\\nreturn {readDfi,namedEntries};')(u32le,ascii);"
+                          f"const idx=fs.readFileSync({idx_path!r});const size={len(img)};"
+                          "const c=m.readDfi(idx,size);const items=m.namedEntries(idx,c,size,4096);"
+                          "console.log(JSON.stringify(items.map(i=>[i.name,i.at,i.len])));")
+                res = subprocess.run([node, "-e", script], capture_output=True, text=True, cwd=REPO)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                js = json.loads(res.stdout)
+                py = [[e["path"], e["at"], e["len"]] for e in boku2.read_dfi(idx, len(img))]
+                self.assertEqual(js, py)
 
 
 class TestTim2(unittest.TestCase):
