@@ -833,11 +833,13 @@ class TestBoku2Cli(unittest.TestCase):
                 fh.write(map_file)
             parts = boku2.split_map(map_path, os.path.join(tmp, "maps", "M_A11000"))
             self.assertEqual(parts, 2)
-            rows = boku2.text_rows(os.path.join(tmp, "maps", "M_A11000", "1.bin"), glyphs)
+            rows = boku2.text_rows(os.path.join(tmp, "maps", "M_A11000", "1.bin"), glyphs, keep_voice=True)
             self.assertEqual([r[0] for r in rows], ["1:0-0", "1:1-0", "1:1-1"])
             self.assertEqual([r[3] for r in rows], ["あい", "<VOICE:01234567>", "うえ"])
+            # 音声の番号は既定では省く (校正の対象ではない)
+            self.assertEqual([r[3] for r in boku2.text_rows(map_path, glyphs)], ["あい", "うえ"])
             # 入れ物のまま渡しても 1 番を読む (位置は入れ物の先頭から)
-            rows2 = boku2.text_rows(map_path, glyphs)
+            rows2 = boku2.text_rows(map_path, glyphs, keep_voice=True)
             self.assertEqual([r[3] for r in rows2], ["あい", "<VOICE:01234567>", "うえ"])
             self.assertGreater(rows2[0][1], rows[0][1])
             # 単体の .msg
@@ -854,7 +856,7 @@ class TestBoku2Cli(unittest.TestCase):
                                   "-f", font_path, "-o", tsv], capture_output=True, text=True, cwd=REPO)
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             got = scrp.read_tsv(tsv)
-            self.assertEqual(len(got), 5)
+            self.assertEqual(len(got), 4)                       # 音声 1 行は省かれる
             self.assertEqual(got[0]["id"], "system:0")
             fl = os.path.join(tmp, "font_chars.txt")
             res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), "fontlist",
@@ -883,6 +885,84 @@ class TestBoku2Cli(unittest.TestCase):
                 js = json.loads(res.stdout)
                 py = [[e["path"], e["at"], e["len"]] for e in boku2.read_dfi(idx, len(img))]
                 self.assertEqual(js, py)
+
+
+class TestBoku2Sample(unittest.TestCase):
+    """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
+
+    def test_recipe_round_trip(self):
+        import glob
+        import shutil
+        import subprocess
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "BOKU2SAMPLE")
+            answer = make_boku2_sample.build_sample(sample)
+            for name in ["BOKU2.IDX", "BOKU2.IMG", "font.txt", "answer.tsv", "MAP/M_A01000.BIN"]:
+                self.assertTrue(os.path.exists(os.path.join(sample, name)), name)
+
+            tool = os.path.join(REPO, "tools", "boku2.py")
+            run = lambda *a: subprocess.run([sys.executable, tool, *a], capture_output=True, text=True, cwd=REPO)
+            out = os.path.join(tmp, "OUT")
+            res = run("unpack", os.path.join(sample, "BOKU2.IDX"), os.path.join(sample, "BOKU2.IMG"), out)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertTrue(os.path.exists(os.path.join(out, "system", "system.msg")))
+            self.assertTrue(os.path.exists(os.path.join(out, "system", "namemsg", "namemsg.msg")))
+            self.assertTrue(os.path.exists(os.path.join(out, "00diary", "nik002.tm2")))
+            self.assertTrue(os.path.exists(os.path.join(out, "system", "bk_font.tms")))
+            res = run("maps", *glob.glob(os.path.join(sample, "MAP", "*.BIN")), "-o", os.path.join(out, "maps"))
+            self.assertEqual(res.returncode, 0, res.stderr)
+            files = (glob.glob(os.path.join(out, "system", "*.msg")) + glob.glob(os.path.join(out, "system", "*", "*.msg"))
+                     + glob.glob(os.path.join(out, "maps", "*", "1.bin")))
+            tsv = os.path.join(tmp, "all.tsv")
+            res = run("text", *files, "-f", os.path.join(sample, "font.txt"), "-o", tsv)
+            self.assertEqual(res.returncode, 0, res.stderr)
+
+            # 答えと突き合わせる: id と本文が全部一致すること (順序は問わない)
+            got = {r["id"]: r["original"] for r in scrp.read_tsv(tsv)}
+            want = {}
+            for stem, rows in answer.items():
+                for rid, text in rows:
+                    key = rid if not rid.startswith("1:") else f"1:{rid[2:]}"
+                    want[key] = text
+            # マップは複数あるので id が重なる。ファイルごとに比べる
+            for stem in ["M_A01000", "M_A02000"]:
+                rows = scrp.read_tsv(tsv)
+                per_map = [r for r in rows if r["id"].startswith("1:")]
+                self.assertTrue(per_map)
+            for rid, text in answer["system"] + answer["namemsg"]:
+                self.assertEqual(got[rid], text, rid)
+            map_texts = sorted(r["original"] for r in scrp.read_tsv(tsv) if r["id"].startswith("1:"))
+            self.assertEqual(map_texts, sorted(t for s in ["M_A01000", "M_A02000"] for _, t in answer[s]
+                                               if not t.startswith("<VOICE:")))
+
+            # フォント一覧 → 校正 (フォントに無い文字の検査つき) が通る
+            fl = os.path.join(tmp, "font_chars.txt")
+            res = run("fontlist", os.path.join(sample, "font.txt"), "-o", fl)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "proofread.py"), tsv,
+                                  "--font-chars", fl], capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)   # 練習データは指摘ゼロのはず
+            self.assertNotIn("Traceback", res.stderr)
+
+            # フォント画像は TIM2 として読める (ブラウザ側の tim2 ブロック)
+            node = shutil.which("node")
+            if node:
+                tms = os.path.join(out, "system", "bk_font.tms")
+                script = ("const fs=require('fs');const src=fs.readFileSync('web/app.js','utf8');"
+                          "const s=src.indexOf('/* @extract-start tim2 */'),e=src.indexOf('/* @extract-end tim2 */');"
+                          "const u32le=(b,p)=>(b[p]|(b[p+1]<<8)|(b[p+2]<<16)|(b[p+3]<<24))>>>0;"
+                          "const u16le=(b,p)=>b[p]|(b[p+1]<<8);"
+                          "const m=new Function('u32le','u16le',src.slice(s,e)+'\\nreturn {findTim2,parseTim2};')(u32le,u16le);"
+                          f"const b=fs.readFileSync({tms!r});const at=m.findTim2(b);const t=m.parseTim2(b,at);"
+                          "console.log(JSON.stringify([at,t.pictures[0].width,t.pictures[0].height]));")
+                res = subprocess.run([node, "-e", script], capture_output=True, text=True, cwd=REPO)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                at, w, h = json.loads(res.stdout)
+                self.assertEqual(at, 0x80)
+                self.assertEqual(w, 17 * 23)
+                self.assertEqual(h % 23, 0)
 
 
 class TestTim2(unittest.TestCase):

@@ -4499,6 +4499,7 @@ function bokuMsgTsv(items, glyphs) {
   const lines = ["id\toffset\tsize\toriginal\ttranslation"];
   for (const it of items) {
     if (!it.codes.length) continue;
+    if (bokuMsgVoice(it.codes)) continue;                     /* 音声の番号は文章ではない */
     const text = esc(bokuMsgText(it.codes, glyphs, true));
     lines.push(`${it.i}\t0x${it.at.toString(16).toUpperCase()}\t${it.codes.length * 2}\t${text}\t${text}`);
   }

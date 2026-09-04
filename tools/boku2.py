@@ -248,8 +248,10 @@ def load_font(path: str | None) -> list[str] | None:
         return list(fh.read().replace("\r", "").replace("\n", ""))
 
 
-def text_rows(path: str, glyphs: list[str] | None) -> list[tuple[str, int, int, str]]:
-    """1 ファイルから (id, offset, size, text) の行を作る。入れ物 / 表の一覧 / 単体を自動で見分ける."""
+def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> list[tuple[str, int, int, str]]:
+    """1 ファイルから (id, offset, size, text) の行を作る。入れ物 / 表の一覧 / 単体を自動で見分ける.
+
+    音声の番号 (8 桁の数字) の項目は文章ではないので、既定では省く (校正の対象にならない)."""
     with open(path, "rb") as fh:
         b = fh.read()
     stem = os.path.splitext(os.path.basename(path))[0]
@@ -268,14 +270,14 @@ def text_rows(path: str, glyphs: list[str] | None) -> list[tuple[str, int, int, 
             if not tb["msg"]:
                 continue
             for it in tb["msg"]:
-                if it["codes"]:
+                if it["codes"] and (keep_voice or not voice_id(it["codes"])):
                     rows.append((f"{stem}:{tb['i']}-{it['i']}", base_off + tb["off"] + it["at"],
                                  len(it["codes"]) * 2, decode(it["codes"], glyphs)))
         return rows
     msg = parse_msg(b, 8) or parse_msg(b, 4)
     if msg:
         for it in msg:
-            if it["codes"]:
+            if it["codes"] and (keep_voice or not voice_id(it["codes"])):
                 rows.append((f"{stem}:{it['i']}", base_off + it["at"], len(it["codes"]) * 2,
                              decode(it["codes"], glyphs)))
     return rows
@@ -299,6 +301,7 @@ def main(argv=None) -> int:
     p.add_argument("files", nargs="+"); p.add_argument("-o", "--out", required=True)
     p = sub.add_parser("text", help="会話を TSV にする")
     p.add_argument("files", nargs="+"); p.add_argument("-f", "--font"); p.add_argument("-o", "--out")
+    p.add_argument("--keep-voice", action="store_true", help="音声の番号の項目も残す")
     p = sub.add_parser("fontlist", help="フォントの並びを校正ツールのフォント一覧にする")
     p.add_argument("font"); p.add_argument("-o", "--out")
     args = ap.parse_args(argv)
@@ -316,7 +319,7 @@ def main(argv=None) -> int:
         glyphs = load_font(args.font)
         rows = []
         for f in args.files:
-            rows += text_rows(f, glyphs)
+            rows += text_rows(f, glyphs, args.keep_voice)
         if args.out:
             with open(args.out, "w", encoding="utf-8") as fo:
                 write_tsv(rows, fo)

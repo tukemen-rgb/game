@@ -157,6 +157,9 @@ if (lines[0] !== "id\toffset\tsize\toriginal\ttranslation") fail("TSV の見出�
 if (lines.length !== 4) fail(`TSV の行数が ${lines.length} (空の項目は除く)`);
 if (lines[1] !== "0\t0x24\t10\tかき<BR>く\tかき<BR>く") fail(`TSV の 1 行目が違う: ${lines[1]}`);
 if (lines.some((l) => l.split("\t").length !== 5)) fail("TSV の列数が揃っていない");
+/* 音声の番号は TSV に入れない (校正の対象ではない) */
+const withVoice = m.bokuMsgTsv([{ i: 0, at: 0x10, codes: voiceCodes }, { i: 1, at: 0x20, codes: entries[0] }], glyphs);
+if (withVoice.trimEnd().split("\n").length !== 2) fail("音声の行を TSV に入れてしまった");
 fs.mkdirSync(path.join(repo, "work"), { recursive: true });
 fs.writeFileSync(path.join(repo, "work", "MSG_EXPORT.tsv"), tsv);
 

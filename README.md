@@ -52,7 +52,14 @@ open web/index.html
 python3 tools/insert_text.py work/SCRIPT.tsv -o work/SCRIPT_new.BIN \
     --original work/SCRIPT.BIN
 
-# 10. ツール自体のテスト
+# 10. 実物と同じ形の練習データで、索引 → 会話 → 校正用 TSV まで一括で通す
+python3 tools/make_boku2_sample.py
+python3 tools/boku2.py unpack work/BOKU2SAMPLE/BOKU2.IDX work/BOKU2SAMPLE/BOKU2.IMG work/OUT
+python3 tools/boku2.py maps work/BOKU2SAMPLE/MAP/*.BIN -o work/OUT/maps
+python3 tools/boku2.py text work/OUT/system/*.msg work/OUT/maps/*/1.bin \
+    -f work/BOKU2SAMPLE/font.txt -o work/all.tsv
+
+# 11. ツール自体のテスト
 python3 tests/run_tests.py
 ```
 
@@ -74,6 +81,7 @@ python3 tests/run_tests.py
 | ImgBurn + 手作業の当たり探し | `web/` (構造探査台) | ディスクイメージを開いて構造を推定する |
 | 専用アンパッカーを探す/書く | `web/` の「索引ファイル」タブ | 索引の形を総当たりで当てて中身を取り出す |
 | IDA Pro / Ghidra | `web/` の「逆アセンブル」タブ / `tools/elfdump.py` | 本体プログラム (ELF32 / MIPS) を命令まで戻して読む |
+| 作品専用の抽出スクリプト | `tools/boku2.py` | 形式が分かった作品 (僕の夏休み 2) の索引・入れ物・会話を一括で取り出す |
 
 ## 覚えるのはこの 3 つ + 1
 
@@ -86,6 +94,7 @@ python3 tests/run_tests.py
 | 画面での確認 | データ上の文字列と見た目を突き合わせる | [docs/06-画面で確かめる.md](docs/06-画面で確かめる.md) |
 | 構造の推定 | 未知のファイルからポインタ表や文字列を見つける | [docs/07-構造探査台.md](docs/07-構造探査台.md) |
 | コードを読む | 本体プログラムを逆アセンブルして「どう読んでいるか」を見る | [docs/08-コードを読む.md](docs/08-コードを読む.md) |
+| 実物での通し手順 | 索引 → 会話 → 文字表 → 校正用 TSV を順番どおりに | [docs/10-僕夏2の手順.md](docs/10-僕夏2の手順.md) (根拠は [docs/09](docs/09-調査ログと引き継ぎ.md)) |
 
 実物のディスクを扱う話 (ISO 化、エミュレータでの照合、日本の著作権法上の
 注意点) は [docs/05-実物のディスクを扱う場合.md](docs/05-実物のディスクを扱う場合.md)
@@ -113,6 +122,9 @@ python3 tests/run_tests.py
 9. **コードを読む** — 同じイメージの `SLPS_900.99` を「逆アセンブル」タブで開き、
    `SYSTEM.CNF` → 本体プログラム → 文字列の参照元、という順路を辿る
    (`make_elf.py` が答えを表示するので突き合わせられる)
+10. **実物と同じ形で通す** — `make_boku2_sample.py` のデータを構造探査台と
+    `boku2.py` で索引 → 会話 → 文字表 → 校正用 TSV まで通し、`answer.tsv` と
+    突き合わせる (docs/10)
 
 ## ディレクトリ構成
 
