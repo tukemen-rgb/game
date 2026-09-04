@@ -2801,6 +2801,11 @@ function renderGallery() {
   const box = $("gallerybox");
   box.textContent = "";
   const note = $("gallerynote");
+  if (state.buf && findTim2(state.buf) >= 0) {
+    note.textContent = "このファイルは TIM2 (PS2 の標準画像) です。ここは形式が分からない絵を推定する場所なので、"
+      + "「既知の形式」タブで正しい色と大きさで見てください (フォントなら文字の番号も重ねられます)。";
+    return;
+  }
   if (!state.tiles.length) {
     note.textContent = "絵らしい領域は見つかりませんでした。"
       + "圧縮されているか、このファイルには画像が無いのかもしれません。"
@@ -4641,12 +4646,236 @@ function renderFormat() {
     box.append(renderScrp(b));
     return;
   }
+  const tim2At = findTim2(b);
+  if (tim2At >= 0) {
+    box.append(renderTim2(b, tim2At));
+    return;
+  }
   const p = document.createElement("p");
   p.className = "hint";
   p.textContent = "既知の形式には当てはまりませんでした。ポインタ表と文字列のタブで"
     + "構造を推定してください。構造が分かったら、この場所に読み取り処理を足していく"
     + "のが解析ツールの育て方です。";
   box.append(p);
+}
+
+/* @extract-start tim2 */
+/**
+ * TIM2 (PS2 の標準画像形式)。
+ *
+ *   ファイル見出し 16 バイト: "TIM2" / 版 u8 / 形式 u8 (0 = 16 バイト揃え, 1 = 128 バイト揃え) / 絵の数 u16
+ *   絵の見出し (形式 0 なら +0x10、形式 1 なら +0x80 から):
+ *     u32 絵全体の長さ / u32 パレットの長さ / u32 画素の長さ / u16 見出しの長さ / u16 パレットの色数
+ *     u8 形式 / u8 ミップマップ数 / u8 パレットの種類 / u8 画素の種類 / u16 幅 / u16 高さ / GS レジスタ 24 バイト
+ *   画素 (見出しの直後) → パレット (画素の直後)
+ *   画素の種類: 1 = 16bit (RGBA5551) / 2 = 24bit / 3 = 32bit / 4 = 4bit 索引 / 5 = 8bit 索引
+ *   パレットの種類: 下位が 1 = 16bit / 2 = 24bit / 3 = 32bit。最上位ビットが立っていなければ
+ *     8bit 索引のパレットは **32 色ごとに中の 8 色 2 組が入れ替わって** 並ぶ (GS の CSM1)
+ *   透明度は PS2 流で 0x80 が不透明。表示用に 2 倍する。
+ *
+ * 僕の夏休み 2 の `.tm2` はこの形式そのもの。フォント `bk_font.tms` は先頭 0x80 バイトの
+ * 前置きの後に TIM2 が入っている (英語化パッチの公開ソースで確認)。
+ */
+function findTim2(b) {
+  for (const at of [0, 0x80, 0x10, 0x20, 0x40]) {
+    if (at + 16 <= b.length && b[at] === 0x54 && b[at + 1] === 0x49 && b[at + 2] === 0x4D && b[at + 3] === 0x32) return at;
+  }
+  return -1;
+}
+
+function parseTim2(b, at) {
+  if (at < 0 || at + 16 > b.length) return null;
+  if (!(b[at] === 0x54 && b[at + 1] === 0x49 && b[at + 2] === 0x4D && b[at + 3] === 0x32)) return null;
+  const version = b[at + 4], format = b[at + 5], count = u16le(b, at + 6);
+  if (count < 1 || count > 64) return null;
+  const pictures = [];
+  let p = at + (format ? 0x80 : 0x10);
+  for (let i = 0; i < count && p + 48 <= b.length; i++) {
+    const total = u32le(b, p), clutSize = u32le(b, p + 4), imageSize = u32le(b, p + 8);
+    const headerSize = u16le(b, p + 12), clutColors = u16le(b, p + 14);
+    const clutType = b[p + 18], imageType = b[p + 19];
+    const width = u16le(b, p + 20), height = u16le(b, p + 22);
+    if (!width || !height || width > 4096 || height > 4096 || headerSize < 48) return null;
+    const imageAt = p + headerSize, clutAt = imageAt + imageSize;
+    if (imageAt + imageSize > b.length) return null;
+    pictures.push({ at: p, total, clutSize, imageSize, headerSize, clutColors, clutType, imageType,
+                    width, height, imageAt, clutAt });
+    if (!total) break;
+    p += total;
+    if (format) p = (p + 127) & ~127;
+  }
+  return pictures.length ? { at, version, format, count, pictures } : null;
+}
+
+/** 8bit 索引のパレットの並び替え (CSM1)。32 色ごとに 8〜15 と 16〜23 が入れ替わっている */
+function csm1Index(i) {
+  const m = i & 0x18;
+  if (m === 0x08) return i + 8;
+  if (m === 0x10) return i - 8;
+  return i;
+}
+
+/** パレットを RGBA (0〜255) の配列にする。透明度は 0x80 → 255 に伸ばす */
+function tim2Clut(b, pic) {
+  const kind = pic.clutType & 0x3F, linear = (pic.clutType & 0x80) !== 0;
+  const n = pic.clutColors;
+  if (!n || !kind) return null;
+  const bytesPer = kind === 1 ? 2 : kind === 2 ? 3 : 4;
+  if (pic.clutAt + n * bytesPer > b.length) return null;
+  const raw = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const q = pic.clutAt + i * bytesPer;
+    if (kind === 1) {
+      const v = u16le(b, q);
+      raw[i] = [(v & 31) * 255 / 31, ((v >> 5) & 31) * 255 / 31, ((v >> 10) & 31) * 255 / 31, (v & 0x8000) ? 255 : 0];
+    } else if (kind === 2) {
+      raw[i] = [b[q], b[q + 1], b[q + 2], 255];
+    } else {
+      raw[i] = [b[q], b[q + 1], b[q + 2], Math.min(255, b[q + 3] * 2)];
+    }
+  }
+  if (linear || n < 32 || pic.imageType !== 5) return raw;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) out[i] = raw[csm1Index(i)];
+  return out;
+}
+
+/** 絵を RGBA のバイト列 (幅×高さ×4) にする */
+function decodeTim2(b, pic) {
+  const w = pic.width, h = pic.height;
+  const out = new Uint8ClampedArray(w * h * 4);
+  const t = pic.imageType;
+  const clut = (t === 4 || t === 5) ? tim2Clut(b, pic) : null;
+  if ((t === 4 || t === 5) && !clut) return null;
+  let q = pic.imageAt;
+  for (let i = 0; i < w * h; i++) {
+    let r = 0, g = 0, bl = 0, a = 255;
+    if (t === 3) { r = b[q]; g = b[q + 1]; bl = b[q + 2]; a = Math.min(255, b[q + 3] * 2); q += 4; }
+    else if (t === 2) { r = b[q]; g = b[q + 1]; bl = b[q + 2]; q += 3; }
+    else if (t === 1) {
+      const v = u16le(b, q); q += 2;
+      r = (v & 31) * 255 / 31; g = ((v >> 5) & 31) * 255 / 31; bl = ((v >> 10) & 31) * 255 / 31;
+      a = (v & 0x8000) ? 255 : 0;
+    } else if (t === 5) { const c = clut[b[q++]] || [0, 0, 0, 0]; [r, g, bl, a] = c; }
+    else if (t === 4) {
+      const byte = b[q + (i >> 1)];
+      const idx = (i & 1) ? (byte >> 4) : (byte & 15);
+      const c = clut[idx] || [0, 0, 0, 0]; [r, g, bl, a] = c;
+    } else return null;
+    out[i * 4] = r; out[i * 4 + 1] = g; out[i * 4 + 2] = bl; out[i * 4 + 3] = a;
+  }
+  return out;
+}
+/* @extract-end tim2 */
+
+const TIM2_TYPES = { 1: "16bit", 2: "24bit", 3: "32bit", 4: "4bit 索引", 5: "8bit 索引" };
+
+/** TIM2 を描いて、フォント画像なら番号の目盛りを重ねる */
+function renderTim2(b, at) {
+  const wrap = document.createElement("div");
+  wrap.style.display = "grid";
+  wrap.style.gap = "12px";
+  const t = parseTim2(b, at);
+  if (!t) {
+    const p = document.createElement("p");
+    p.className = "warnbar";
+    p.textContent = "TIM2 の目印はありますが、見出しが読めませんでした。";
+    wrap.append(p);
+    return wrap;
+  }
+  const pic = t.pictures[0];
+  const dl = document.createElement("dl");
+  dl.className = "kv";
+  for (const [k, v] of [["形式", `TIM2 (版 ${t.version}, ${t.format ? "128" : "16"} バイト揃え${at ? `, 位置 ${hx(at)}` : ""})`],
+                        ["絵の数", String(t.count)],
+                        ["大きさ", `${pic.width} × ${pic.height}`],
+                        ["画素", `${TIM2_TYPES[pic.imageType] || "不明 " + pic.imageType}`
+                                + (pic.clutColors ? ` / パレット ${pic.clutColors} 色` : "")],
+                        ["画素の位置", `${hx(pic.imageAt)} 〜 (${fmtSize(pic.imageSize)})`]]) {
+    const dt = document.createElement("dt"); dt.textContent = k;
+    const dd = document.createElement("dd"); dd.textContent = v;
+    dl.append(dt, dd);
+  }
+  wrap.append(dl);
+
+  const rgba = decodeTim2(b, pic);
+  if (!rgba) {
+    const p = document.createElement("p");
+    p.className = "warnbar";
+    p.textContent = "この画素の種類はまだ描けません。";
+    wrap.append(p);
+    return wrap;
+  }
+
+  const controls = document.createElement("div");
+  controls.className = "controls";
+  const mk = (label, id, value, width) => {
+    const f = document.createElement("div"); f.className = "field";
+    const l = document.createElement("label"); l.textContent = label; l.htmlFor = id;
+    const inp = document.createElement("input"); inp.type = "number"; inp.id = id; inp.value = value; inp.min = "1"; inp.style.width = width || "5em";
+    f.append(l, inp); controls.append(f);
+    return inp;
+  };
+  const zoomIn = mk("拡大率", "tim2zoom", 2);
+  const gridOn = document.createElement("button");
+  gridOn.className = "chipbtn"; gridOn.textContent = "文字の番号を重ねる"; gridOn.setAttribute("aria-pressed", "false");
+  const cwIn = mk("1 文字の幅", "tim2cw", 23), chIn = mk("1 文字の高さ", "tim2ch", 23);
+  const oxIn = mk("左の余白", "tim2ox", 0), oyIn = mk("上の余白", "tim2oy", 0);
+  controls.append(gridOn);
+  wrap.append(controls);
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent = "フォント画像なら「文字の番号を重ねる」を押してください。番号が .msg の文字番号に対応します"
+    + " (僕の夏休み 2 のフォントは 1 行 17 字、1 字 23 ドット前後)。番号順に文字を書き出したものが、.msg 読みに貼る文字表です。";
+  wrap.append(hint);
+
+  const holder = document.createElement("div");
+  holder.className = "tilewrap";
+  const cv = document.createElement("canvas");
+  cv.style.imageRendering = "pixelated";
+  holder.append(cv);
+  wrap.append(holder);
+
+  const draw = () => {
+    const z = Math.max(1, Math.min(8, Number(zoomIn.value) || 1));
+    const base = document.createElement("canvas");
+    base.width = pic.width; base.height = pic.height;
+    base.getContext("2d").putImageData(new ImageData(rgba, pic.width, pic.height), 0, 0);
+    cv.width = pic.width * z; cv.height = pic.height * z;
+    const g = cv.getContext("2d");
+    g.imageSmoothingEnabled = false;
+    /* 透明が分かるように市松を敷く */
+    g.fillStyle = "#777"; g.fillRect(0, 0, cv.width, cv.height);
+    g.fillStyle = "#999";
+    for (let y = 0; y < cv.height; y += 8) for (let x = ((y / 8) & 1) * 8; x < cv.width; x += 16) g.fillRect(x, y, 8, 8);
+    g.drawImage(base, 0, 0, cv.width, cv.height);
+    if (gridOn.getAttribute("aria-pressed") === "true") {
+      const cw = Math.max(1, Number(cwIn.value) || 1), ch = Math.max(1, Number(chIn.value) || 1);
+      const ox = Number(oxIn.value) || 0, oy = Number(oyIn.value) || 0;
+      const cols = Math.max(1, Math.floor((pic.width - ox) / cw));
+      g.strokeStyle = "rgba(255,80,40,.7)"; g.lineWidth = 1;
+      g.font = `${Math.max(8, 5 * z)}px ui-monospace, monospace`;
+      g.textBaseline = "top";
+      let n = 0;
+      for (let y = oy; y + ch <= pic.height; y += ch) {
+        for (let x = ox; x + cw <= pic.width; x += cw) {
+          g.strokeRect(x * z + .5, y * z + .5, cw * z, ch * z);
+          const label = String(n++);
+          const tw = g.measureText(label).width + 3;
+          g.fillStyle = "rgba(0,0,0,.65)"; g.fillRect(x * z + 1, y * z + 1, tw, Math.max(9, 5 * z) + 2);
+          g.fillStyle = "#ffd28a"; g.fillText(label, x * z + 2, y * z + 2);
+        }
+      }
+      hint.textContent = `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の 0 から順に文字を書き出して、.msg 読みの文字表に貼ってください。`;
+    }
+  };
+  for (const el of [zoomIn, cwIn, chIn, oxIn, oyIn]) el.addEventListener("input", draw);
+  gridOn.addEventListener("click", () => {
+    gridOn.setAttribute("aria-pressed", gridOn.getAttribute("aria-pressed") === "true" ? "false" : "true");
+    draw();
+  });
+  draw();
+  return wrap;
 }
 
 /** 練習用フォーマット SCRP を、構造が分かっている場合の見え方の例として読む */

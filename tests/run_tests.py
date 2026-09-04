@@ -719,6 +719,34 @@ class TestLzssInBrowser(unittest.TestCase):
         self.assertIn("OK", res.stdout)
 
 
+class TestTim2(unittest.TestCase):
+    """TIM2 の組み立て (tools/make_tim2.py) と、ブラウザ側の読み取りの突き合わせ."""
+
+    def test_builder_layout(self):
+        import make_tim2
+        data, px = make_tim2.font_sheet(rows=2, cols=17, cell=23)
+        self.assertEqual(data[:4], b"TIM2")
+        total, clut_size, image_size, header_size, n_colors = __import__("struct").unpack_from("<IIIHH", data, 0x10)
+        self.assertEqual(image_size, 17 * 23 * 2 * 23)
+        self.assertEqual(n_colors, 256)
+        self.assertEqual(clut_size, 256 * 4)
+        self.assertEqual(len(data), 0x10 + total)
+        # 画素は見出しの直後にそのまま並ぶ (8bit 索引)
+        self.assertEqual(list(data[0x10 + header_size: 0x10 + header_size + 40]), px[:40])
+
+    def test_browser_decodes_every_format(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        res = subprocess.run([node, os.path.join(REPO, "tests", "test_tim2.mjs")],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK", res.stdout)
+
+
 class TestBokuMsgInBrowser(unittest.TestCase):
     """僕の夏休み 2 の .msg 読み (件数 + 位置表 + 2 バイトの並び)."""
 
