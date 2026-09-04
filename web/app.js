@@ -4485,9 +4485,30 @@ function bokuMsgText(codes, glyphs, tags) {
     }
     if (c === 0xCDCD) continue;
     if (c >= 0x8000) { s += tags ? `<${c.toString(16).toUpperCase()}>` : `{${c.toString(16).toUpperCase()}}`; continue; }
-    s += (glyphs && c < glyphs.length) ? glyphs[c] : `[${c}]`;
+    s += (glyphs && glyphs[c] !== undefined) ? glyphs[c] : `[${c}]`;
   }
   return s;
+}
+
+/**
+ * 文字表の欄の文字列を配列にする。2 つの書き方を受け付ける。
+ *   並び:   「あいうえお…」 (改行は無視。先頭が 0 番)
+ *   対応表: 「12=あ」「13 い」「14: う」を 1 行ずつ (使われている番号だけ書ける)
+ * 対応表の行が 1 つでもあれば対応表として読み、無い番号は空 (undefined) のまま
+ */
+function parseGlyphTable(text) {
+  const lines = text.replace(/\r/g, "").split("\n");
+  const pair = /^\s*(\d+)\s*(?:[=:：＝]|\t| )\s*(\S)\s*$/;
+  const map = [];
+  let pairs = 0;
+  for (const line of lines) {
+    const m = pair.exec(line);
+    if (!m) continue;
+    map[Number(m[1])] = Array.from(m[2])[0];
+    pairs++;
+  }
+  if (pairs) return map;
+  return Array.from(text.replace(/\r?\n/g, ""));
 }
 
 /**
@@ -4553,8 +4574,9 @@ $("msgparse").addEventListener("click", () => {
     note.textContent = "この形では読めませんでした (先頭が「件数 + 位置表」にも「表の数 + 表の一覧」にもなっていない)";
     return;
   }
-  const glyphText = $("msgglyphs").value.replace(/\r?\n/g, "");
-  const glyphs = glyphText ? Array.from(glyphText) : null;
+  const glyphText = $("msgglyphs").value;
+  const glyphs = glyphText.trim() ? parseGlyphTable(glyphText) : null;
+  const glyphCount = glyphs ? glyphs.filter((g) => g !== undefined).length : 0;
   const filled = r.items.filter((it) => it.codes.length);
   let maxCode = 0;
   for (const it of filled) {
@@ -4568,16 +4590,22 @@ $("msgparse").addEventListener("click", () => {
   state.usedGlyphs = new Set(used);                            /* TIM2 の目盛りで強調する */
   note.textContent = tablesInfo + `${r.count} 件 (位置表は ${r.stride} バイト刻み) · 本文あり ${filled.length} 件`
     + ` · 文字番号の最大 ${maxCode} · 使われている番号 ${used.length} 種`
-    + (glyphs ? ` · 文字表 ${glyphs.length} 字` : " · 文字表なし (番号のまま表示)");
+    + (glyphs ? ` · 文字表 ${glyphCount} 字` : " · 文字表なし (番号のまま表示)");
 
-  /* 書き出す手間を減らす: 使われている番号だけ並べる */
+  /* 書き出す手間を減らす: 使われている番号だけ、「番号=」の雛形で並べる。
+     文字を埋めて上の欄に貼れば、その番号だけの文字表として読める */
   const usedBox = document.createElement("details");
   const sum = document.createElement("summary");
   sum.textContent = `使われている文字番号 ${used.length} 種 (フォント画像からはこれだけ書き出せば足りる)`;
+  const usedHint = document.createElement("p");
+  usedHint.className = "hint";
+  usedHint.textContent = "下の雛形をコピーし、= の後ろにフォント画像のその番号の文字を書いて、上の欄に貼ってください。"
+    + "番号の無い行は飛ばして構いません。まだ書いていない番号は [番号] のまま出ます。";
   const usedTa = document.createElement("textarea");
-  usedTa.readOnly = true; usedTa.spellcheck = false; usedTa.rows = 3;
-  usedTa.value = used.join(" ");
-  usedBox.append(sum, usedTa);
+  usedTa.id = "msgused";
+  usedTa.readOnly = true; usedTa.spellcheck = false; usedTa.rows = 4;
+  usedTa.value = used.map((c) => `${c}=${glyphs && glyphs[c] !== undefined ? glyphs[c] : ""}`).join("\n");
+  usedBox.append(sum, usedHint, usedTa);
   box.append(usedBox);
 
   const wrap = document.createElement("div");

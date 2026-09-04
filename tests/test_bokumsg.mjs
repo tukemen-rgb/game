@@ -11,7 +11,7 @@ if (s < 0 || e < 0) { console.error("app.js に bokumsg マーカーが無い");
 const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
-  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed };")(u32le, u16le);
+  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -163,6 +163,14 @@ if (withVoice.trimEnd().split("\n").length !== 2) fail("音声の行を TSV に�
 /* 7. 使われている文字番号 (制御コード・待ち時間の値・音声は除く) */
 const used = m.bokuMsgUsed(r8.items.concat([{ i: 9, at: 0, codes: voiceCodes }]));
 if (used.join(",") !== "0,1,5,6,7,9") fail(`使われている番号が ${used.join(",")}`);
+/* 8. 文字表の 2 つの書き方: 並び / 番号=文字 の対応表 (使われている番号だけ書ける) */
+const seq = m.parseGlyphTable("あいう\nえお");
+if (seq.join("") !== "あいうえお") fail("並びの文字表が読めない");
+const sparse = m.parseGlyphTable("5=か\n6 き\n7: く\n9＝こ\n\n=x\n");
+if (sparse[5] !== "か" || sparse[6] !== "き" || sparse[7] !== "く" || sparse[9] !== "こ") fail("対応表の文字表が読めない");
+if (sparse[8] !== undefined || sparse[0] !== undefined) fail("無い番号が空になっていない");
+if (m.bokuMsgText(entries[0], sparse) !== "かき\nく{END}") fail("対応表で復号できない");
+if (m.bokuMsgText([0, 5, 0x8000], sparse) !== "[0]か{END}") fail("無い番号が [番号] にならない");
 fs.mkdirSync(path.join(repo, "work"), { recursive: true });
 fs.writeFileSync(path.join(repo, "work", "MSG_EXPORT.tsv"), tsv);
 

@@ -232,7 +232,7 @@ def decode(codes: list[int], glyphs: list[str] | None, tags: bool = True) -> str
             pass
         elif c >= 0x8000:
             out.append(f"<{c:04X}>" if tags else "{%04X}" % c)
-        elif glyphs and c < len(glyphs):
+        elif glyphs and c < len(glyphs) and glyphs[c] is not None:
             out.append(glyphs[c])
         else:
             out.append(f"[{c}]")
@@ -240,12 +240,32 @@ def decode(codes: list[int], glyphs: list[str] | None, tags: bool = True) -> str
     return "".join(out)
 
 
-def load_font(path: str | None) -> list[str] | None:
-    """フォント画像を左上から書き出したテキスト。改行は無視する (ブラウザと同じ)."""
+def parse_glyph_table(text: str) -> list:
+    """文字表の 2 つの書き方 (ブラウザ側 parseGlyphTable と同じ).
+
+    並び:   「あいうえお…」 (改行は無視。先頭が 0 番)
+    対応表: 「12=あ」「13 い」「14: う」を 1 行ずつ。無い番号は None."""
+    import re
+    pair = re.compile(r"^\s*(\d+)\s*(?:[=:：＝]|\t| )\s*(\S)\s*$")
+    table: dict[int, str] = {}
+    for line in text.replace("\r", "").split("\n"):
+        m = pair.match(line)
+        if m:
+            table[int(m.group(1))] = m.group(2)
+    if table:
+        out: list = [None] * (max(table) + 1)
+        for k, v in table.items():
+            out[k] = v
+        return out
+    return list(text.replace("\r", "").replace("\n", ""))
+
+
+def load_font(path: str | None) -> list | None:
+    """フォント画像を左上から書き出したテキスト、または「番号=文字」の対応表."""
     if not path:
         return None
     with open(path, encoding="utf-8") as fh:
-        return list(fh.read().replace("\r", "").replace("\n", ""))
+        return parse_glyph_table(fh.read())
 
 
 def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> list[tuple[str, int, int, str]]:
@@ -356,7 +376,7 @@ def main(argv=None) -> int:
         print(f"# {len(used)} 種 (最大 {used[-1] if used else 0})。フォント画像のこの番号だけ書き出せば本文は読める", file=sys.stderr)
     elif args.cmd == "fontlist":
         glyphs = load_font(args.font) or []
-        lines = ["# フォント画像の並び (tools/boku2.py fontlist)"] + [g for g in glyphs if g.strip()]
+        lines = ["# フォント画像の並び (tools/boku2.py fontlist)"] + [g for g in glyphs if g and g.strip()]
         text = "\n".join(lines) + "\n"
         if args.out:
             with open(args.out, "w", encoding="utf-8") as fo:

@@ -846,6 +846,14 @@ class TestBoku2Cli(unittest.TestCase):
             rows3 = boku2.text_rows(os.path.join(out, "system", "system.msg"), glyphs)
             self.assertEqual([r[3] for r in rows3], ["かき<BR>く", "<WAIT:12>こ"])
 
+            # 文字表は「番号=文字」の対応表でもよい (使われている番号だけ書ける)
+            sparse = boku2.parse_glyph_table("5=か\n6 き\n7: く\n9＝こ\n")
+            self.assertEqual(sparse[5:8], ["か", "き", "く"])
+            self.assertIsNone(sparse[8])
+            self.assertEqual(boku2.decode([5, 6, 0x8001, 7, 0x8000], sparse), "かき<BR>く")
+            self.assertEqual(boku2.decode([0, 5, 0x8000], sparse), "[0]か")
+            self.assertEqual(boku2.parse_glyph_table("あい\nう"), ["あ", "い", "う"])
+
             # 使われている文字番号だけを並べる (音声・制御コード・待ち時間の値は除く)
             self.assertEqual(boku2.used_codes([map_path, os.path.join(out, "system", "system.msg")]),
                              [0, 1, 2, 3, 5, 6, 7, 9])
