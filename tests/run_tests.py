@@ -1010,6 +1010,28 @@ class TestDocs(unittest.TestCase):
         undocumented = [t for t in tabs if t.replace(" ", "") not in doc.replace(" ", "")]
         self.assertEqual(undocumented, [])
 
+    def test_terms_are_unified(self):
+        """利用者向けの文書と画面では、同じものを同じ言葉で呼ぶ."""
+        forbidden = {
+            "インデックス": "索引", "アーカイブ": "入れ物", "コンテナ": "入れ物",
+            "グリフ表": "文字表", "文字リスト": "文字表", "ダイアログ": "会話",
+            "エクストラクト": "取り出す", "アンパック": "切り分け",
+        }
+        targets = [os.path.join(REPO, "docs", "07-構造探査台.md"),
+                   os.path.join(REPO, "docs", "10-僕夏2の手順.md"),
+                   os.path.join(REPO, "web", "index.html")]
+        hits = []
+        for path in targets:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            for bad, good in forbidden.items():
+                if bad in text:
+                    hits.append(f"{os.path.relpath(path, REPO)}: 「{bad}」→「{good}」")
+        self.assertEqual(hits, [])
+        # 文字表という言葉は、docs/01 の文字テーブルとの関係を docs/10 で一度は説明している
+        with open(targets[1], encoding="utf-8") as fh:
+            self.assertIn("文字テーブル", fh.read())
+
     def test_recipe_commands_use_existing_tools(self):
         import re
         with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
