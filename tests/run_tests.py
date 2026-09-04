@@ -762,6 +762,16 @@ class TestBokuMsgInBrowser(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("OK", res.stdout)
 
+        # ブラウザが書き出した TSV を、そのまま校正ツールが読めること (工程がつながる)
+        tsv = os.path.join(REPO, "work", "MSG_EXPORT.tsv")
+        rows = scrp.read_tsv(tsv)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["original"], "かき<BR>く")
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "proofread.py"), tsv,
+                              "--no-font-check"], capture_output=True, text=True, cwd=REPO)
+        self.assertIn(res.returncode, (0, 1), res.stdout + res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+
 
 class TestSniffInBrowser(unittest.TestCase):
     """名前の無いファイルに中身から見当を付ける sniffKind."""

@@ -4453,19 +4453,56 @@ function parseBokuMap(b) {
   return null;
 }
 
-/** 2 バイトの並びを文字にする。glyphs はフォントの並び (配列)。無ければ番号のまま */
-function bokuMsgText(codes, glyphs) {
+/** 音声の項目: 8 桁の数字 (ASCII) がそのまま入っている (公開ソースの isVoice と同じ判定) */
+function bokuMsgVoice(codes) {
+  if (codes.length !== 4) return null;
+  let s = "";
+  for (const c of codes) {
+    const lo = c & 255, hi = c >> 8;
+    if (lo < 0x30 || lo > 0x39 || hi < 0x30 || hi > 0x39) return null;
+    s += String.fromCharCode(lo, hi);
+  }
+  return s;
+}
+
+/**
+ * 2 バイトの並びを文字にする。glyphs はフォントの並び (配列)。無ければ番号のまま。
+ * tags を立てると校正ツール (tools/proofread.py) の書き方 (<BR> / <WAIT:xx>) にする
+ */
+function bokuMsgText(codes, glyphs, tags) {
+  const voice = bokuMsgVoice(codes);
+  if (voice) return tags ? `<VOICE:${voice}>` : `{VOICE ${voice}}`;
   let s = "";
   for (let i = 0; i < codes.length; i++) {
     const c = codes[i];
-    if (c === 0x8000) { s += "{END}"; break; }
-    if (c === 0x8001) { s += "\n"; continue; }
-    if (c === 0x8002) { s += `{WAIT ${codes[i + 1] ?? 0}}`; i++; continue; }
+    if (c === 0x8000) { if (!tags) s += "{END}"; break; }
+    if (c === 0x8001) { s += tags ? "<BR>" : "\n"; continue; }
+    if (c === 0x8002) {
+      const n = codes[i + 1] ?? 0;
+      s += tags ? `<WAIT:${n.toString(16).toUpperCase().padStart(2, "0")}>` : `{WAIT ${n}}`;
+      i++;
+      continue;
+    }
     if (c === 0xCDCD) continue;
-    if (c >= 0x8000) { s += `{${c.toString(16).toUpperCase()}}`; continue; }
+    if (c >= 0x8000) { s += tags ? `<${c.toString(16).toUpperCase()}>` : `{${c.toString(16).toUpperCase()}}`; continue; }
     s += (glyphs && c < glyphs.length) ? glyphs[c] : `[${c}]`;
   }
   return s;
+}
+
+/**
+ * 読めた行を校正ツール向けの TSV にする (docs/04 の exercises/qa_target.tsv と同じ列)。
+ * translation の列は original の写し。ここを直したものが校正の対象になる
+ */
+function bokuMsgTsv(items, glyphs) {
+  const esc = (t) => t.replace(/\t/g, " ").replace(/\r?\n/g, "<BR>");
+  const lines = ["id\toffset\tsize\toriginal\ttranslation"];
+  for (const it of items) {
+    if (!it.codes.length) continue;
+    const text = esc(bokuMsgText(it.codes, glyphs, true));
+    lines.push(`${it.i}\t0x${it.at.toString(16).toUpperCase()}\t${it.codes.length * 2}\t${text}\t${text}`);
+  }
+  return lines.join("\n") + "\n";
 }
 /* @extract-end bokumsg */
 
@@ -4536,11 +4573,48 @@ $("msgparse").addEventListener("click", () => {
   if (!glyphs) {
     const p = document.createElement("p");
     p.className = "hint";
-    p.textContent = "番号を文字にするには、フォント画像 (bk_font.tms) を「見つけた絵」で見て、"
-      + "左上から右へ順に文字を書き出し、上の欄に貼ってください。"
+    p.textContent = "番号を文字にするには、フォント画像 (bk_font.tms) を「既知の形式」タブで開いて"
+      + "「文字の番号を重ねる」を押し、番号順に文字を書き出して上の欄に貼ってください。"
       + `番号は 0 から ${maxCode} まで使われています。`;
     box.append(p);
   }
+
+  /* 次の工程 (校正) へ渡す。docs/04 の TSV と同じ列にする */
+  const exp = document.createElement("div");
+  exp.className = "controls";
+  const btn = document.createElement("button");
+  btn.className = "btn";
+  btn.id = "msgtsv";
+  btn.textContent = "校正用の TSV をコピー";
+  const stat = document.createElement("span");
+  stat.className = "pos";
+  exp.append(btn, stat);
+  const ta = document.createElement("textarea");
+  ta.id = "msgtsvtext";
+  ta.spellcheck = false;
+  ta.readOnly = true;
+  ta.style.minHeight = "120px";
+  ta.value = bokuMsgTsv(filled, glyphs);
+  ta.hidden = true;
+  btn.addEventListener("click", async () => {
+    ta.hidden = false;
+    let ok = false;
+    try { await navigator.clipboard.writeText(ta.value); ok = true; }
+    catch (err) { try { ta.readOnly = false; ta.select(); ok = document.execCommand("copy"); ta.readOnly = true; } catch (e2) { ok = false; } }
+    stat.textContent = ok
+      ? `${filled.length} 行をコピーしました。ファイルに貼って python3 tools/proofread.py で校正できます`
+      : "コピーできませんでした。下の枠の中を選んで手でコピーしてください";
+  });
+  box.append(exp, ta);
+});
+
+/* 文字表は書き出すのに手間がかかるので、この端末の中に覚えておく */
+try {
+  const saved = localStorage.getItem("boku2.glyphs");
+  if (saved) $("msgglyphs").value = saved;
+} catch (err) { /* 保存が使えない環境では黙って諦める */ }
+$("msgglyphs").addEventListener("input", () => {
+  try { localStorage.setItem("boku2.glyphs", $("msgglyphs").value); } catch (err) { /* 同上 */ }
 });
 
 $("mapsplit").addEventListener("click", async () => {

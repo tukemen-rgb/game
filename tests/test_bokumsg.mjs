@@ -11,7 +11,7 @@ if (s < 0 || e < 0) { console.error("app.js に bokumsg マーカーが無い");
 const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
-  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap };")(u32le, u16le);
+  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -143,4 +143,21 @@ if (!mp12 || mp12.rec !== 12) fail("12 バイト刻みの入れ物を読めな�
 if (m.parseBokuMap(msg8)) fail(".msg を入れ物と誤認した");
 if (m.parseBokuMap(sjis)) fail("テキストを入れ物と誤認した");
 
-console.log("OK  .msg 8 バイト刻み / 4 バイト刻み / 制御コード / 表が複数の会話ファイル / マップの入れ物 / 誤認しない");
+/* 6. 音声の項目 (8 桁の数字がそのまま) と、校正ツール向けの TSV */
+const voiceCodes = [0x3130, 0x3332, 0x3534, 0x3736];       /* "01234567" をリトルエンディアンで */
+if (m.bokuMsgVoice(voiceCodes) !== "01234567") fail("音声の番号が読めない");
+if (m.bokuMsgVoice([0x3130, 0x3332]) !== null) fail("4 桁を音声と誤認した");
+if (m.bokuMsgVoice([5, 6, 7, 8]) !== null) fail("文字を音声と誤認した");
+if (m.bokuMsgText(voiceCodes, glyphs) !== "{VOICE 01234567}") fail("音声の表示が違う");
+if (m.bokuMsgText(entries[0], glyphs, true) !== "かき<BR>く") fail(`校正用の書き方が違う: ${m.bokuMsgText(entries[0], glyphs, true)}`);
+if (m.bokuMsgText(entries[2], glyphs, true) !== "<WAIT:12>こ") fail(`待ち時間の書き方が違う: ${m.bokuMsgText(entries[2], glyphs, true)}`);
+const tsv = m.bokuMsgTsv(r8.items, glyphs);
+const lines = tsv.trimEnd().split("\n");
+if (lines[0] !== "id\toffset\tsize\toriginal\ttranslation") fail("TSV の見出しが違う");
+if (lines.length !== 4) fail(`TSV の行数が ${lines.length} (空の項目は除く)`);
+if (lines[1] !== "0\t0x24\t10\tかき<BR>く\tかき<BR>く") fail(`TSV の 1 行目が違う: ${lines[1]}`);
+if (lines.some((l) => l.split("\t").length !== 5)) fail("TSV の列数が揃っていない");
+fs.mkdirSync(path.join(repo, "work"), { recursive: true });
+fs.writeFileSync(path.join(repo, "work", "MSG_EXPORT.tsv"), tsv);
+
+console.log("OK  .msg 8 バイト刻み / 4 バイト刻み / 制御コード / 表が複数の会話ファイル / マップの入れ物 / 音声 / 校正用 TSV / 誤認しない");
