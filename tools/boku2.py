@@ -551,6 +551,10 @@ def check(folder: str, out=sys.stdout) -> int:
     msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
     fonts = [e for e in entries if "font" in os.path.basename(e["path"]).lower()]
     say(f".msg: {len(msgs)} 件 (例: {', '.join(os.path.basename(e['path']) for e in msgs[:4])})")
+    found = sorted({os.path.basename(e["path"]).lower() for e in entries} & TEXT_CONTAINERS)
+    missing = sorted(TEXT_CONTAINERS - set(found))
+    say(f"[入れ物] 文言の入れ物: あり {', '.join(found) or 'なし'}"
+        + (f" / 見つからない {', '.join(missing)}" if missing else ""))
 
     with open(img_path, "rb") as img:
         ok_msg = 0

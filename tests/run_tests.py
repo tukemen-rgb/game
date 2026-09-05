@@ -1028,6 +1028,8 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertIn("DFI: 期待どおり", res.stdout)
             self.assertIn("問題なし", res.stdout)
             self.assertIn("[フォント] system/bk_font.tms: TIM2 (位置 0x80)", res.stdout)
+            self.assertIn("[入れ物] 文言の入れ物: あり diary.bin", res.stdout)
+            self.assertIn("見つからない fish_on_mem.bin, on_mem_event.bin, saveload.bin", res.stdout)
             self.assertIn("1 番が会話だった 2 件", res.stdout)
             self.assertNotIn("はじめから", res.stdout)          # 本文は出さない
             broken = os.path.join(tmp, "BROKEN")
