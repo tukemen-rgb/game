@@ -1188,25 +1188,31 @@ class TestDocs(unittest.TestCase):
         import shlex
         import subprocess
         import make_boku2_sample
-        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
-            text = fh.read()
+        text = ""
+        for name in (os.path.join("docs", "10-僕夏2の手順.md"), os.path.join("exercises", "README.md")):
+            with open(os.path.join(REPO, name), encoding="utf-8") as fh:
+                text += fh.read() + "\n"
         with tempfile.TemporaryDirectory() as tmp:
             sample = os.path.join(tmp, "BOKU2SAMPLE")
             make_boku2_sample.build_sample(sample)
             subst = {
                 "実物/": sample + "/",
                 "work/BOKU2SAMPLE": sample,
+                "work/OUT": f"{tmp}/OUT", "work/all.tsv": f"{tmp}/all.tsv",
                 " OUT/": f" {tmp}/OUT/", " OUT ": f" {tmp}/OUT ",
                 "-f font.txt": f"-f {sample}/font.txt",
                 "fontlist font.txt": f"fontlist {sample}/font.txt",
                 "table font.txt": f"table {sample}/font.txt",
-                "all.tsv": f"{tmp}/all.tsv",
+                " all.tsv": f" {tmp}/all.tsv",
                 "font_chars.txt": f"{tmp}/font_chars.txt",
                 "boku2.tbl": f"{tmp}/boku2.tbl",
                 "system.msg --table": f"{tmp}/OUT/system/system.msg --table",
             }
             ran = 0
-            for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+            # 僕夏2 の部分だけ (課題 8 と docs/10)。練習用フォーマットの課題 1〜7 は README 側で見張る
+            blocks = [b for b in re.findall(r"```bash\n(.*?)```", text, re.S)
+                      if "boku2" in b or "BOKU2SAMPLE" in b]
+            for block in blocks:
                 cur = ""
                 for line in block.split("\n"):
                     line = line.split("#", 1)[0].rstrip()
