@@ -557,20 +557,20 @@ def check(folder: str, out=sys.stdout) -> int:
         + (f" / 見つからない {', '.join(missing)}" if missing else ""))
 
     with open(img_path, "rb") as img:
-        ok_msg = 0
+        ok_msg, first_bad = 0, None
         for e in msgs[:50]:
             img.seek(e["at"])
             b = img.read(e["len"])
-            if parse_msg(b, 8) or parse_msg(b, 4) or parse_tables(b):
+            if parse_msg(b, 8) or parse_msg(b, 4) or parse_tables(b) or parse_raw(b) or parse_sjis_list(b):
                 ok_msg += 1
+            elif first_bad is None:
+                first_bad = (e, b[:16])
         if msgs:
             say(f"  先頭 {min(50, len(msgs))} 件のうち読めた形: {ok_msg} 件")
-            if ok_msg < min(50, len(msgs)):
+            if first_bad:
                 problems += 1
-                bad = next(e for e in msgs[:50] if not (
-                    (img.seek(e["at"]) or True) and (lambda b: parse_msg(b, 8) or parse_msg(b, 4) or parse_tables(b))(img.read(e["len"]))))
-                img.seek(bad["at"])
-                say(f"→ 読めない .msg の例: {bad['path']} 先頭 16 バイト {img.read(16).hex(' ').upper()}")
+                e, head = first_bad
+                say(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト {head.hex(' ').upper()}")
         for e in fonts[:3]:
             img.seek(e["at"])
             info = tim2_info(img.read(min(e["len"], 0x100)))

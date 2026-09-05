@@ -1036,10 +1036,18 @@ class TestBoku2Sample(unittest.TestCase):
             shutil.copytree(sample, broken)
             with open(os.path.join(broken, "MAP", "M_A01000.BIN"), "r+b") as fh:
                 fh.write(b"\xff" * 16)
+            # 本体側の .msg を壊す: 読めない例として名前と先頭 16 バイトが出る
+            b_idx = open(os.path.join(broken, "BOKU2.IDX"), "rb").read()
+            b_size = os.path.getsize(os.path.join(broken, "BOKU2.IMG"))
+            sysmsg = next(e for e in boku2.read_dfi(b_idx, b_size) if e["path"] == "system/system.msg")
+            with open(os.path.join(broken, "BOKU2.IMG"), "r+b") as fh:
+                fh.seek(sysmsg["at"])
+                fh.write(b"\xee" * 16)
             res = run("check", broken)
             self.assertEqual(res.returncode, 1)
             self.assertIn("M_A01000.BIN: FF FF", res.stdout)
-            self.assertIn("確認事項", res.stdout)
+            self.assertIn("→ 読めない .msg の例: system/system.msg 先頭 16 バイト EE EE", res.stdout)
+            self.assertIn("確認事項 2 件", res.stdout)
             res = run("check", tmp)                            # 索引が無いフォルダ
             self.assertEqual(res.returncode, 1)
             self.assertIn("揃っていません", res.stdout)
