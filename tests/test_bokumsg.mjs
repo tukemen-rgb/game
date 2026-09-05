@@ -11,7 +11,7 @@ if (s < 0 || e < 0) { console.error("app.js に bokumsg マーカーが無い");
 const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
-  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable };")(u32le, u16le);
+  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable, glyphsToHexTable };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -171,6 +171,13 @@ if (sparse[5] !== "か" || sparse[6] !== "き" || sparse[7] !== "く" || sparse[
 if (sparse[8] !== undefined || sparse[0] !== undefined) fail("無い番号が空になっていない");
 if (m.bokuMsgText(entries[0], sparse) !== "かき\nく{END}") fail("対応表で復号できない");
 if (m.bokuMsgText([0, 5, 0x8000], sparse) !== "[0]か{END}") fail("無い番号が [番号] にならない");
+/* 9. docs/01 の「16進=文字」テーブルにする (2 バイトのリトルエンディアン) */
+const tbl = m.glyphsToHexTable(sparse).trimEnd().split("\n");
+if (!tbl.includes("0500=か") || !tbl.includes("0900=こ")) fail(`テーブルの行が違う: ${tbl.slice(0, 3)}`);
+if (tbl.some((l) => l.startsWith("0800="))) fail("無い番号をテーブルに入れた");
+if (!tbl.includes("0080={END}") || !tbl.includes("0180=<BR>")) fail("制御コードがテーブルに無い");
+const big = []; big[300] = "亜";
+if (!m.glyphsToHexTable(big).includes("2C01=亜")) fail("256 以上の番号の並びが違う (下位, 上位)");
 fs.mkdirSync(path.join(repo, "work"), { recursive: true });
 fs.writeFileSync(path.join(repo, "work", "MSG_EXPORT.tsv"), tsv);
 

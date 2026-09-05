@@ -40,6 +40,15 @@ async def main():
         await page.wait_for_timeout(100)
         tsv = await page.input_value("#msgtsvtext")
         print("tsv:", repr(tsv))
+        # 文字表 → 16 進表示用のテーブル → 16 進タブで日本語が見える
+        await page.click("#msgtbl")
+        await page.wait_for_timeout(200)
+        reltable = await page.input_value("#reltable")
+        hexenc = await page.input_value("#hexenc")
+        hexview = await page.text_content("#hexview")
+        print("reltable head:", reltable.split("\n")[:3], "hexenc:", hexenc, "hex has か:", "か" in hexview)
+        if "0500=か" not in reltable or hexenc != "table" or "か" not in hexview:
+            errors.append("hex table link failed")
         # 文字表は端末に覚えておく → 読み直しても残る
         await page.reload()
         await page.wait_for_selector("#msgglyphs", state="attached")

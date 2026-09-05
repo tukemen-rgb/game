@@ -854,14 +854,28 @@ class TestBoku2Cli(unittest.TestCase):
             self.assertEqual(boku2.decode([0, 5, 0x8000], sparse), "[0]か")
             self.assertEqual(boku2.parse_glyph_table("あい\nう"), ["あ", "い", "う"])
 
+            # 文字表 → docs/01 の .tbl。練習用の hexdump.py がそのまま .msg を日本語で表示できる
+            font_path = os.path.join(tmp, "font.txt")
+            with open(font_path, "w", encoding="utf-8") as fh:
+                fh.write("あいうえお\nかきくけこ\n")
+            tbl = os.path.join(tmp, "boku2.tbl")
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), "table",
+                                  font_path, "-o", tbl], capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            codec = scrp.load_table(tbl)
+            self.assertEqual(codec.decode_char(b"\x05\x00\x06\x00", 0), ("か", 2))
+            self.assertEqual(codec.decode_char(b"\x00\x80", 0), ("{END}", 2))
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "hexdump.py"),
+                                  os.path.join(out, "system", "system.msg"), "--table", tbl],
+                                 capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn("かき", res.stdout)
+
             # 使われている文字番号だけを並べる (音声・制御コード・待ち時間の値は除く)
             self.assertEqual(boku2.used_codes([map_path, os.path.join(out, "system", "system.msg")]),
                              [0, 1, 2, 3, 5, 6, 7, 9])
 
             # CLI で TSV にして、校正ツールが読めること
-            font_path = os.path.join(tmp, "font.txt")
-            with open(font_path, "w", encoding="utf-8") as fh:
-                fh.write("あいうえお\nかきくけこ\n")
             tsv = os.path.join(tmp, "all.tsv")
             res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), "text",
                                   os.path.join(out, "system", "system.msg"), map_path,

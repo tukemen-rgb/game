@@ -325,6 +325,22 @@ def used_codes(paths: list[str]) -> list[int]:
     return sorted(used)
 
 
+def glyph_table_mapping(glyphs: list) -> dict[bytes, str]:
+    """文字表を docs/01 の .tbl 用の対応 (2 バイトのリトルエンディアン → 文字) にする.
+
+    ブラウザ側 glyphsToHexTable と同じ。tools/hexdump.py --table や dump_text.py で
+    .msg のバイト列をそのまま日本語で見られる."""
+    mapping: dict[bytes, str] = {}
+    for i, g in enumerate(glyphs):
+        if g is None or g == "":
+            continue
+        mapping[struct.pack("<H", i)] = g
+    mapping[b"\x00\x80"] = "{END}"
+    mapping[b"\x01\x80"] = "<BR>"
+    mapping[b"\x02\x80"] = "<WAIT>"
+    return mapping
+
+
 def write_tsv(rows, out) -> None:
     out.write("id\toffset\tsize\toriginal\ttranslation\n")
     for rid, off, size, text in rows:
@@ -348,6 +364,8 @@ def main(argv=None) -> int:
     p.add_argument("font"); p.add_argument("-o", "--out")
     p = sub.add_parser("used", help="本文で使われている文字番号だけを並べる (書き出す手間を減らす)")
     p.add_argument("files", nargs="+")
+    p = sub.add_parser("table", help="文字表を docs/01 の .tbl (16進=文字) にする。hexdump.py --table で使える")
+    p.add_argument("font"); p.add_argument("-o", "--out", required=True)
     args = ap.parse_args(argv)
 
     if args.cmd == "unpack":
@@ -374,6 +392,15 @@ def main(argv=None) -> int:
         used = used_codes(args.files)
         print(" ".join(str(u) for u in used))
         print(f"# {len(used)} 種 (最大 {used[-1] if used else 0})。フォント画像のこの番号だけ書き出せば本文は読める", file=sys.stderr)
+    elif args.cmd == "table":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import scrp
+        glyphs = load_font(args.font) or []
+        mapping = glyph_table_mapping(glyphs)
+        scrp.save_table(args.out, mapping,
+                        "僕の夏休み 2 の文字表 (tools/boku2.py table)\n"
+                        "文字番号は 2 バイトのリトルエンディアン。0080 終わり / 0180 改行 / 0280 待ち")
+        print(f"{len(mapping)} 件 → {args.out}  (例: python3 tools/hexdump.py system.msg --table {args.out})")
     elif args.cmd == "fontlist":
         glyphs = load_font(args.font) or []
         lines = ["# フォント画像の並び (tools/boku2.py fontlist)"] + [g for g in glyphs if g and g.strip()]

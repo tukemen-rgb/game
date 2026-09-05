@@ -4512,6 +4512,24 @@ function parseGlyphTable(text) {
 }
 
 /**
+ * 文字表を docs/01 の「16進=文字」のテーブルにする。
+ * 文字番号は 2 バイトのリトルエンディアンなので、ファイル上の並び (下位, 上位) の 16 進で書く。
+ * 例: 番号 5 → "0500=か"。これを 16 進表示の「読み込んだテーブル」に使うと、.msg の
+ * バイト列がそのまま日本語で見える (練習用の MSG_ENC.BIN と同じ扱いになる)
+ */
+function glyphsToHexTable(glyphs) {
+  const h2 = (v) => v.toString(16).toUpperCase().padStart(2, "0");
+  const lines = [];
+  for (let i = 0; i < glyphs.length; i++) {
+    const g = glyphs[i];
+    if (g === undefined || g === null || g === "") continue;
+    lines.push(`${h2(i & 255)}${h2(i >> 8)}=${g}`);
+  }
+  lines.push("0080={END}", "0180=<BR>", "0280=<WAIT>", "CDCD=");
+  return lines.join("\n") + "\n";
+}
+
+/**
  * 本文で実際に使われている文字番号の一覧 (昇順)。制御コードと待ち時間の値は除く。
  * フォント画像の全部を書き出さなくても、この番号だけ書き出せば読める
  */
@@ -4607,6 +4625,28 @@ $("msgparse").addEventListener("click", () => {
   usedTa.value = used.map((c) => `${c}=${glyphs && glyphs[c] !== undefined ? glyphs[c] : ""}`).join("\n");
   usedBox.append(sum, usedHint, usedTa);
   box.append(usedBox);
+
+  /* docs/01 の練習とつなぐ: 文字表を 16 進表示用のテーブルにして、バイト列を日本語で見る */
+  if (glyphs && glyphCount) {
+    const tblRow = document.createElement("div");
+    tblRow.className = "controls";
+    const tblBtn = document.createElement("button");
+    tblBtn.className = "btn";
+    tblBtn.id = "msgtbl";
+    tblBtn.textContent = "文字表を 16 進表示用のテーブルにする (docs/01 の形式)";
+    tblBtn.addEventListener("click", () => {
+      const text = glyphsToHexTable(glyphs);
+      $("reltable").value = text;
+      state.table = parseTable(text);
+      $("hexenc").value = "table";
+      showTab("hex");
+    });
+    const tblHint = document.createElement("span");
+    tblHint.className = "pos";
+    tblHint.textContent = "「0500=か」のように 2 バイトの並びで書いた表。16 進タブで本文のバイトが日本語で見える";
+    tblRow.append(tblBtn, tblHint);
+    box.append(tblRow);
+  }
 
   const wrap = document.createElement("div");
   wrap.className = "tablewrap";
