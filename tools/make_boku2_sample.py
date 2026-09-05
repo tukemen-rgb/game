@@ -89,17 +89,18 @@ def build_tables(tables: list[list[list[int]]]) -> bytes:
     return out + data
 
 
-def build_map(parts: list[bytes | None]) -> bytes:
-    """u32 項目数 + (u32 位置, u32 長さ)。部品は 16 バイト揃え。None は空."""
+def build_map(parts: list[bytes | None], rec: int = 8) -> bytes:
+    """u32 項目数 + (u32 位置, u32 長さ [, u32 予備])。部品は 16 バイト揃え。None は空.
+    rec=8 がマップなどの普通の形、rec=12 が日記・保存画面の形."""
     n = len(parts)
-    head_len = ((4 + n * 8 + 15) // 16) * 16
+    head_len = ((4 + n * rec + 15) // 16) * 16
     out, data, off = struct.pack("<I", n), b"", head_len
     for part in parts:
         if part is None:
-            out += struct.pack("<II", 0, 0)
+            out += b"\0" * rec
             continue
         padded = part + b"\0" * ((16 - len(part) % 16) % 16)
-        out += struct.pack("<II", off, len(part))
+        out += struct.pack("<II", off, len(part)) + b"\0" * (rec - 8)
         data += padded
         off += len(padded)
     return out + b"\0" * (head_len - len(out)) + data
@@ -136,6 +137,7 @@ def build_dfi(tree: list[tuple[bool, int, str, bytes | None]]) -> tuple[bytes, b
 MENU = ["はじめから", "つづきから", "せってい", "おわる"]
 NAMES = ["ぼく", "おかあさん", "しずか"]
 CONFIG = ["おんりょう", "しんどう", "がめん"]           # 深いフォルダ (system/submenu/msg/config/) の例
+DIARY = ["きょうは、", "をした。", "たのしかった。"]     # 日記の雛形: 見出しの無い並び (diary.bin の 0 番)
 MAPS = {
     "M_A01000": [
         ["<VOICE:00010001>", "きょうはうみにいくんだ。<BR>いっしょにいこうよ。<WAIT:0A>",
@@ -160,6 +162,12 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
     answer["system"] = [(f"system:{i}", t) for i, t in enumerate(MENU)]
     answer["namemsg"] = [(f"namemsg:{i}", t) for i, t in enumerate(NAMES)]
     answer["config"] = [(f"config:{i}", t) for i, t in enumerate(CONFIG)]
+    # 日記の入れ物 (12 バイト刻み): 0 番が見出しの無い並び、1 番が画像
+    raw = b"".join(struct.pack(f"<{len(c)}H", *c) for c in (encode(t, glyphs) for t in DIARY))
+    diary_img = make_tim2.build_tim2(8, 8, 5, [1] * 64,
+                                     [(0, 0, 0, 255), (255, 255, 255, 255)] + [(0, 0, 0, 0)] * 254, clut_type=3)
+    diary = build_map([raw, diary_img], rec=12)
+    answer["diary"] = [(f"diary#0:{i}", t) for i, t in enumerate(DIARY)]
 
     font_tim2, _ = make_tim2.font_sheet(rows=(len(glyphs) + COLS - 1) // COLS, cols=COLS, cell=CELL)
     tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + font_tim2
@@ -168,6 +176,7 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
                                   clut_type=3) for k in range(8)]
     tree = [
         (True, 1, "/", None),
+        (False, 1, "diary.bin", diary),
         (True, 1, "00diary", None),
     ] + [(False, 0 if i == 7 else 1, f"nik{i:03d}.tm2", photo[i]) for i in range(8)] + [
         (True, 1, "system", None),

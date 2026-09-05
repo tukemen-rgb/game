@@ -880,6 +880,13 @@ class TestBoku2Cli(unittest.TestCase):
             self.assertEqual([r[3] for r in rows4], ["かき<BR>く", "あい"])
             self.assertEqual(rows4[1][1], 10)
             self.assertIsNone(boku2.parse_raw(b"\x05\x00\x06\x00"))          # 終わりが無い
+            # 刻み 8 の入れ物の 0 番 (命令列) は見出しの無い並びとして読まない。1 番以降と刻み 12 は読む
+            rawpart = struct.pack("<5H", 5, 6, 0x8001, 7, 0x8000)
+            m8 = self.build_map([rawpart, rawpart])
+            self.assertEqual([r[0] for r in boku2.text_rows_bytes(m8, "m8", glyphs)], ["m8#1:0"])
+            import make_boku2_sample
+            m12 = make_boku2_sample.build_map([rawpart, None, rawpart], rec=12)
+            self.assertEqual([r[0] for r in boku2.text_rows_bytes(m12, "m12", glyphs)], ["m12#0:0", "m12#2:0"])
             self.assertIsNone(boku2.parse_raw("普通の文章です。".encode("utf-8")[:16]))
 
             # 文字表は「番号=文字」の対応表でもよい (使われている番号だけ書ける)
@@ -984,6 +991,7 @@ class TestBoku2Sample(unittest.TestCase):
             ids = [r["id"] for r in scrp.read_tsv(tsv)]
             self.assertIn("config:0", ids)
             self.assertIn("namemsg:0", ids)
+            self.assertIn("diary#0:2", ids)                 # 日記の入れ物 (12 バイト刻み) の 0 番
             self.assertTrue(any(i.startswith("1:") for i in ids))
 
             # 答えと突き合わせる: id と本文が全部一致すること (順序は問わない)
@@ -998,7 +1006,7 @@ class TestBoku2Sample(unittest.TestCase):
                 rows = scrp.read_tsv(tsv)
                 per_map = [r for r in rows if r["id"].startswith("1:")]
                 self.assertTrue(per_map)
-            for rid, text in answer["system"] + answer["namemsg"] + answer["config"]:
+            for rid, text in answer["system"] + answer["namemsg"] + answer["config"] + answer["diary"]:
                 self.assertEqual(got[rid], text, rid)
             map_texts = sorted(r["original"] for r in scrp.read_tsv(tsv) if r["id"].startswith("1:"))
             self.assertEqual(map_texts, sorted(t for s in ["M_A01000", "M_A02000"] for _, t in answer[s]

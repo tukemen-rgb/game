@@ -140,6 +140,9 @@ const inner = mapBuf.subarray(mp.items[1].at, mp.items[1].at + mp.items[1].len);
 if (!m.parseBokuMsgTables(inner)) fail("入れ物の 1 番から会話ファイルを読めない");
 const mp12 = m.parseBokuMap(buildMap([partA, partText], 12));
 if (!mp12 || mp12.rec !== 12) fail("12 バイト刻みの入れ物を読めない");
+/* 後ろの項目が空でも、12 バイト刻みを 8 バイト刻みと誤認しない (部品が多く取れる方を採る) */
+const mp12b = m.parseBokuMap(buildMap([partA, null, partText], 12));
+if (!mp12b || mp12b.rec !== 12 || mp12b.items.filter((it) => it.len).length !== 2) fail(`空の項目を挟んだ 12 バイト刻みが ${mp12b && mp12b.rec}`);
 if (m.parseBokuMap(msg8)) fail(".msg を入れ物と誤認した");
 if (m.parseBokuMap(sjis)) fail("テキストを入れ物と誤認した");
 

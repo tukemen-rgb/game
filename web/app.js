@@ -4574,6 +4574,7 @@ function parseBokuMap(b) {
   if (b.length < 16) return null;
   const n = u32le(b, 0);
   if (n < 1 || n > 64) return null;
+  let best = null;
   for (const rec of [8, 12]) {
     const head = 4 + n * rec;
     if (head > b.length) continue;
@@ -4588,9 +4589,12 @@ function parseBokuMap(b) {
       items.push({ i, at: off, len });
     }
     if (!ok || !first) continue;
-    return { count: n, rec, headLen: first, items };
+    /* 12 バイト刻みは 8 バイト刻みとしても読めてしまうことがある (後ろの項目が空のとき)。
+       部品が多く取れる方を採る。同じなら 8 */
+    const filled = items.filter((it) => it.len).length;
+    if (!best || filled > best.filled) best = { filled, count: n, rec, headLen: first, items };
   }
-  return null;
+  return best;
 }
 
 /** 音声の項目: 8 桁の数字 (ASCII) がそのまま入っている (公開ソースの isVoice と同じ判定) */

@@ -122,11 +122,18 @@ def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
 # ---------- マップの入れ物 ----------
 
 def parse_map(b: bytes) -> list[dict] | None:
+    got = parse_map_rec(b)
+    return got[1] if got else None
+
+
+def parse_map_rec(b: bytes) -> tuple[int, list[dict]] | None:
+    """入れ物を読み、(項目の刻み, 部品の一覧) を返す。刻み 8 が普通、12 は日記・保存画面など."""
     if len(b) < 16:
         return None
     n = struct.unpack_from("<I", b, 0)[0]
     if not 1 <= n <= 64:
         return None
+    best = None
     for rec in (8, 12):
         head = 4 + n * rec
         if head > len(b):
@@ -144,8 +151,12 @@ def parse_map(b: bytes) -> list[dict] | None:
             prev = off + length
             items.append({"i": i, "at": off, "len": length})
         if ok and first:
-            return items
-    return None
+            # 12 バイト刻みの入れ物は 8 バイト刻みとしても「読めて」しまうことがある
+            # (後ろの項目が空のとき)。部品が多く取れる方を採る。同じなら 8
+            filled = sum(1 for it in items if it["len"])
+            if best is None or filled > best[0]:
+                best = (filled, rec, items)
+    return (best[1], best[2]) if best else None
 
 
 def split_map(path: str, out_dir: str) -> int:
@@ -320,16 +331,29 @@ def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> 
     音声の番号 (8 桁の数字) の項目は文章ではないので、既定では省く (校正の対象にならない)."""
     with open(path, "rb") as fh:
         b = fh.read()
-    stem = os.path.splitext(os.path.basename(path))[0]
+    return text_rows_bytes(b, os.path.splitext(os.path.basename(path))[0], glyphs, keep_voice)
+
+
+def text_rows_bytes(b: bytes, stem: str, glyphs, keep_voice: bool = False):
+    got = parse_map_rec(b)
+    if got:
+        # 入れ物: 部品ごとに読む。刻み 8 (マップなど) の 0 番は命令列なので、
+        # 見出しの無い並びとしては読まない (誤認を避ける)。刻み 12 (日記・保存画面) は全部試す
+        rec, parts = got
+        rows = []
+        for it in parts:
+            if not it["len"]:
+                continue
+            allow_raw = rec == 12 or it["i"] != 0
+            rows += _rows_of(b[it["at"]:it["at"] + it["len"]], f"{stem}#{it['i']}", it["at"], glyphs,
+                             keep_voice, allow_raw)
+        return rows
+    return _rows_of(b, stem, 0, glyphs, keep_voice, True)
+
+
+def _rows_of(b: bytes, stem: str, base_off: int, glyphs, keep_voice: bool, allow_raw: bool):
+    """1 つの塊から行を作る。表の一覧 → 単体 (8/4 刻み) → 見出しの無い並び の順に試す."""
     rows = []
-    items_map = parse_map(b)
-    base_off = 0
-    if items_map:
-        one = next((it for it in items_map if it["i"] == 1 and it["len"]), None)
-        if not one:
-            return rows
-        base_off = one["at"]
-        b = b[one["at"]:one["at"] + one["len"]]
     tables = parse_tables(b)
     if tables:
         for tb in tables:
@@ -340,7 +364,7 @@ def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> 
                     rows.append((f"{stem}:{tb['i']}-{it['i']}", base_off + tb["off"] + it["at"],
                                  len(it["codes"]) * 2, decode(it["codes"], glyphs)))
         return rows
-    msg = parse_msg(b, 8) or parse_msg(b, 4) or parse_raw(b)
+    msg = parse_msg(b, 8) or parse_msg(b, 4) or (parse_raw(b) if allow_raw else None)
     if msg:
         for it in msg:
             if it["codes"] and (keep_voice or not voice_id(it["codes"])):
@@ -363,9 +387,14 @@ def expand_inputs(paths: list[str]) -> list[str]:
             dirs.sort()
             for f in sorted(files):
                 low = f.lower()
-                if low.endswith(".msg") or f == "1.bin":
+                if low.endswith(".msg") or f == "1.bin" or low in TEXT_CONTAINERS:
                     out.append(os.path.join(root, f))
     return out
+
+
+# 本体の中で、会話以外の文言 (日記の雛形・保存画面・出来事の文・釣りの文言) が入っている
+# 入れ物。公開ソースの IMG_MAP_FILES / IMG_MAP_FILES_TYPE_0 / RAW_MSG_FILES から
+TEXT_CONTAINERS = {"diary.bin", "saveload.bin", "on_mem_event.bin", "fish_on_mem.bin"}
 
 
 def used_codes(paths: list[str]) -> list[int]:
