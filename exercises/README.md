@@ -183,3 +183,40 @@ python3 tools/make_viewer.py --tsv work/qa_fixed.tsv -o work/viewer_fixed.html
 仕様違反として検出されるようになります (14 文字 + 名前 6 文字 = 20 文字 > 18)。
 検査台 (`make_viewer.py`) でプレイヤー名を `ながいなまえ` にすると、
 直すべき状態が画面で確認できます。
+
+---
+
+## 課題 8 — 実物と同じ形で一周する (総合)
+
+市販ソフトと同じ形 (別ファイルの索引、フォルダの入れ子、フォント画像、入れ物、
+表が複数の会話) の練習データで、索引から校正用 TSV まで通す。
+手順書は [10-僕夏2の手順.md](../docs/10-僕夏2の手順.md)。
+
+```bash
+python3 tools/make_boku2_sample.py                 # work/BOKU2SAMPLE/ に一式と答え
+python3 tools/boku2.py check work/BOKU2SAMPLE      # まず診断 (問題なし、と出る)
+```
+
+やること:
+
+1. 構造探査台に `BOKU2.IDX` `BOKU2.IMG` `MAP/M_A01000.BIN` を読ませ、索引タブで
+   切り分ける。`system/system.msg` のようにフォルダ付きの名前が並ぶことを確かめる
+2. `system.msg` を「既知の形式」で `.msg` として読む。文字番号 `[123]` の並びを見る
+3. `bk_font.tms` を開き「文字の番号を重ねる」。`.msg` 読みの「使われている文字番号」の
+   雛形 (`12=`) に、画像の該当する番号の文字を書いて貼る (練習データの画像は模様なので、
+   付属の `font.txt` を見て埋めてよい)
+4. `M_A01000.BIN` を「マップの入れ物を切り分ける」→ `1.bin` を `.msg` として読む
+5. 「校正用の TSV をコピー」→ ファイルに貼り、`python3 tools/proofread.py` にかける
+6. 一括処理でも同じ結果になることを確かめる:
+
+```bash
+python3 tools/boku2.py unpack work/BOKU2SAMPLE/BOKU2.IDX work/BOKU2SAMPLE/BOKU2.IMG work/OUT
+python3 tools/boku2.py maps work/BOKU2SAMPLE/MAP/*.BIN -o work/OUT/maps
+python3 tools/boku2.py text work/OUT -f work/BOKU2SAMPLE/font.txt -o work/all.tsv
+```
+
+**確認:** `work/all.tsv` の `original` 列が `work/BOKU2SAMPLE/answer.tsv` と全部一致する
+(音声の番号の行は TSV に入らないので、答えの `<VOICE:…>` は除いて比べる)。
+
+要点: ここまでの課題 1〜6 の道具 (16 進、文字テーブル、ポインタ表、フォント、校正) が、
+実物と同じ形でも **そのまま通る** こと。形式が変わっても考え方は変わらない。
