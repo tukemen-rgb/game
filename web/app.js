@@ -3856,6 +3856,7 @@ async function addParts(dataEntry, items, how) {
       path: prefix + rel, name: rel.slice(rel.lastIndexOf("/") + 1), file: dataEntry.file,
       offset: dataEntry.offset + it.at, size: it.len,
       kind: "part", parentPath: dataEntry.path, bare,
+      mapRec: it.mapRec, partIndex: it.partIndex,          /* 入れ物の部品なら、刻みと番号 */
     };
   });
   if (!kids.length) return;
@@ -4768,7 +4769,9 @@ $("msgparse").addEventListener("click", () => {
       tablesInfo = `表 ${mt.tables.filter((x) => x.msg).length} / ${mt.count} · `;
     }
   }
-  if (!r) {
+  /* 刻み 8 の入れ物の 0 番は命令列なので、見出しの無い並びとしては読まない (CLI と同じ規則) */
+  const scriptPart = state.current && state.current.mapRec === 8 && state.current.partIndex === 0;
+  if (!r && !scriptPart) {
     /* 見出しの無い並び (日記の雛形・保存画面の文言) */
     r = parseBokuMsgRaw(state.buf);
     if (r) tablesInfo = "見出しの無い並び (0x8000 で区切り) · ";
@@ -4779,7 +4782,9 @@ $("msgparse").addEventListener("click", () => {
     if (r) tablesInfo = "Shift-JIS の並び (0x00 で区切り。文字表は不要) · ";
   }
   if (!r) {
-    note.textContent = "この形では読めませんでした (先頭が「件数 + 位置表」にも「表の数 + 表の一覧」にもなっておらず、0x8000 区切りの並びでもない)";
+    note.textContent = scriptPart
+      ? "入れ物の 0 番は命令列 (会話ではありません)。会話はふつう 1.bin です"
+      : "この形では読めませんでした (先頭が「件数 + 位置表」にも「表の数 + 表の一覧」にもなっておらず、0x8000 区切りの並びでもない)";
     return;
   }
   const glyphText = $("msgglyphs").value;
@@ -4916,7 +4921,8 @@ $("mapsplit").addEventListener("click", async () => {
     return;
   }
   const items = map.items.filter((it) => it.len > 0)
-    .map((it) => ({ i: it.i, at: it.at, len: it.len, name: `${it.i}.bin`, base: `${it.i}.bin`, bare: false }));
+    .map((it) => ({ i: it.i, at: it.at, len: it.len, name: `${it.i}.bin`, base: `${it.i}.bin`, bare: false,
+                    mapRec: map.rec, partIndex: it.i }));
   await addParts(entry, items, "マップの入れ物として");
   note.textContent = `${items.length} 個に切り分けました。会話はふつう 1.bin にあります。`;
 });

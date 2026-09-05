@@ -30,7 +30,9 @@ def mapfile(parts):
     return buf + data
 
 text = tables([[[5, 6, 0x8001, 7, 0x8000]], [[0, 1, 0x8000], []]])
-open(MAPF, "wb").write(mapfile([b"\x11" * 40, text, None]))
+# 0 番は命令列。0x8000 が混ざっていても「見出しの無い並び」として読まれてはいけない
+script = struct.pack("<8H", 6, 0x32, 0x8000, 3, 0x2D, 0, 5, 0x8000)
+open(MAPF, "wb").write(mapfile([script, text, None]))
 
 async def main():
     async with async_playwright() as p:
@@ -49,6 +51,16 @@ async def main():
         await page.click("#mapsplit")
         await page.wait_for_function("document.querySelector('#capnote').textContent.includes('切り分けました')", timeout=20000)
         names = await page.eval_on_selector_all("#tree .filerow .nm", "els => els.map(e => e.textContent)")
+        # 0.bin (命令列) は文言として読まれない
+        await page.click("#tree .filerow:has(.nm:text-is('0.bin'))")
+        await page.wait_for_timeout(300)
+        await page.click('[data-tab="format"]')
+        await page.click("#msgparse")
+        await page.wait_for_timeout(200)
+        note_script = await page.text_content("#msgnote")
+        print("note 0.bin:", note_script)
+        if "命令列" not in note_script:
+            errors.append("script part was read as text")
         # select 1.bin
         await page.click("#tree .filerow:has(.nm:text-is('1.bin'))")
         await page.wait_for_timeout(300)
