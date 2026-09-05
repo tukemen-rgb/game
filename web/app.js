@@ -4544,7 +4544,7 @@ function parseSjisList(b, decode) {
     if (p > start) {
       let text;
       try { text = decode(b.subarray(start, p)); } catch (err) { return null; }
-      if (text.includes("�")) return null;
+      if (text.includes("\uFFFD")) return null;         /* 読めないバイトがあれば Shift-JIS ではない */
       for (const ch of text) {
         total++;
         const c = ch.codePointAt(0);
