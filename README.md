@@ -54,6 +54,7 @@ python3 tools/insert_text.py work/SCRIPT.tsv -o work/SCRIPT_new.BIN \
 
 # 10. 実物と同じ形の練習データで、索引 → 会話 → 校正用 TSV まで一括で通す
 python3 tools/make_boku2_sample.py
+python3 tools/boku2.py check work/BOKU2SAMPLE        # まず診断 (実物でも最初にこれ)
 python3 tools/boku2.py unpack work/BOKU2SAMPLE/BOKU2.IDX work/BOKU2SAMPLE/BOKU2.IMG work/OUT
 python3 tools/boku2.py maps work/BOKU2SAMPLE/MAP/*.BIN -o work/OUT/maps
 python3 tools/boku2.py text work/OUT -f work/BOKU2SAMPLE/font.txt -o work/all.tsv
