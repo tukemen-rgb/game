@@ -872,7 +872,7 @@ class TestBoku2Cli(unittest.TestCase):
             parts = boku2.split_map(map_path, os.path.join(tmp, "maps", "M_A11000"))
             self.assertEqual(parts, 2)
             rows = boku2.text_rows(os.path.join(tmp, "maps", "M_A11000", "1.bin"), glyphs, keep_voice=True)
-            self.assertEqual([r[0] for r in rows], ["1:0-0", "1:1-0", "1:1-1"])
+            self.assertEqual([r[0] for r in rows], ["M_A11000:0-0", "M_A11000:1-0", "M_A11000:1-1"])
             self.assertEqual([r[3] for r in rows], ["あい", "<VOICE:01234567>", "うえ"])
             # 音声の番号は既定では省く (校正の対象ではない)
             self.assertEqual([r[3] for r in boku2.text_rows(map_path, glyphs)], ["あい", "うえ"])
@@ -1012,25 +1012,15 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertIn("config:0", ids)
             self.assertIn("namemsg:0", ids)
             self.assertIn("diary#0:2", ids)                 # 日記の入れ物 (12 バイト刻み) の 0 番
-            self.assertTrue(any(i.startswith("1:") for i in ids))
+            self.assertIn("M_A01000:0-1", ids)             # マップの会話はマップ名が id
+            self.assertIn("M_A02000:0-0", ids)
+            self.assertFalse(any(i.startswith("1:") for i in ids))
 
-            # 答えと突き合わせる: id と本文が全部一致すること (順序は問わない)
+            # 答えと突き合わせる: id と本文が全部一致すること (音声の番号の行は TSV に入らない)
             got = {r["id"]: r["original"] for r in scrp.read_tsv(tsv)}
-            want = {}
-            for stem, rows in answer.items():
-                for rid, text in rows:
-                    key = rid if not rid.startswith("1:") else f"1:{rid[2:]}"
-                    want[key] = text
-            # マップは複数あるので id が重なる。ファイルごとに比べる
-            for stem in ["M_A01000", "M_A02000"]:
-                rows = scrp.read_tsv(tsv)
-                per_map = [r for r in rows if r["id"].startswith("1:")]
-                self.assertTrue(per_map)
-            for rid, text in answer["system"] + answer["namemsg"] + answer["config"] + answer["diary"]:
-                self.assertEqual(got[rid], text, rid)
-            map_texts = sorted(r["original"] for r in scrp.read_tsv(tsv) if r["id"].startswith("1:"))
-            self.assertEqual(map_texts, sorted(t for s in ["M_A01000", "M_A02000"] for _, t in answer[s]
-                                               if not t.startswith("<VOICE:")))
+            want = {rid: text for rows in answer.values() for rid, text in rows
+                    if not text.startswith("<VOICE:")}
+            self.assertEqual(got, want)
 
             # 診断: 練習データは問題なし。壊したものは → で場所を示す
             res = run("check", sample)

@@ -361,7 +361,14 @@ def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> 
     音声の番号 (8 桁の数字) の項目は文章ではないので、既定では省く (校正の対象にならない)."""
     with open(path, "rb") as fh:
         b = fh.read()
-    return text_rows_bytes(b, os.path.splitext(os.path.basename(path))[0], glyphs, keep_voice)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    # マップの部品 (OUT/maps/M_A01000/1.bin) はどれも 1.bin なので、id が全部 "1:…" で
+    # ぶつかる。親フォルダの名前 (マップ名) を使う
+    if os.path.basename(path).lower() == "1.bin":
+        parent = os.path.basename(os.path.dirname(os.path.abspath(path)))
+        if parent:
+            stem = parent
+    return text_rows_bytes(b, stem, glyphs, keep_voice)
 
 
 def text_rows_bytes(b: bytes, stem: str, glyphs, keep_voice: bool = False):

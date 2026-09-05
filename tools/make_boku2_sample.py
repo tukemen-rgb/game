@@ -201,7 +201,7 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
         script = b"\x06\x00\x32\x00\x00\x00" + b"\x03\x00\x2d\x00" * 8      # 命令列らしきもの (会話ではない)
         with open(os.path.join(out_dir, "MAP", stem + ".BIN"), "wb") as fh:
             fh.write(build_map([script, talk, None]))
-        answer[stem] = [(f"1:{ti}-{li}", t) for ti, table in enumerate(tables) for li, t in enumerate(table)]
+        answer[stem] = [(f"{stem}:{ti}-{li}", t) for ti, table in enumerate(tables) for li, t in enumerate(table)]
 
     with open(os.path.join(out_dir, "font.txt"), "w", encoding="utf-8") as fh:
         for r in range(0, len(glyphs), COLS):
