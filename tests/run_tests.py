@@ -935,15 +935,20 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertTrue(os.path.exists(os.path.join(out, "system", "system.msg")))
             self.assertTrue(os.path.exists(os.path.join(out, "system", "namemsg", "namemsg.msg")))
+            self.assertTrue(os.path.exists(os.path.join(out, "system", "submenu", "msg", "config", "config.msg")))
+            self.assertTrue(os.path.exists(os.path.join(out, "readme.bin")))      # 入れ子が閉じて根に戻る
             self.assertTrue(os.path.exists(os.path.join(out, "00diary", "nik002.tm2")))
             self.assertTrue(os.path.exists(os.path.join(out, "system", "bk_font.tms")))
             res = run("maps", *glob.glob(os.path.join(sample, "MAP", "*.BIN")), "-o", os.path.join(out, "maps"))
             self.assertEqual(res.returncode, 0, res.stderr)
-            files = (glob.glob(os.path.join(out, "system", "*.msg")) + glob.glob(os.path.join(out, "system", "*", "*.msg"))
-                     + glob.glob(os.path.join(out, "maps", "*", "1.bin")))
+            # フォルダを渡せば、深い所の *.msg とマップの 1.bin を全部拾う (docs/10 のコマンドそのまま)
             tsv = os.path.join(tmp, "all.tsv")
-            res = run("text", *files, "-f", os.path.join(sample, "font.txt"), "-o", tsv)
+            res = run("text", out, "-f", os.path.join(sample, "font.txt"), "-o", tsv)
             self.assertEqual(res.returncode, 0, res.stderr)
+            ids = [r["id"] for r in scrp.read_tsv(tsv)]
+            self.assertIn("config:0", ids)
+            self.assertIn("namemsg:0", ids)
+            self.assertTrue(any(i.startswith("1:") for i in ids))
 
             # 答えと突き合わせる: id と本文が全部一致すること (順序は問わない)
             got = {r["id"]: r["original"] for r in scrp.read_tsv(tsv)}
@@ -957,7 +962,7 @@ class TestBoku2Sample(unittest.TestCase):
                 rows = scrp.read_tsv(tsv)
                 per_map = [r for r in rows if r["id"].startswith("1:")]
                 self.assertTrue(per_map)
-            for rid, text in answer["system"] + answer["namemsg"]:
+            for rid, text in answer["system"] + answer["namemsg"] + answer["config"]:
                 self.assertEqual(got[rid], text, rid)
             map_texts = sorted(r["original"] for r in scrp.read_tsv(tsv) if r["id"].startswith("1:"))
             self.assertEqual(map_texts, sorted(t for s in ["M_A01000", "M_A02000"] for _, t in answer[s]

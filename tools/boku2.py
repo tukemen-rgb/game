@@ -303,12 +303,31 @@ def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> 
     return rows
 
 
+def expand_inputs(paths: list[str]) -> list[str]:
+    """引数のフォルダを中まで辿り、会話の入ったファイルだけを拾う.
+
+    切り分けた本体 (OUT/) からは *.msg を、マップの部品 (OUT/maps/*/) からは 1.bin を、
+    マップの入れ物 (MAP/) からはそのままのファイルを。ファイルを直接渡せばそのまま."""
+    out: list[str] = []
+    for p in paths:
+        if not os.path.isdir(p):
+            out.append(p)
+            continue
+        for root, dirs, files in os.walk(p):
+            dirs.sort()
+            for f in sorted(files):
+                low = f.lower()
+                if low.endswith(".msg") or f == "1.bin":
+                    out.append(os.path.join(root, f))
+    return out
+
+
 def used_codes(paths: list[str]) -> list[int]:
     """複数ファイルで実際に使われている文字番号 (昇順)。制御コードと待ち時間の値、音声は除く.
 
     フォント画像を全部書き出さなくても、この番号だけ書き出せば本文は読める."""
     used: set[int] = set()
-    for path in paths:
+    for path in expand_inputs(paths):
         for _, _, _, text in text_rows(path, None):
             # 文字表なしの復号は [番号] の形なので、そこから拾う
             i = 0
@@ -357,7 +376,7 @@ def main(argv=None) -> int:
     p.add_argument("idx"); p.add_argument("img"); p.add_argument("out")
     p = sub.add_parser("maps", help="マップの入れ物を部品にする")
     p.add_argument("files", nargs="+"); p.add_argument("-o", "--out", required=True)
-    p = sub.add_parser("text", help="会話を TSV にする")
+    p = sub.add_parser("text", help="会話を TSV にする (フォルダを渡せば中の *.msg と 1.bin を全部)")
     p.add_argument("files", nargs="+"); p.add_argument("-f", "--font"); p.add_argument("-o", "--out")
     p.add_argument("--keep-voice", action="store_true", help="音声の番号の項目も残す")
     p = sub.add_parser("fontlist", help="フォントの並びを校正ツールのフォント一覧にする")
@@ -380,7 +399,7 @@ def main(argv=None) -> int:
     elif args.cmd == "text":
         glyphs = load_font(args.font)
         rows = []
-        for f in args.files:
+        for f in expand_inputs(args.files):
             rows += text_rows(f, glyphs, args.keep_voice)
         if args.out:
             with open(args.out, "w", encoding="utf-8") as fo:

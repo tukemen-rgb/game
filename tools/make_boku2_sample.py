@@ -135,6 +135,7 @@ def build_dfi(tree: list[tuple[bool, int, str, bytes | None]]) -> tuple[bytes, b
 
 MENU = ["はじめから", "つづきから", "せってい", "おわる"]
 NAMES = ["ぼく", "おかあさん", "しずか"]
+CONFIG = ["おんりょう", "しんどう", "がめん"]           # 深いフォルダ (system/submenu/msg/config/) の例
 MAPS = {
     "M_A01000": [
         ["<VOICE:00010001>", "きょうはうみにいくんだ。<BR>いっしょにいこうよ。<WAIT:0A>",
@@ -155,8 +156,10 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
 
     menu = build_msg([encode(t, glyphs) for t in MENU], 8)
     names = build_msg([encode(t, glyphs) for t in NAMES], 8)
+    config = build_msg([encode(t, glyphs) for t in CONFIG], 8)
     answer["system"] = [(f"system:{i}", t) for i, t in enumerate(MENU)]
     answer["namemsg"] = [(f"namemsg:{i}", t) for i, t in enumerate(NAMES)]
+    answer["config"] = [(f"config:{i}", t) for i, t in enumerate(CONFIG)]
 
     font_tim2, _ = make_tim2.font_sheet(rows=(len(glyphs) + COLS - 1) // COLS, cols=COLS, cell=CELL)
     tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + font_tim2
@@ -170,8 +173,12 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
         (True, 1, "system", None),
         (False, 1, "bk_font.tms", tms),
         (False, 1, "system.msg", menu),
-        (True, 0, "namemsg", None),
+        (True, 1, "namemsg", None),
         (False, 0, "namemsg.msg", names),
+        (True, 0, "submenu", None),                 # system の最後の項目 (閉じるとき system も閉じる)
+        (True, 0, "msg", None),                     # submenu の最後の項目
+        (True, 0, "config", None),                  # msg の最後の項目
+        (False, 0, "config.msg", config),           # 4 段目: system/submenu/msg/config/config.msg
         (False, 0, "readme.bin", b"\0" * 64),
     ]
     idx, img, _ = build_dfi(tree)

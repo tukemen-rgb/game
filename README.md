@@ -56,8 +56,7 @@ python3 tools/insert_text.py work/SCRIPT.tsv -o work/SCRIPT_new.BIN \
 python3 tools/make_boku2_sample.py
 python3 tools/boku2.py unpack work/BOKU2SAMPLE/BOKU2.IDX work/BOKU2SAMPLE/BOKU2.IMG work/OUT
 python3 tools/boku2.py maps work/BOKU2SAMPLE/MAP/*.BIN -o work/OUT/maps
-python3 tools/boku2.py text work/OUT/system/*.msg work/OUT/maps/*/1.bin \
-    -f work/BOKU2SAMPLE/font.txt -o work/all.tsv
+python3 tools/boku2.py text work/OUT -f work/BOKU2SAMPLE/font.txt -o work/all.tsv
 
 # 11. ツール自体のテスト
 python3 tests/run_tests.py
