@@ -529,6 +529,18 @@ class TestWebBuild(unittest.TestCase):
             bad = [c for c in line if ord(c) < 0x20 and c != "\t"]
             self.assertEqual(bad, [], f"app.js:{lineno} に生の制御文字があります")
 
+    def test_no_replacement_character_in_sources_or_build(self):
+        """置換文字 (U+FFFD) が生で入っていると公開先に弾かれる。エスケープで書く (#25 で踏んだ)."""
+        import glob
+        files = glob.glob(os.path.join(self.webdir, "*")) + glob.glob(os.path.join(REPO, "docs", "*.md"))
+        for path in files:
+            if os.path.isdir(path):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertNotIn("\ufffd", text, f"{os.path.relpath(path, REPO)} に生の置換文字があります")
+        self.assertNotIn("\ufffd", self._build(), "組み立てた HTML に置換文字があります")
+
 
 class TestArchiveFixture(unittest.TestCase):
     """索引ファイル + データ本体の練習用ペアが正しく作られること."""
