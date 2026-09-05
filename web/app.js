@@ -3243,6 +3243,7 @@ $("idxrun").addEventListener("click", async () => {
     ? `${idxEntry.name} → ${dataEntry.name} · 候補 ${state.idxCands.length} 件`
       + (top.known ? ` (${top.known} 形式として読みました)`
                    : top.named ? " (名前つきの索引)" : "")
+      + (top.dupes ? ` · 同じ名前が ${top.dupes} 件 (~2 を付けて区別。フォルダの入れ子の規則が実物と違うかもしれません)` : "")
     : `${idxEntry.name} からは索引らしい並びが見つかりませんでした`;
   renderIndexCands(dataEntry);
 });
@@ -3338,7 +3339,8 @@ function readDfi(idx, dataSize) {
      親も一緒に閉じる (Hilltop の展開器の「二つ戻る」を一般化した規則)。 */
   const out = [];
   const stack = [];
-  let bad = 0;
+  const seen = new Set();
+  let bad = 0, dupes = 0;
   for (let k = 0; k < recCount; k++) {
     const p = 16 + k * 16;
     const isDir = (idx[p] | (idx[p + 1] << 8)) === 1;
@@ -3351,7 +3353,16 @@ function readDfi(idx, dataSize) {
     const lba = u32le(idx, p + 8), len = u32le(idx, p + 12);
     const at = lba * 2048;
     const base = name || `#${out.length}`;
-    const path = stack.map((d) => d.name).filter(Boolean).concat(base).join("/");
+    let path = stack.map((d) => d.name).filter(Boolean).concat(base).join("/");
+    /* 同じ道筋が二度出たら、上書きせず番号を付けて残す。入れ子の規則が実物と
+       違っている合図でもあるので、件数を返して画面に出す */
+    if (seen.has(path)) {
+      dupes++;
+      let n = 2;
+      while (seen.has(`${path}~${n}`)) n++;
+      path = `${path}~${n}`;
+    }
+    seen.add(path);
     if (len > 0 && at < dataSize && at + len <= dataSize) {
       out.push({ i: out.length, at, len, name: path, base, bare: !name });
     } else {
@@ -3377,7 +3388,7 @@ function readDfi(idx, dataSize) {
     named: true, known: "DFI", rec: 16, skip: 16,
     nameField: 4, atField: 8, lenField: 12, atMult: 2048, lenMult: 1,
     count: recCount, files: out.length, dirs: recCount - out.length - bad, gap: 0,
-    named_ok: out.filter((x) => !x.bare).length,
+    named_ok: out.filter((x) => !x.bare).length, dupes,
     coverage: Math.min(1, used / Math.max(1, dataSize)),
     entries: out,
   };

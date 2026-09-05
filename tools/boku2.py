@@ -60,6 +60,7 @@ def read_dfi(idx: bytes, data_size: int) -> list[dict]:
 
     entries: list[dict] = []
     stack: list[tuple[str, int]] = []
+    seen: set[str] = set()
     for k in range(rec_count):
         p = 16 + k * 16
         is_dir = (idx[p] | (idx[p + 1] << 8)) == 1
@@ -72,6 +73,12 @@ def read_dfi(idx: bytes, data_size: int) -> list[dict]:
         at = lba * SECTOR
         base = name or f"#{len(entries)}"
         path = "/".join([d for d, _ in stack if d] + [base])
+        if path in seen:                      # 同じ道筋は上書きせず ~2 を付ける (ブラウザ側と同じ)
+            n = 2
+            while f"{path}~{n}" in seen:
+                n += 1
+            path = f"{path}~{n}"
+        seen.add(path)
         if length > 0 and at + length <= data_size:
             entries.append({"path": path, "at": at, "len": length})
         if more == 0:
@@ -86,6 +93,10 @@ def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
         idx = fh.read()
     size = os.path.getsize(img_path)
     entries = read_dfi(idx, size)
+    dupes = sum(1 for e in entries if "~" in os.path.basename(e["path"]))
+    if dupes:
+        print(f"注意: 同じ名前が {dupes} 件あり ~2 を付けて区別しました。"
+              "フォルダの入れ子の規則が実物と違うかもしれません", file=sys.stderr)
     with open(img_path, "rb") as img:
         for e in entries:
             dest = os.path.join(out_dir, *e["path"].split("/"))

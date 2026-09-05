@@ -827,6 +827,14 @@ class TestBoku2Cli(unittest.TestCase):
                 with open(os.path.join(out, *path.split("/")), "rb") as fh:
                     self.assertEqual(fh.read(), data, path)
 
+            # 同じ道筋が二度出ても上書きしない (~2 を付ける)。ブラウザ側と同じ規則
+            dup_tree = [(True, 1, "/", None), (True, 1, "d", None)] + \
+                [(False, 0 if i == 8 else 1, "same.bin", bytes([i]) * 10) for i in range(9)]
+            d_idx, d_img, _ = self.build_dfi(dup_tree)
+            d_paths = [e["path"] for e in boku2.read_dfi(d_idx, len(d_img))]
+            self.assertEqual(d_paths[:3], ["d/same.bin", "d/same.bin~2", "d/same.bin~3"])
+            self.assertEqual(len(set(d_paths)), 9)
+
             # マップの入れ物 → 部品 → 会話 (表が複数、音声つき)
             map_path = os.path.join(tmp, "M_A11000.BIN")
             with open(map_path, "wb") as fh:

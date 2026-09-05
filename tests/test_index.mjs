@@ -306,6 +306,24 @@ if (got[0].name !== "dir000/f000.tm2") fail(`先頭のパスが ${got[0].name}`)
 if (got[got.length - 2].name !== "outer/inner/g1.bin") fail(`入れ子のパスが ${got[got.length - 2].name}`);
 if (got[got.length - 1].name !== "tail.bin") fail(`入れ子が閉じた後のパスが ${got[got.length - 1].name}`);
 
+/* 同じ道筋が二度出ても上書きしない (~2 を付け、件数を返す) */
+{
+  const dupBuf = real.buf.slice();
+  /* 2 番目のファイル名を 1 番目と同じにする: 名前の置き場の該当箇所を書き換える */
+  const recEnd = 16 + real.recCount * 16;
+  let q = recEnd, k = 0, second = -1;
+  while (q < dupBuf.length && k < 4) {          /* "/", "dir000", "f000.tm2", "f001.tm2" */
+    const e = dupBuf.indexOf(0, q);
+    if (k === 3) second = q;
+    q = e + 1; k++;
+  }
+  dupBuf.set(Array.from("f000.tm2").map((c) => c.charCodeAt(0)), second);
+  const dc = named.readDfi(dupBuf, real.dataSize);
+  if (!dc || dc.dupes !== 1) fail(`同じ名前の件数が ${dc && dc.dupes}`);
+  const dg = named.namedEntries(dupBuf, dc, real.dataSize, 4);
+  if (dg[0].name !== "dir000/f000.tm2" || dg[1].name !== "dir000/f000.tm2~2") fail(`同じ名前の区別が ${dg[1].name}`);
+}
+
 /* 名前の置き場が壊れていても、位置と長さは読めて #N で並ぶこと */
 const broken = real.buf.slice();
 broken.fill(0xFF, 16 + real.recCount * 16);
