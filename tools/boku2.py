@@ -254,6 +254,36 @@ def parse_raw(b: bytes, max_glyph: int = 0x2000) -> list[dict] | None:
     return items
 
 
+def parse_sjis_list(b: bytes) -> list[dict] | None:
+    """Shift-JIS の文言 (公開ソースの SJIS_FILES: 保存画面の入れ物の 2 番)。0x00 区切り.
+
+    文字表は要らない。区切りが 1 つ以上あり、文字の 6 割以上がかな・漢字・全角記号・
+    英数のときだけ読む (ブラウザ側 parseSjisList と同じ)."""
+    if len(b) < 4 or b"\0" not in b:
+        return None
+    items, good, total = [], 0, 0
+    start = 0
+    for p in range(len(b) + 1):
+        if p < len(b) and b[p] != 0:
+            continue
+        if p > start:
+            try:
+                text = b[start:p].decode("cp932")
+            except UnicodeDecodeError:
+                return None
+            for ch in text:
+                total += 1
+                c = ord(ch)
+                if (0x3040 <= c <= 0x30FF or 0x4E00 <= c <= 0x9FFF or 0xFF01 <= c <= 0xFF60
+                        or 0x3000 <= c <= 0x303F or 0x20 <= c <= 0x7E or c == 0x0A):
+                    good += 1
+            items.append({"i": len(items), "at": start, "text": text})
+        start = p + 1
+    if not items or not total or good < total * 0.6:
+        return None
+    return items
+
+
 def voice_id(codes: list[int]) -> str | None:
     if len(codes) != 4:
         return None
@@ -370,6 +400,13 @@ def _rows_of(b: bytes, stem: str, base_off: int, glyphs, keep_voice: bool, allow
             if it["codes"] and (keep_voice or not voice_id(it["codes"])):
                 rows.append((f"{stem}:{it['i']}", base_off + it["at"], len(it["codes"]) * 2,
                              decode(it["codes"], glyphs)))
+        return rows
+    if allow_raw:
+        sj = parse_sjis_list(b)
+        if sj:
+            for it in sj:
+                rows.append((f"{stem}:{it['i']}", base_off + it["at"], len(it["text"].encode("cp932")),
+                             it["text"].replace("\n", "<BR>")))
     return rows
 
 

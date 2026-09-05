@@ -4529,6 +4529,36 @@ function parseBokuMsgRaw(b, maxGlyph) {
   return { count: items.length, stride: 0, raw: true, items };
 }
 
+/**
+ * Shift-JIS の文言 (公開ソースの SJIS_FILES: 保存画面の入れ物の 2 番)。
+ * 0x00 で区切られた Shift-JIS の文字列が並ぶだけ。フォントの番号ではないので
+ * 文字表は要らない。誤認しないよう、区切りが 1 つ以上あり、文字の 6 割以上が
+ * かな・漢字・全角記号・英数のときだけ読む。decode は Shift-JIS の TextDecoder
+ */
+function parseSjisList(b, decode) {
+  if (b.length < 4 || !decode) return null;
+  const items = [];
+  let start = 0, good = 0, total = 0;
+  for (let p = 0; p <= b.length; p++) {
+    if (p < b.length && b[p] !== 0) continue;
+    if (p > start) {
+      let text;
+      try { text = decode(b.subarray(start, p)); } catch (err) { return null; }
+      if (text.includes("�")) return null;
+      for (const ch of text) {
+        total++;
+        const c = ch.codePointAt(0);
+        if ((c >= 0x3040 && c <= 0x30FF) || (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xFF01 && c <= 0xFF60)
+            || (c >= 0x3000 && c <= 0x303F) || (c >= 0x20 && c <= 0x7E) || c === 0x0A) good++;
+      }
+      items.push({ i: items.length, at: start, codes: [], text });
+    }
+    start = p + 1;
+  }
+  if (items.length < 1 || !total || good < total * 0.6 || !(b.includes(0))) return null;
+  return { count: items.length, stride: 0, sjis: true, items };
+}
+
 /** 8 バイト刻みと 4 バイト刻みの両方を試す */
 function detectBokuMsg(b) {
   for (const stride of [8, 4]) {
@@ -4738,6 +4768,11 @@ $("msgparse").addEventListener("click", () => {
     if (r) tablesInfo = "見出しの無い並び (0x8000 で区切り) · ";
   }
   if (!r) {
+    /* Shift-JIS の文言 (保存画面の入れ物の 2 番)。文字表は要らない */
+    r = parseSjisList(state.buf, DECODERS.sjis ? (x) => DECODERS.sjis.decode(x) : null);
+    if (r) tablesInfo = "Shift-JIS の並び (0x00 で区切り。文字表は不要) · ";
+  }
+  if (!r) {
     note.textContent = "この形では読めませんでした (先頭が「件数 + 位置表」にも「表の数 + 表の一覧」にもなっておらず、0x8000 区切りの並びでもない)";
     return;
   }
@@ -4802,9 +4837,10 @@ $("msgparse").addEventListener("click", () => {
   const table = document.createElement("table");
   table.innerHTML = "<thead><tr><th>#</th><th>位置</th><th>長さ</th><th>内容</th></tr></thead>";
   const tb = document.createElement("tbody");
-  for (const it of filled.slice(0, 400)) {
+  for (const it of (r.sjis ? r.items : filled).slice(0, 400)) {
     const tr = document.createElement("tr");
-    const cells = [String(it.i), hx(it.at), `${it.codes.length} 字`, bokuMsgText(it.codes, glyphs)];
+    const cells = [String(it.i), hx(it.at), r.sjis ? `${it.text.length} 字` : `${it.codes.length} 字`,
+                   r.sjis ? it.text : bokuMsgText(it.codes, glyphs)];
     cells.forEach((text, ci) => {
       const td = document.createElement("td");
       if (ci === 3) { td.className = "jp"; td.style.whiteSpace = "pre-wrap"; }

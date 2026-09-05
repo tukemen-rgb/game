@@ -11,7 +11,7 @@ if (s < 0 || e < 0) { console.error("app.js に bokumsg マーカーが無い");
 const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
-  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable, glyphsToHexTable, parseBokuMsgRaw };")(u32le, u16le);
+  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable, glyphsToHexTable, parseBokuMsgRaw, parseSjisList };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -192,6 +192,22 @@ if (raw.items[1].at !== 10) fail(`2 件目の位置が ${raw.items[1].at}`);
 if (m.parseBokuMsgRaw(sjis.subarray(0, sjis.length & ~1))) fail("普通のテキストを見出しの無い並びと誤認した");
 if (m.parseBokuMsgRaw(tim2)) fail("TIM2 を見出しの無い並びと誤認した");
 if (m.parseBokuMsgRaw(new Uint8Array([5, 0, 6, 0]))) fail("終わりの無い並びを通した");
+/* 11. Shift-JIS の並び (0x00 区切り、文字表は不要)。保存画面の入れ物の 2 番 */
+{
+  const dec = (x) => new TextDecoder("shift_jis", { fatal: true }).decode(x);
+  const sjBytes = Buffer.concat([Buffer.from("セーブしますか？", "utf8"), Buffer.from([0])]);  /* UTF-8 ではなく Shift-JIS が要る */
+  const sjisOf = (str) => { /* Node には Shift-JIS の encoder が無いので、既知のバイト列を使う */
+    const table = { "は": [0x82, 0xcd], "い": [0x82, 0xa2], "え": [0x82, 0xa6], "セ": [0x83, 0x5a], "ー": [0x81, 0x5b], "ブ": [0x83, 0x75], "？": [0x81, 0x48] };
+    return Uint8Array.from([].concat(...Array.from(str).map((c) => table[c])));
+  };
+  const list = new Uint8Array([...sjisOf("セーブ？"), 0, ...sjisOf("はい"), 0, ...sjisOf("いいえ"), 0]);
+  const sj = m.parseSjisList(list, dec);
+  if (!sj || sj.count !== 3 || sj.items[1].text !== "はい" || sj.items[2].at !== 14) fail(`Shift-JIS の並びが ${sj && sj.items.map((x) => `${x.text}@${x.at}`)}`);
+  if (m.parseSjisList(msg8, dec)) fail(".msg を Shift-JIS の並びと誤認した");
+  if (m.parseSjisList(new Uint8Array([0x83, 0x5a, 0x83]), dec)) fail("壊れた Shift-JIS を通した");
+  if (m.parseSjisList(sjisOf("はい"), dec)) fail("区切りの無い並びを通した");
+  void sjBytes;
+}
 fs.mkdirSync(path.join(repo, "work"), { recursive: true });
 fs.writeFileSync(path.join(repo, "work", "MSG_EXPORT.tsv"), tsv);
 

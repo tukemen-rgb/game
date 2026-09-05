@@ -880,6 +880,14 @@ class TestBoku2Cli(unittest.TestCase):
             self.assertEqual([r[3] for r in rows4], ["かき<BR>く", "あい"])
             self.assertEqual(rows4[1][1], 10)
             self.assertIsNone(boku2.parse_raw(b"\x05\x00\x06\x00"))          # 終わりが無い
+            # Shift-JIS の並び (保存画面の入れ物の 2 番): 文字表なしでそのまま読める
+            sj = "セーブしますか？\0はい\0いいえ\0".encode("cp932")
+            self.assertEqual([x["text"] for x in boku2.parse_sjis_list(sj)], ["セーブしますか？", "はい", "いいえ"])
+            self.assertIsNone(boku2.parse_sjis_list(b"\x05\x00\x06\x00\x00\x80"))
+            self.assertIsNone(boku2.parse_sjis_list(bytes(range(0x80, 0xa0)) + b"\0"))
+            sj_rows = boku2.text_rows_bytes(sj, "saveload", None)
+            self.assertEqual([r[3] for r in sj_rows], ["セーブしますか？", "はい", "いいえ"])
+            self.assertEqual(sj_rows[1][1], 17)
             # 刻み 8 の入れ物の 0 番 (命令列) は見出しの無い並びとして読まない。1 番以降と刻み 12 は読む
             rawpart = struct.pack("<5H", 5, 6, 0x8001, 7, 0x8000)
             m8 = self.build_map([rawpart, rawpart])
