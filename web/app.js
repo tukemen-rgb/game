@@ -3281,10 +3281,16 @@ async function buildIdxReport() {
 
   const msgs = items.filter((it) => /\.msg$/i.test(it.name));
   lines.push(`.msg: ${msgs.length} 件 (例: ${msgs.slice(0, 4).map((it) => it.base || it.name).join(", ")})`);
+  /* 文言の入れ物 (公開ソースの一覧): 日記・保存画面・出来事・釣り */
+  const CONTAINERS = ["diary.bin", "saveload.bin", "on_mem_event.bin", "fish_on_mem.bin"];
+  const bases = new Set(items.map((it) => (it.base || it.name).toLowerCase()));
+  const found = CONTAINERS.filter((n) => bases.has(n)), missing = CONTAINERS.filter((n) => !bases.has(n));
+  lines.push(`[入れ物] 文言の入れ物: あり ${found.join(", ") || "なし"}` + (missing.length ? ` / 見つからない ${missing.join(", ")}` : ""));
   let okMsg = 0, badMsg = null;
+  const sjisDecode = DECODERS.sjis ? (x) => DECODERS.sjis.decode(x) : null;
   for (const it of msgs.slice(0, 50)) {
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, it.len);
-    if (detectBokuMsg(bytes) || parseBokuMsgTables(bytes)) okMsg++;
+    if (detectBokuMsg(bytes) || parseBokuMsgTables(bytes) || parseBokuMsgRaw(bytes) || parseSjisList(bytes, sjisDecode)) okMsg++;
     else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16) };
   }
   if (msgs.length) {
