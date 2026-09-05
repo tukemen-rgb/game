@@ -220,6 +220,29 @@ def parse_tables(b: bytes) -> list[dict] | None:
     return tables
 
 
+def parse_raw(b: bytes, max_glyph: int = 0x2000) -> list[dict] | None:
+    """見出しの無い並び (日記の雛形・保存画面の文言)。0x8000 で区切られた 2 バイトの本文だけ.
+
+    偶数長で、値の 9 割以上が文字番号か制御コードで、終わりが 1 つ以上あるときだけ読む
+    (ブラウザ側 parseBokuMsgRaw と同じ)."""
+    if len(b) < 4 or len(b) % 2:
+        return None
+    codes = list(struct.unpack_from(f"<{len(b) // 2}H", b, 0))
+    ends = codes.count(0x8000)
+    ok = sum(1 for c in codes if c in (0x8000, 0x8001, 0x8002, 0xCDCD) or c < max_glyph)
+    if not ends or ok < len(codes) * 0.9:
+        return None
+    items, cur, start = [], [], 0
+    for i, c in enumerate(codes):
+        cur.append(c)
+        if c == 0x8000:
+            items.append({"i": len(items), "at": start, "codes": cur})
+            cur, start = [], (i + 1) * 2
+    if cur and any(c not in (0xCDCD, 0) for c in cur):
+        items.append({"i": len(items), "at": start, "codes": cur})
+    return items
+
+
 def voice_id(codes: list[int]) -> str | None:
     if len(codes) != 4:
         return None
@@ -317,7 +340,7 @@ def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> 
                     rows.append((f"{stem}:{tb['i']}-{it['i']}", base_off + tb["off"] + it["at"],
                                  len(it["codes"]) * 2, decode(it["codes"], glyphs)))
         return rows
-    msg = parse_msg(b, 8) or parse_msg(b, 4)
+    msg = parse_msg(b, 8) or parse_msg(b, 4) or parse_raw(b)
     if msg:
         for it in msg:
             if it["codes"] and (keep_voice or not voice_id(it["codes"])):

@@ -871,6 +871,16 @@ class TestBoku2Cli(unittest.TestCase):
             # 単体の .msg
             rows3 = boku2.text_rows(os.path.join(out, "system", "system.msg"), glyphs)
             self.assertEqual([r[3] for r in rows3], ["かき<BR>く", "<WAIT:12>こ"])
+            # 見出しの無い並び (日記の雛形・保存画面の文言): 0x8000 で区切るだけ
+            import struct
+            raw_path = os.path.join(tmp, "diary0.bin")
+            with open(raw_path, "wb") as fh:
+                fh.write(struct.pack("<9H", 5, 6, 0x8001, 7, 0x8000, 0, 1, 0x8000, 0xCDCD))
+            rows4 = boku2.text_rows(raw_path, glyphs)
+            self.assertEqual([r[3] for r in rows4], ["かき<BR>く", "あい"])
+            self.assertEqual(rows4[1][1], 10)
+            self.assertIsNone(boku2.parse_raw(b"\x05\x00\x06\x00"))          # 終わりが無い
+            self.assertIsNone(boku2.parse_raw("普通の文章です。".encode("utf-8")[:16]))
 
             # 文字表は「番号=文字」の対応表でもよい (使われている番号だけ書ける)
             sparse = boku2.parse_glyph_table("5=か\n6 き\n7: く\n9＝こ\n")

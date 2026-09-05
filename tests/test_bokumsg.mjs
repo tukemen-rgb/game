@@ -11,7 +11,7 @@ if (s < 0 || e < 0) { console.error("app.js に bokumsg マーカーが無い");
 const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
-  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable, glyphsToHexTable };")(u32le, u16le);
+  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable, glyphsToHexTable, parseBokuMsgRaw };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -178,6 +178,17 @@ if (tbl.some((l) => l.startsWith("0800="))) fail("無い番号をテーブルに
 if (!tbl.includes("0080={END}") || !tbl.includes("0180=<BR>")) fail("制御コードがテーブルに無い");
 const big = []; big[300] = "亜";
 if (!m.glyphsToHexTable(big).includes("2C01=亜")) fail("256 以上の番号の並びが違う (下位, 上位)");
+/* 10. 見出しの無い並び (0x8000 区切り)。日記の雛形・保存画面の文言 */
+const rawCodes = [5, 6, 0x8001, 7, 0x8000, 0, 1, 0x8000, 0xCDCD];
+const rawBuf = new Uint8Array(rawCodes.length * 2);
+rawCodes.forEach((c, i) => { rawBuf[i * 2] = c & 255; rawBuf[i * 2 + 1] = c >> 8; });
+const raw = m.parseBokuMsgRaw(rawBuf);
+if (!raw || raw.count !== 2) fail(`見出しの無い並びが ${raw && raw.count} 件`);
+if (m.bokuMsgText(raw.items[0].codes, glyphs) !== "かき\nく{END}" || m.bokuMsgText(raw.items[1].codes, glyphs) !== "あい{END}") fail("見出しの無い並びの復号が違う");
+if (raw.items[1].at !== 10) fail(`2 件目の位置が ${raw.items[1].at}`);
+if (m.parseBokuMsgRaw(sjis.subarray(0, sjis.length & ~1))) fail("普通のテキストを見出しの無い並びと誤認した");
+if (m.parseBokuMsgRaw(tim2)) fail("TIM2 を見出しの無い並びと誤認した");
+if (m.parseBokuMsgRaw(new Uint8Array([5, 0, 6, 0]))) fail("終わりの無い並びを通した");
 fs.mkdirSync(path.join(repo, "work"), { recursive: true });
 fs.writeFileSync(path.join(repo, "work", "MSG_EXPORT.tsv"), tsv);
 

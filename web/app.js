@@ -4498,6 +4498,37 @@ function parseBokuMsg(b, stride) {
   return { count: n, stride, items };
 }
 
+/**
+ * 見出しの無い並び (日記の雛形や保存画面の文言。公開ソースの RAW_MSG_FILES)。
+ * 位置表が無く、2 バイトの本文が 0x8000 で区切られて続くだけ。
+ * 誤認しないよう、偶数長で、値の 9 割以上が文字番号か制御コードで、終わりが 1 つ以上あるときだけ
+ */
+function parseBokuMsgRaw(b, maxGlyph) {
+  if (b.length < 4 || (b.length & 1)) return null;
+  const limit = maxGlyph || 0x2000;
+  const n = b.length >> 1;
+  let ok = 0, ends = 0;
+  for (let p = 0; p < b.length; p += 2) {
+    const c = u16le(b, p);
+    if (c === 0x8000) { ends++; ok++; }
+    else if (c === 0x8001 || c === 0x8002 || c === 0xCDCD || c < limit) ok++;
+  }
+  if (!ends || ok < n * 0.9) return null;
+  const items = [];
+  let start = 0, codes = [];
+  for (let p = 0; p < b.length; p += 2) {
+    const c = u16le(b, p);
+    codes.push(c);
+    if (c === 0x8000) {
+      items.push({ i: items.length, at: start, codes });
+      codes = [];
+      start = p + 2;
+    }
+  }
+  if (codes.length && codes.some((c) => c !== 0xCDCD && c !== 0)) items.push({ i: items.length, at: start, codes });
+  return { count: items.length, stride: 0, raw: true, items };
+}
+
 /** 8 バイト刻みと 4 バイト刻みの両方を試す */
 function detectBokuMsg(b) {
   for (const stride of [8, 4]) {
@@ -4698,7 +4729,12 @@ $("msgparse").addEventListener("click", () => {
     }
   }
   if (!r) {
-    note.textContent = "この形では読めませんでした (先頭が「件数 + 位置表」にも「表の数 + 表の一覧」にもなっていない)";
+    /* 見出しの無い並び (日記の雛形・保存画面の文言) */
+    r = parseBokuMsgRaw(state.buf);
+    if (r) tablesInfo = "見出しの無い並び (0x8000 で区切り) · ";
+  }
+  if (!r) {
+    note.textContent = "この形では読めませんでした (先頭が「件数 + 位置表」にも「表の数 + 表の一覧」にもなっておらず、0x8000 区切りの並びでもない)";
     return;
   }
   const glyphText = $("msgglyphs").value;
@@ -4715,7 +4751,7 @@ $("msgparse").addEventListener("click", () => {
   }
   const used = bokuMsgUsed(filled);
   state.usedGlyphs = new Set(used);                            /* TIM2 の目盛りで強調する */
-  note.textContent = tablesInfo + `${r.count} 件 (位置表は ${r.stride} バイト刻み) · 本文あり ${filled.length} 件`
+  note.textContent = tablesInfo + `${r.count} 件` + (r.stride ? ` (位置表は ${r.stride} バイト刻み)` : "") + ` · 本文あり ${filled.length} 件`
     + ` · 文字番号の最大 ${maxCode} · 使われている番号 ${used.length} 種`
     + (glyphs ? ` · 文字表 ${glyphCount} 字` : " · 文字表なし (番号のまま表示)");
 
