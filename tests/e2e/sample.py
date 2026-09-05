@@ -24,6 +24,14 @@ async def main():
         await page.click("#idxrun")
         await page.wait_for_selector("#idxpreview button.btn.primary")
         note = await page.text_content("#idxnote")
+        # 2.5 報告用の要約 (boku2.py check と同じ項目)
+        await page.click("#idxreport")
+        await page.wait_for_function("document.querySelector('#idxreporttext').value.includes('== 結果')", timeout=20000)
+        report = await page.input_value("#idxreporttext")
+        print("report:", report.replace("\n", " | ")[:400])
+        if not ("DFI: 期待どおり" in report and "問題なし" in report and "TIM2 (位置 0x80)" in report
+                and "[MAP] 1 件 / 入れ物として読めた 1 件 / 1 番が会話だった 1 件" in report and "はじめから" not in report):
+            errors.append("report failed")
         # 3. 切り分け
         await page.click("#idxpreview button.btn.primary")
         await page.wait_for_function("document.querySelector('#capnote').textContent.includes('切り分けました')", timeout=30000)

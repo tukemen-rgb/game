@@ -243,7 +243,16 @@
             <select id="idxdata"></select>
           </div>
           <button class="btn primary" id="idxrun">解析する</button>
+          <button class="btn" id="idxreport" hidden>報告用の要約を作る</button>
           <span class="pos" id="idxnote"></span>
+        </div>
+        <div id="idxreportbox" hidden>
+          <p class="hint">索引・本体・.msg・フォント・MAP を診た要約です。本文は含みません。外れた所は → で示すので、そのまま貼って報告できます (一括処理なら <code>python3 tools/boku2.py check フォルダ</code> が同じものを出します)。</p>
+          <div class="controls">
+            <button class="btn" id="idxreportcopy">コピーする</button>
+            <span class="pos" id="idxreportnote"></span>
+          </div>
+          <textarea id="idxreporttext" spellcheck="false" readonly style="min-height:220px;font-size:11.5px"></textarea>
         </div>
         <div class="tablewrap">
           <table>

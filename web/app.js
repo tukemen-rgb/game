@@ -3239,6 +3239,9 @@ $("idxrun").addEventListener("click", async () => {
   }
   state.idxPick = -1;
   const top = state.idxCands[0];
+  $("idxreport").hidden = !(top && top.known === "DFI");
+  $("idxreportbox").hidden = true;
+  state.idxPair = { idxEntry, dataEntry };
   note.textContent = state.idxCands.length
     ? `${idxEntry.name} → ${dataEntry.name} · 候補 ${state.idxCands.length} 件`
       + (top.known ? ` (${top.known} 形式として読みました)`
@@ -3246,6 +3249,101 @@ $("idxrun").addEventListener("click", async () => {
       + (top.dupes ? ` · 同じ名前が ${top.dupes} 件 (~2 を付けて区別。フォルダの入れ子の規則が実物と違うかもしれません)` : "")
     : `${idxEntry.name} からは索引らしい並びが見つかりませんでした`;
   renderIndexCands(dataEntry);
+});
+
+/**
+ * 報告用の要約 (tools/boku2.py check と同じ項目)。本文は出さない。
+ * 索引の読み・.msg の読めた件数・フォントの TIM2 見出し・読み込んである MAP の
+ * 入れ物の読めた件数を並べ、外れた所は → で示す。
+ */
+async function buildIdxReport() {
+  const c = state.idxCands[Math.max(0, state.idxPick)];
+  const { idxEntry, dataEntry } = state.idxPair;
+  const lines = [];
+  let problems = 0;
+  const b = state.idxBuf;
+  lines.push(`== 診断 (構造探査台): ${idxEntry.name} → ${dataEntry.name}`);
+  lines.push(`[索引] ${b.length.toLocaleString()} バイト / 先頭 4 バイト ${[...b.subarray(0, 4)].map((v) => hex(v, 2)).join(" ")}`
+    + (c.known === "DFI" ? " (DFI: 期待どおり)" : " (DFI ではない)"));
+  const items = namedEntries(b, c, dataEntry.size, 100000);
+  const recEnd = 16 + c.count * 16;
+  lines.push(`レコード ${c.count} 件 (名前の置き場は ${hx(recEnd)} から) / ファイル ${items.length} 件 / 名前が付いた ${c.named_ok ?? "?"} 件`
+    + (c.dupes ? ` / 同じ名前 ${c.dupes} 件` : ""));
+  lines.push(`最初の名前: ${items.slice(0, 5).map((it) => it.name).join(" / ")}`);
+  const used = items.reduce((s, it) => s + it.len, 0);
+  lines.push(`[本体] ${dataEntry.size.toLocaleString()} バイト / 索引が指す合計 ${used.toLocaleString()} バイト (${(100 * used / Math.max(1, dataEntry.size)).toFixed(1)}%)`);
+  if ((c.named_ok || 0) < items.length * 0.9) {
+    problems++;
+    lines.push("→ 名前が付かないファイルが多い。名前の置き場の付近:");
+    lines.push("   " + [...b.subarray(recEnd, recEnd + 64)].map((v) => hex(v, 2)).join(" "));
+  }
+  if (c.dupes) { problems++; lines.push("→ 同じ名前があります。フォルダの入れ子の規則が実物と違うかもしれません (docs/09 #18)"); }
+
+  const msgs = items.filter((it) => /\.msg$/i.test(it.name));
+  lines.push(`.msg: ${msgs.length} 件 (例: ${msgs.slice(0, 4).map((it) => it.base || it.name).join(", ")})`);
+  let okMsg = 0, badMsg = null;
+  for (const it of msgs.slice(0, 50)) {
+    const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, it.len);
+    if (detectBokuMsg(bytes) || parseBokuMsgTables(bytes)) okMsg++;
+    else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16) };
+  }
+  if (msgs.length) {
+    lines.push(`  先頭 ${Math.min(50, msgs.length)} 件のうち読めた形: ${okMsg} 件`);
+    if (badMsg) { problems++; lines.push(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト ${[...badMsg.head].map((v) => hex(v, 2)).join(" ")}`); }
+  }
+  for (const it of items.filter((x) => /font/i.test(x.base || x.name)).slice(0, 3)) {
+    /* 見出しの検証は画素の長さまで見るので、ファイル全体を読む (フォントは数百 KB) */
+    const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, Math.min(it.len, 4 * 1024 * 1024));
+    const at = findTim2(bytes);
+    const t = at >= 0 ? parseTim2(bytes, at) : null;
+    if (t) {
+      const p = t.pictures[0];
+      lines.push(`[フォント] ${it.name}: TIM2 (位置 ${hx(at)}) ${p.width}×${p.height} 画素の種類 ${p.imageType} パレット ${p.clutColors} 色`);
+    } else {
+      problems++;
+      lines.push(`→ [フォント] ${it.name} は TIM2 として読めません。先頭 16 バイト ${[...bytes.subarray(0, 16)].map((v) => hex(v, 2)).join(" ")}`);
+    }
+  }
+
+  /* 読み込んである MAP のファイル (索引と本体以外の、部品でないもの) */
+  const maps = state.entries.filter((e) => e.kind !== "part" && e !== idxEntry && e !== dataEntry
+    && !/\.(idx|img|cnf|crc)$/i.test(e.name) && e.size > 16 && e.size < 8 * 1024 * 1024
+    && (/\/map\//i.test("/" + e.path) || /^m_[a-z]\d/i.test(e.name)));
+  if (maps.length) {
+    let okMap = 0, okTalk = 0, talkLines = 0;
+    const bad = [];
+    for (const e of maps.slice(0, 200)) {
+      const bytes = await readRange(e.file, e.offset, e.size);
+      const m = parseBokuMap(bytes);
+      if (!m) { bad.push(`${e.name}: ${[...bytes.subarray(0, 16)].map((v) => hex(v, 2)).join(" ")}`); continue; }
+      okMap++;
+      const one = m.items.find((x) => x.i === 1 && x.len);
+      if (one) {
+        const mt = parseBokuMsgTables(bytes.subarray(one.at, one.at + one.len));
+        if (mt) { okTalk++; for (const tb of mt.tables) if (tb.msg) talkLines += tb.msg.items.filter((x) => x.codes.length).length; }
+      }
+    }
+    lines.push(`[MAP] ${maps.length} 件 / 入れ物として読めた ${okMap} 件 / 1 番が会話だった ${okTalk} 件 / 会話 ${talkLines.toLocaleString()} 行`);
+    if (bad.length) { problems++; lines.push("→ 入れ物として読めないファイルの例 (名前: 先頭 16 バイト):"); for (const x of bad.slice(0, 5)) lines.push("   " + x); }
+  } else {
+    lines.push("[MAP] 読み込んでいません (MAP フォルダのファイルも一緒に読むと診られます)");
+  }
+  lines.push("== 結果: " + (problems ? `確認事項 ${problems} 件 (上の → の行)。この出力ごと報告してください` : "問題なし。docs/10 の手順へ"));
+  return lines.join("\n");
+}
+
+$("idxreport").addEventListener("click", async () => {
+  const box = $("idxreportbox");
+  box.hidden = false;
+  $("idxreporttext").value = "診ています…";
+  $("idxreporttext").value = await buildIdxReport();
+});
+$("idxreportcopy").addEventListener("click", async () => {
+  const ta = $("idxreporttext");
+  let ok = false;
+  try { await navigator.clipboard.writeText(ta.value); ok = true; }
+  catch (err) { try { ta.readOnly = false; ta.select(); ok = document.execCommand("copy"); ta.readOnly = true; } catch (e2) { ok = false; } }
+  $("idxreportnote").textContent = ok ? "コピーしました" : "コピーできませんでした。枠の中を選んで手でコピーしてください";
 });
 
 /* @extract-start named-index */
