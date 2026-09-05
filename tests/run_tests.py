@@ -827,6 +827,24 @@ class TestBoku2Cli(unittest.TestCase):
                 with open(os.path.join(out, *path.split("/")), "rb") as fh:
                     self.assertEqual(fh.read(), data, path)
 
+            # 索引の名前を信用しない: 出力先の外に書かない
+            self.assertEqual(boku2.safe_parts("../../evil.bin"), ["evil.bin"])
+            self.assertEqual(boku2.safe_parts("/abs/x.msg"), ["abs", "x.msg"])
+            self.assertEqual(boku2.safe_parts("a\\b\\c.tm2"), ["a", "b", "c.tm2"])
+            self.assertEqual(boku2.safe_parts("dir/na:me*.bin"), ["dir", "na_me_.bin"])
+            self.assertEqual(boku2.safe_parts("..//"), ["_"])
+            hostile = [(True, 1, "/", None)] + \
+                [(False, 0 if i == 8 else 1, "../h%d.bin" % i, b"\x55" * 8) for i in range(9)]
+            h_idx, h_img, _ = self.build_dfi(hostile)
+            h_dir = os.path.join(tmp, "H")
+            with open(os.path.join(tmp, "H.IDX"), "wb") as fh:
+                fh.write(h_idx)
+            with open(os.path.join(tmp, "H.IMG"), "wb") as fh:
+                fh.write(h_img)
+            boku2.unpack(os.path.join(tmp, "H.IDX"), os.path.join(tmp, "H.IMG"), h_dir)
+            self.assertTrue(os.path.exists(os.path.join(h_dir, "h0.bin")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "h0.bin")))
+
             # 同じ道筋が二度出ても上書きしない (~2 を付ける)。ブラウザ側と同じ規則
             dup_tree = [(True, 1, "/", None), (True, 1, "d", None)] + \
                 [(False, 0 if i == 8 else 1, "same.bin", bytes([i]) * 10) for i in range(9)]

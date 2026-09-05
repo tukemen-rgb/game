@@ -89,6 +89,17 @@ def read_dfi(idx: bytes, data_size: int) -> list[dict]:
     return entries
 
 
+def safe_parts(path: str) -> list[str]:
+    """索引の名前をそのままフォルダ名に使うと、'..' や '\\' で出力先の外に書いてしまう。
+    索引は信用しない: 区切りを揃え、上に戻る部品と空の部品を落とし、危ない文字は _ にする."""
+    parts = []
+    for part in path.replace("\\", "/").split("/"):
+        if part in ("", ".", ".."):
+            continue
+        parts.append("".join(c if c.isalnum() or c in "._-~#()+" else "_" for c in part))
+    return parts or ["_"]
+
+
 def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
     with open(idx_path, "rb") as fh:
         idx = fh.read()
@@ -100,7 +111,7 @@ def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
               "フォルダの入れ子の規則が実物と違うかもしれません", file=sys.stderr)
     with open(img_path, "rb") as img:
         for e in entries:
-            dest = os.path.join(out_dir, *e["path"].split("/"))
+            dest = os.path.join(out_dir, *safe_parts(e["path"]))
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             img.seek(e["at"])
             with open(dest, "wb") as fo:
