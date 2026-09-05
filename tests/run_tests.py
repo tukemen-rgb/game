@@ -1180,6 +1180,53 @@ class TestDocs(unittest.TestCase):
             ran += 1
         self.assertGreaterEqual(ran, 12)
 
+    def test_recipe_commands_actually_run(self):
+        """docs/10 の bash ブロックのコマンドを、`実物/` を練習データに置き換えて順に実行する.
+
+        手順書のコマンドが本当に通ることを見張る (#35 の README 版)。"""
+        import re
+        import shlex
+        import subprocess
+        import make_boku2_sample
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "BOKU2SAMPLE")
+            make_boku2_sample.build_sample(sample)
+            subst = {
+                "実物/": sample + "/",
+                "work/BOKU2SAMPLE": sample,
+                " OUT/": f" {tmp}/OUT/", " OUT ": f" {tmp}/OUT ",
+                "-f font.txt": f"-f {sample}/font.txt",
+                "fontlist font.txt": f"fontlist {sample}/font.txt",
+                "table font.txt": f"table {sample}/font.txt",
+                "all.tsv": f"{tmp}/all.tsv",
+                "font_chars.txt": f"{tmp}/font_chars.txt",
+                "boku2.tbl": f"{tmp}/boku2.tbl",
+                "system.msg --table": f"{tmp}/OUT/system/system.msg --table",
+            }
+            ran = 0
+            for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+                cur = ""
+                for line in block.split("\n"):
+                    line = line.split("#", 1)[0].rstrip()
+                    if not line.strip():
+                        continue
+                    cur += line.rstrip("\\") + (" " if line.endswith("\\") else "")
+                    if line.endswith("\\"):
+                        continue
+                    cmd, cur = cur.strip(), ""
+                    if not cmd.startswith("python3 tools/") or "make_boku2_sample.py" in cmd:
+                        continue
+                    for k, v in subst.items():
+                        cmd = cmd.replace(k, v)
+                    shell_cmd = shlex.quote(sys.executable) + cmd[len("python3"):]
+                    res = subprocess.run(shell_cmd, shell=True, capture_output=True, text=True, cwd=REPO)
+                    self.assertEqual(res.returncode, 0, f"{cmd}\n{res.stdout[-800:]}\n{res.stderr[-800:]}")
+                    ran += 1
+            self.assertGreaterEqual(ran, 5)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "all.tsv")))
+
     def test_recipe_commands_use_existing_tools(self):
         import re
         with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
