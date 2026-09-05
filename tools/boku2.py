@@ -4,6 +4,7 @@
 ブラウザの構造探査台と同じ読み方 (web/app.js の named-index / bokumsg ブロック) を
 Python にしたもの。画面で 1 つずつ確かめた後、全部をまとめて処理するのに使う。
 
+    python3 tools/boku2.py check 吸い出したフォルダ/                 # まず診断 (報告用の要約)
     python3 tools/boku2.py unpack BOKU2.IDX BOKU2.IMG OUT/        # 索引で本体を切り分ける
     python3 tools/boku2.py maps MAP/*.* -o OUT/maps               # マップの入れ物を部品にする
     python3 tools/boku2.py text OUT/system/system.msg OUT/maps/*/1.bin -f font.txt -o out.tsv
@@ -371,6 +372,135 @@ def glyph_table_mapping(glyphs: list) -> dict[bytes, str]:
     return mapping
 
 
+def tim2_info(b: bytes) -> dict | None:
+    """TIM2 の見出しだけ読む (ブラウザ側 parseTim2 の要点)。.tms の 0x80 前置きも見る."""
+    for at in (0, 0x80, 0x10, 0x20, 0x40):
+        if b[at:at + 4] == b"TIM2":
+            fmt, count = b[at + 5], struct.unpack_from("<H", b, at + 6)[0]
+            p = at + (0x80 if fmt else 0x10)
+            if p + 24 > len(b):
+                return {"at": at, "format": fmt, "count": count}
+            clut_colors = struct.unpack_from("<H", b, p + 14)[0]
+            clut_type, image_type = b[p + 18], b[p + 19]
+            w, h = struct.unpack_from("<HH", b, p + 20)
+            return {"at": at, "format": fmt, "count": count, "width": w, "height": h,
+                    "image_type": image_type, "clut_type": clut_type, "clut_colors": clut_colors}
+    return None
+
+
+def check(folder: str, out=sys.stdout) -> int:
+    """吸い出したフォルダを一通り診て、報告用の要約を出す (ゲームの本文は出さない).
+
+    docs/10 の手順に入る前に走らせる。ここで外れた所が、次の手がかりになる。"""
+    def say(s=""):
+        out.write(s + "\n")
+
+    problems = 0
+    idx_path = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "boku2.idx"), None)
+    img_path = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "boku2.img"), None)
+    map_dir = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "map"), None)
+    say(f"== 診断: {folder}")
+    say(f"BOKU2.IDX: {'あり' if idx_path else '無い'} / BOKU2.IMG: {'あり' if img_path else '無い'} / MAP/: {'あり' if map_dir else '無い'}")
+    if not (idx_path and img_path):
+        say("→ 索引と本体が揃っていません。吸い出したフォルダの直下を指定してください")
+        return 1
+
+    with open(idx_path, "rb") as fh:
+        idx = fh.read()
+    img_size = os.path.getsize(img_path)
+    say(f"\n[索引] {len(idx):,} バイト / 先頭 4 バイト {idx[:4].hex(' ').upper()}"
+        + (" (DFI: 期待どおり)" if idx[:4] == b"DFI\0" else " (DFI ではない!)"))
+    if idx[:4] != b"DFI\0":
+        say("→ 先頭が DFI でないので、この道具の索引の読みは使えません。先頭 64 バイトを報告してください")
+        say("   " + idx[:64].hex(" ").upper())
+        return 1
+    rec_end = 16
+    while rec_end + 16 <= len(idx) and (idx[rec_end] | (idx[rec_end + 1] << 8)) in (0, 1):
+        rec_end += 16
+    entries = read_dfi(idx, img_size)
+    rec_count = (rec_end - 16) // 16
+    named = sum(1 for e in entries if not os.path.basename(e["path"]).startswith("#"))
+    dupes = sum(1 for e in entries if "~" in os.path.basename(e["path"]))
+    used = sum(e["len"] for e in entries)
+    first_names = []
+    q = rec_end
+    while len(first_names) < 6 and q < len(idx):
+        e = idx.find(b"\0", q)
+        if e < 0:
+            break
+        first_names.append(idx[q:e].decode("ascii", "replace"))
+        q = e + 1
+    say(f"レコード {rec_count} 件 (名前の置き場は 0x{rec_end:X} から) / ファイル {len(entries)} 件 / 名前が付いた {named} 件"
+        + (f" / 同じ名前 {dupes} 件" if dupes else ""))
+    say(f"最初の名前: {' / '.join(first_names)}")
+    say(f"[本体] {img_size:,} バイト / 索引が指す合計 {used:,} バイト ({100 * used / max(1, img_size):.1f}%)")
+    if named < len(entries) * 0.9:
+        problems += 1
+        say("→ 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください")
+        say("   " + idx[rec_end:rec_end + 64].hex(" ").upper())
+    if dupes:
+        problems += 1
+        say("→ 同じ名前があります。フォルダの入れ子の規則が実物と違うかもしれません (docs/09 #18)")
+    msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
+    fonts = [e for e in entries if "font" in os.path.basename(e["path"]).lower()]
+    say(f".msg: {len(msgs)} 件 (例: {', '.join(os.path.basename(e['path']) for e in msgs[:4])})")
+
+    with open(img_path, "rb") as img:
+        ok_msg = 0
+        for e in msgs[:50]:
+            img.seek(e["at"])
+            b = img.read(e["len"])
+            if parse_msg(b, 8) or parse_msg(b, 4) or parse_tables(b):
+                ok_msg += 1
+        if msgs:
+            say(f"  先頭 {min(50, len(msgs))} 件のうち読めた形: {ok_msg} 件")
+            if ok_msg < min(50, len(msgs)):
+                problems += 1
+                bad = next(e for e in msgs[:50] if not (
+                    (img.seek(e["at"]) or True) and (lambda b: parse_msg(b, 8) or parse_msg(b, 4) or parse_tables(b))(img.read(e["len"]))))
+                img.seek(bad["at"])
+                say(f"→ 読めない .msg の例: {bad['path']} 先頭 16 バイト {img.read(16).hex(' ').upper()}")
+        for e in fonts[:3]:
+            img.seek(e["at"])
+            info = tim2_info(img.read(min(e["len"], 0x100)))
+            if info:
+                say(f"[フォント] {e['path']}: TIM2 (位置 0x{info['at']:X}) "
+                    + (f"{info.get('width')}×{info.get('height')} 画素の種類 {info.get('image_type')} パレット {info.get('clut_colors')} 色" if "width" in info else ""))
+            else:
+                problems += 1
+                img.seek(e["at"])
+                say(f"→ [フォント] {e['path']} は TIM2 として読めません。先頭 16 バイト {img.read(16).hex(' ').upper()}")
+
+    if map_dir:
+        files = sorted(os.listdir(map_dir))
+        ok_map, ok_talk, lines, bad_examples = 0, 0, 0, []
+        for name in files:
+            p = os.path.join(map_dir, name)
+            if not os.path.isfile(p):
+                continue
+            with open(p, "rb") as fh:
+                b = fh.read()
+            items = parse_map(b)
+            if not items:
+                bad_examples.append((name, b[:16].hex(" ").upper()))
+                continue
+            ok_map += 1
+            one = next((it for it in items if it["i"] == 1 and it["len"]), None)
+            if one:
+                tables = parse_tables(b[one["at"]:one["at"] + one["len"]])
+                if tables:
+                    ok_talk += 1
+                    lines += sum(1 for t in tables if t["msg"] for it in t["msg"] if it["codes"])
+        say(f"\n[MAP] {len(files)} 件 / 入れ物として読めた {ok_map} 件 / 1 番が会話だった {ok_talk} 件 / 会話 {lines:,} 行")
+        if bad_examples:
+            problems += 1
+            say("→ 入れ物として読めないファイルの例 (名前: 先頭 16 バイト):")
+            for name, head in bad_examples[:5]:
+                say(f"   {name}: {head}")
+    say("\n== 結果: " + ("問題なし。docs/10 の手順へ" if not problems else f"確認事項 {problems} 件 (上の → の行)。この出力ごと報告してください"))
+    return 1 if problems else 0
+
+
 def write_tsv(rows, out) -> None:
     out.write("id\toffset\tsize\toriginal\ttranslation\n")
     for rid, off, size, text in rows:
@@ -396,7 +526,12 @@ def main(argv=None) -> int:
     p.add_argument("files", nargs="+")
     p = sub.add_parser("table", help="文字表を docs/01 の .tbl (16進=文字) にする。hexdump.py --table で使える")
     p.add_argument("font"); p.add_argument("-o", "--out", required=True)
+    p = sub.add_parser("check", help="吸い出したフォルダを診て、報告用の要約を出す (最初に走らせる)")
+    p.add_argument("folder")
     args = ap.parse_args(argv)
+
+    if args.cmd == "check":
+        return check(args.folder)
 
     if args.cmd == "unpack":
         n = unpack(args.idx, args.img, args.out)

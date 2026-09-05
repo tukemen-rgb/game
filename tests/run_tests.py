@@ -976,6 +976,26 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertEqual(map_texts, sorted(t for s in ["M_A01000", "M_A02000"] for _, t in answer[s]
                                                if not t.startswith("<VOICE:")))
 
+            # 診断: 練習データは問題なし。壊したものは → で場所を示す
+            res = run("check", sample)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn("DFI: 期待どおり", res.stdout)
+            self.assertIn("問題なし", res.stdout)
+            self.assertIn("[フォント] system/bk_font.tms: TIM2 (位置 0x80)", res.stdout)
+            self.assertIn("1 番が会話だった 2 件", res.stdout)
+            self.assertNotIn("はじめから", res.stdout)          # 本文は出さない
+            broken = os.path.join(tmp, "BROKEN")
+            shutil.copytree(sample, broken)
+            with open(os.path.join(broken, "MAP", "M_A01000.BIN"), "r+b") as fh:
+                fh.write(b"\xff" * 16)
+            res = run("check", broken)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("M_A01000.BIN: FF FF", res.stdout)
+            self.assertIn("確認事項", res.stdout)
+            res = run("check", tmp)                            # 索引が無いフォルダ
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("揃っていません", res.stdout)
+
             # フォント一覧 → 校正 (フォントに無い文字の検査つき) が通る
             fl = os.path.join(tmp, "font_chars.txt")
             res = run("fontlist", os.path.join(sample, "font.txt"), "-o", fl)
