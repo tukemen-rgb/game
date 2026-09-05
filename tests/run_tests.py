@@ -1147,6 +1147,39 @@ class TestDocs(unittest.TestCase):
         with open(targets[1], encoding="utf-8") as fh:
             self.assertIn("文字テーブル", fh.read())
 
+    def test_readme_quickstart_actually_runs(self):
+        """README の「3 分で一周する」のコマンドを、書いてあるとおりに順に実行して通ること.
+
+        コマンドを書き換えたのに README が古いまま、という食い違いを機械で見張る。
+        `open`/`python3 tests/` の行は飛ばし、work/ に書くものはそのまま work/ に書く."""
+        import re
+        import shlex
+        import subprocess
+        with open(os.path.join(REPO, "README.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        block = re.search(r"## 3 分で一周する.*?```bash\n(.*?)```", text, re.S)
+        self.assertIsNotNone(block)
+        cmds, cur = [], ""
+        for line in block.group(1).split("\n"):
+            line = line.split("#", 1)[0].rstrip()
+            if not line.strip():
+                continue
+            cur += line.rstrip("\\") + (" " if line.endswith("\\") else "")
+            if not line.endswith("\\"):
+                cmds.append(cur.strip())
+                cur = ""
+        ran = 0
+        for cmd in cmds:
+            if not cmd.startswith("python3 tools/") or "make_viewer.py" in cmd:
+                continue                                    # ブラウザで開くだけの生成物は飛ばす
+            # README は shell 前提 (パイプ・* の展開)。python3 だけ、このテストの python に差し替える
+            shell_cmd = shlex.quote(sys.executable) + cmd[len("python3"):]
+            res = subprocess.run(shell_cmd, shell=True, capture_output=True, text=True, cwd=REPO)
+            ok = (0, 1) if "proofread.py" in cmd else (0,)   # 校正は指摘があると 1 で終わる (題材が不具合入り)
+            self.assertIn(res.returncode, ok, f"{cmd}\n{res.stdout[-800:]}\n{res.stderr[-800:]}")
+            ran += 1
+        self.assertGreaterEqual(ran, 12)
+
     def test_recipe_commands_use_existing_tools(self):
         import re
         with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
