@@ -542,6 +542,18 @@ def check(folder: str, out=sys.stdout) -> int:
     say(f"BOKU2.IDX: {'あり' if idx_path else '無い'} / BOKU2.IMG: {'あり' if img_path else '無い'} / MAP/: {'あり' if map_dir else '無い'}")
     if not (idx_path and img_path):
         say("→ 索引と本体が揃っていません。吸い出したフォルダの直下を指定してください")
+        # よくある間違いを 2 つ見分ける: ISO のまま / 一段深いフォルダに入っている
+        names = sorted(os.listdir(folder))
+        images = [n for n in names if n.lower().endswith((".iso", ".bin", ".img", ".cue", ".mdf", ".nrg"))
+                  and os.path.isfile(os.path.join(folder, n)) and n.lower() not in ("boku2.img",)]
+        if images:
+            say(f"   ディスクイメージのまま ({', '.join(images[:3])}) のようです。"
+                "先に 7-Zip などで展開して、中の BOKU2.IDX / BOKU2.IMG / MAP のあるフォルダを指定してください (docs/05)")
+        for n in names:
+            sub = os.path.join(folder, n)
+            if os.path.isdir(sub) and any(m.lower() == "boku2.idx" for m in os.listdir(sub)):
+                say(f"   一段下の {n}/ に BOKU2.IDX があります。そちらを指定してください: boku2.py check {sub}")
+                break
         return 1
 
     with open(idx_path, "rb") as fh:
@@ -699,7 +711,8 @@ def run(args) -> int:
     elif args.cmd == "text":
         glyphs = load_font(args.font)
         rows = []
-        for f in expand_inputs(expand_patterns(args.files)):
+        files = expand_inputs(expand_patterns(args.files))
+        for f in files:
             rows += text_rows(f, glyphs, args.keep_voice)
         if args.out:
             # BOM 付き UTF-8: Excel でそのまま開いても日本語が化けない
@@ -708,6 +721,15 @@ def run(args) -> int:
             print(f"{len(rows)} 行 → {args.out}" + ("" if glyphs else " (文字表なし: 番号のまま)"))
         else:
             write_tsv(rows, sys.stdout)
+        if glyphs:
+            # 文字表が短い / 抜けがあると本文に [番号] が残る。どの番号か数えて知らせる
+            missing = [u for u in used_codes(files) if u >= len(glyphs) or glyphs[u] is None]
+            if missing:
+                print(f"文字表に無い番号: {len(missing)} 種 (例: {' '.join(str(u) for u in missing[:12])}"
+                      f"{' …' if len(missing) > 12 else ''})。本文ではこの番号が [番号] のまま残っています。"
+                      f"フォント画像のこの番号の文字を文字表に足してください", file=sys.stderr)
+            else:
+                print(f"文字表で全部読めました (使われている番号 {len(used_codes(files))} 種)", file=sys.stderr)
     elif args.cmd == "used":
         used = used_codes(expand_patterns(args.files))
         print(" ".join(str(u) for u in used))

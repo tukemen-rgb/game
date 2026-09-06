@@ -853,6 +853,52 @@ class TestBoku2Cli(unittest.TestCase):
                 fh.write("00=あ\n01=い\n")
             self.assertEqual(scrp.load_table(tbl).by_bytes[b"\x00"], "あ")
 
+    def test_helpful_messages_for_common_mistakes(self):
+        """初めての人がよく踏む 3 つに、次の一手が分かる文言を出すこと.
+
+        1) 文字表が短くて本文に [番号] が残る → どの番号が無いかを数えて知らせる
+        2) check に ISO のままのフォルダを渡す → 展開してから、と言う
+        3) check に一段上のフォルダを渡す → 中のフォルダ名を言う"""
+        import contextlib
+        import io
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            out = os.path.join(tmp, "OUT")
+            boku2.main(["unpack", os.path.join(sample, "BOKU2.IDX"), os.path.join(sample, "BOKU2.IMG"), out])
+            # 1) 文字表を先頭 3 字だけにする
+            with open(os.path.join(sample, "font.txt"), encoding="utf-8") as fh:
+                full = fh.read()
+            short = os.path.join(tmp, "short.txt")
+            with open(short, "w", encoding="utf-8") as fh:
+                fh.write("".join(boku2.parse_glyph_table(full)[:3]))
+            err, outbuf = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(outbuf), contextlib.redirect_stderr(err):
+                rc = boku2.main(["text", out, "-f", short, "-o", os.path.join(tmp, "a.tsv")])
+            self.assertEqual(rc, 0)
+            self.assertIn("文字表に無い番号", err.getvalue())
+            self.assertRegex(err.getvalue(), r"文字表に無い番号: \d+ 種 \(例: \d+")
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                boku2.main(["text", out, "-f", os.path.join(sample, "font.txt"), "-o", os.path.join(tmp, "b.tsv")])
+            self.assertIn("文字表で全部読めました", err.getvalue())
+            # 2) ISO のまま
+            iso_dir = os.path.join(tmp, "disc")
+            os.makedirs(iso_dir)
+            with open(os.path.join(iso_dir, "BOKU2.iso"), "wb") as fh:
+                fh.write(b"\0" * 4096)
+            buf = io.StringIO()
+            self.assertEqual(boku2.check(iso_dir, out=buf), 1)
+            self.assertIn("ディスクイメージのまま", buf.getvalue())
+            self.assertIn("docs/05", buf.getvalue())
+            # 3) 一段上
+            buf = io.StringIO()
+            self.assertEqual(boku2.check(tmp, out=buf), 1)
+            self.assertIn("一段下の S/", buf.getvalue())
+
     def test_excel_round_trip(self):
         """Excel で開いて直して保存し直す往復が、どの保存形式でも壊れないこと.
 
