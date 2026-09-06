@@ -11,6 +11,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -1389,6 +1390,97 @@ class TestDocs(unittest.TestCase):
         self.assertIn("tools/make_boku2_sample.py", tools)
         for t in tools:
             self.assertTrue(os.path.exists(os.path.join(REPO, t)), t)
+
+
+class TestDamagedData(unittest.TestCase):
+    """壊れたデータでも、診断と抽出が追跡表示 (Traceback) で止まらないこと.
+
+    実物は練習データと違う所が必ずある。索引・本体・MAP のどれかを壊した状態で
+    check と text を走らせ、「読めない」と報告するか空を返すかのどちらかであること
+    (Python の例外で落ちないこと) を、乱数の種を固定して何通りも確かめる."""
+
+    MUTATIONS = ("truncate", "flip", "zero", "empty", "garbage_head")
+
+    @staticmethod
+    def mutate(data: bytes, how: str, rnd) -> bytes:
+        if not data:
+            return data
+        if how == "truncate":
+            return data[:rnd.randrange(0, len(data))]
+        if how == "flip":
+            b = bytearray(data)
+            for _ in range(max(1, len(b) // 100)):
+                i = rnd.randrange(len(b))
+                b[i] ^= rnd.randrange(1, 256)
+            return bytes(b)
+        if how == "zero":
+            b = bytearray(data)
+            a = rnd.randrange(len(b))
+            n = rnd.randrange(1, min(len(b) - a, 512) + 1)
+            b[a:a + n] = b"\0" * n
+            return bytes(b)
+        if how == "empty":
+            return b""
+        if how == "garbage_head":
+            return bytes(rnd.randrange(256) for _ in range(min(64, len(data)))) + data[64:]
+        raise AssertionError(how)
+
+    def test_check_and_text_survive_damage(self):
+        import io
+        import random
+        import shutil
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            clean = os.path.join(tmp, "clean")
+            make_boku2_sample.build_sample(clean)
+            targets = ["BOKU2.IDX", "BOKU2.IMG"] + [os.path.join("MAP", n) for n in sorted(os.listdir(os.path.join(clean, "MAP")))]
+            allowed = (ValueError, struct.error, OSError)      # 入口 (main) が 1 行で報告する種類
+            seed = 0
+            verdicts = {0: 0, 1: 0}
+            for target in targets:
+                for how in self.MUTATIONS:
+                    for _ in range(8):
+                        seed += 1
+                        rnd = random.Random(seed)
+                        folder = os.path.join(tmp, f"case{seed}")
+                        shutil.copytree(clean, folder)
+                        p = os.path.join(folder, target)
+                        with open(p, "rb") as fh:
+                            data = fh.read()
+                        with open(p, "wb") as fh:
+                            fh.write(self.mutate(data, how, rnd))
+                        label = f"seed {seed}: {target} を {how}"
+                        with self.subTest(case=label):
+                            out = io.StringIO()
+                            try:
+                                rc = boku2.check(folder, out=out)
+                            except allowed:
+                                rc = 1
+                            except Exception as exc:                   # noqa: BLE001
+                                self.fail(f"{label}: check が {type(exc).__name__}: {exc}")
+                            self.assertIn(rc, (0, 1), label)
+                            verdicts[rc] += 1
+                            # 抽出も同じ: 読めないなら空、壊れているなら報告される種類の例外
+                            files = [os.path.join(folder, "MAP", n) for n in sorted(os.listdir(os.path.join(folder, "MAP")))]
+                            out_dir = os.path.join(folder, "OUT")
+                            try:
+                                boku2.unpack(os.path.join(folder, "BOKU2.IDX"), os.path.join(folder, "BOKU2.IMG"), out_dir)
+                                files += boku2.expand_inputs([out_dir])
+                            except allowed:
+                                pass
+                            for f in files:
+                                try:
+                                    boku2.text_rows(f, None)
+                                    boku2.text_rows(f, list("あいうえおかきくけこ"), keep_voice=True)
+                                except allowed:
+                                    pass
+                                except Exception as exc:               # noqa: BLE001
+                                    self.fail(f"{label}: text_rows({os.path.relpath(f, folder)}) が {type(exc).__name__}: {exc}")
+                        shutil.rmtree(folder)
+            # 壊し方が効いていること (全部「問題なし」なら試験になっていない)
+            self.assertGreater(verdicts[1], len(targets) * len(self.MUTATIONS), verdicts)
 
 
 class TestOtherPythons(unittest.TestCase):
