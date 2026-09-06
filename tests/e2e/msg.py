@@ -31,10 +31,20 @@ async def main():
         await page.wait_for_timeout(200)
         note1 = await page.text_content("#msgnote")
         rows1 = await page.eval_on_selector_all("#msgbox tbody tr", "els => els.map(e => e.textContent)")
+        # 短い文字表 (0〜4 番だけ) → 使われている 5,6,7,9 が「文字表に無い番号」として数えられる
+        await page.fill("#msgglyphs", "あいうえお")
+        await page.click("#msgparse")
+        await page.wait_for_timeout(200)
+        note_short = await page.text_content("#msgnote")
+        print("note_short:", note_short)
+        if "文字表に無い番号 4 種 (例: 5 6 7 9)" not in note_short:
+            errors.append("missing-glyph count failed: " + note_short)
         await page.fill("#msgglyphs", "あいうえお\nかきくけこ")
         await page.click("#msgparse")
         await page.wait_for_timeout(200)
         note2 = await page.text_content("#msgnote")
+        if "文字表で全部読める" not in note2:
+            errors.append("full-table note failed: " + note2)
         rows2 = await page.eval_on_selector_all("#msgbox tbody td:nth-child(4)", "els => els.map(e => e.textContent)")
         await page.click("#msgtsv")
         await page.wait_for_timeout(100)

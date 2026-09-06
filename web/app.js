@@ -4802,9 +4802,14 @@ $("msgparse").addEventListener("click", () => {
   }
   const used = bokuMsgUsed(filled);
   state.usedGlyphs = new Set(used);                            /* TIM2 の目盛りで強調する */
+  /* 文字表に無い番号 (本文に [番号] のまま残るもの)。目盛りでは橙で示し、まずそこを書き出せばよい */
+  const missing = glyphs ? used.filter((c) => glyphs[c] === undefined || glyphs[c] === null) : [];
+  state.missingGlyphs = new Set(missing);
   note.textContent = tablesInfo + `${r.count} 件` + (r.stride ? ` (位置表は ${r.stride} バイト刻み)` : "") + ` · 本文あり ${filled.length} 件`
     + ` · 文字番号の最大 ${maxCode} · 使われている番号 ${used.length} 種`
-    + (glyphs ? ` · 文字表 ${glyphCount} 字` : " · 文字表なし (番号のまま表示)");
+    + (glyphs
+      ? ` · 文字表 ${glyphCount} 字` + (missing.length ? ` · 文字表に無い番号 ${missing.length} 種 (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""})` : " · 文字表で全部読める")
+      : " · 文字表なし (番号のまま表示)");
 
   /* 書き出す手間を減らす: 使われている番号だけ、「番号=」の雛形で並べる。
      文字を埋めて上の欄に貼れば、その番号だけの文字表として読める */
@@ -5228,11 +5233,13 @@ function renderTim2(b, at) {
       g.textBaseline = "top";
       let n = 0;
       const usedSet = state.usedGlyphs || null;
+      const missingSet = state.missingGlyphs || null;
       for (let y = oy; y + ch <= pic.height; y += ch) {
         for (let x = ox; x + cw <= pic.width; x += cw) {
           const isUsed = usedSet && usedSet.has(n);
-          g.strokeStyle = isUsed ? "rgba(60,200,120,.9)" : "rgba(255,80,40,.5)";
-          g.lineWidth = isUsed ? 2 : 1;
+          const isMissing = missingSet && missingSet.has(n);
+          g.strokeStyle = isMissing ? "rgba(255,170,40,.95)" : isUsed ? "rgba(60,200,120,.9)" : "rgba(255,80,40,.5)";
+          g.lineWidth = isUsed || isMissing ? 2 : 1;
           g.strokeRect(x * z + .5, y * z + .5, cw * z, ch * z);
           const label = String(n++);
           const tw = g.measureText(label).width + 3;
@@ -5241,7 +5248,8 @@ function renderTim2(b, at) {
         }
       }
       hint.textContent = `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の 0 から順に文字を書き出して、.msg 読みの文字表に貼ってください。`
-        + (usedSet && usedSet.size ? ` 緑の枠は、直前に読んだ .msg で使われている ${usedSet.size} 字 (まずここだけ書き出せば読めます)。` : "");
+        + (usedSet && usedSet.size ? ` 緑の枠は、直前に読んだ .msg で使われている ${usedSet.size} 字 (まずここだけ書き出せば読めます)。` : "")
+        + (missingSet && missingSet.size ? ` 橙の枠は、そのうち文字表にまだ無い ${missingSet.size} 字 (本文で [番号] のまま残る所)。` : "");
     }
   };
   for (const el of [zoomIn, cwIn, chIn, oxIn, oyIn]) el.addEventListener("input", draw);
