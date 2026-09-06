@@ -169,6 +169,10 @@ if (used.join(",") !== "0,1,5,6,7,9") fail(`使われている番号が ${used.j
 /* 8. 文字表の 2 つの書き方: 並び / 番号=文字 の対応表 (使われている番号だけ書ける) */
 const seq = m.parseGlyphTable("あいう\nえお");
 if (seq.join("") !== "あいうえお") fail("並びの文字表が読めない");
+/* Windows のメモ帳/Excel の BOM (U+FEFF) が先頭にあっても 0 番がずれない */
+const bom = m.parseGlyphTable("\uFEFFあいう\r\nえお");
+if (bom.join("") !== "あいうえお" || bom[0] !== "あ") fail(`BOM 付きの並びで 0 番がずれる: ${JSON.stringify(bom.slice(0, 2))}`);
+if (m.parseGlyphTable("\uFEFF0=あ\r\n1=い")[0] !== "あ") fail("BOM 付きの対応表で 0 番が消える");
 const sparse = m.parseGlyphTable("5=か\n6 き\n7: く\n9＝こ\n\n=x\n");
 if (sparse[5] !== "か" || sparse[6] !== "き" || sparse[7] !== "く" || sparse[9] !== "こ") fail("対応表の文字表が読めない");
 if (sparse[8] !== undefined || sparse[0] !== undefined) fail("無い番号が空になっていない");

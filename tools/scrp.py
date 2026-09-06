@@ -167,7 +167,7 @@ def load_table(path: str) -> TableCodec:
     昔から使われている素朴な形式です。'#' 以降はコメント。
     """
     mapping: dict[bytes, str] = {}
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8-sig") as fh:      # -sig: Windows の BOM 付きでも同じに読む
         for lineno, line in enumerate(fh, 1):
             line = line.split("#", 1)[0].rstrip("\n")
             if not line.strip():
@@ -390,7 +390,7 @@ def write_tsv(path: str, rows: list[dict]) -> None:
 
 def read_tsv(path: str) -> list[dict]:
     rows = []
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8-sig") as fh:      # Excel の「CSV UTF-8」は BOM 付き。見出しの id が壊れないように
         header = fh.readline().rstrip("\n").split("\t")
         missing = {"id", "original"} - set(header)
         if missing:

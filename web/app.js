@@ -4678,6 +4678,7 @@ function bokuMsgText(codes, glyphs, tags) {
  * 対応表の行が 1 つでもあれば対応表として読み、無い番号は空 (undefined) のまま
  */
 function parseGlyphTable(text) {
+  text = text.replace(/\uFEFF/g, "");   // ファイルから貼ったときの BOM は文字ではない
   const lines = text.replace(/\r/g, "").split("\n");
   const pair = /^\s*(\d+)\s*(?:[=:：＝]|\t| )\s*(\S)\s*$/;
   const map = [];

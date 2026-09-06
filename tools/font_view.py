@@ -40,7 +40,7 @@ def load_glyphs(path: str) -> list[bytes]:
 
 def load_chars(path: str) -> list[str]:
     chars = []
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8-sig") as fh:
         for line in fh:
             line = line.rstrip("\n")
             if not line or line.startswith("#"):

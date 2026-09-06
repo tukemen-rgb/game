@@ -803,6 +803,54 @@ class TestBoku2Cli(unittest.TestCase):
             off += len(padded)
         return out + b"\0" * (head_len - len(out)) + data
 
+    def test_windows_bom_and_crlf_do_not_shift_the_table(self):
+        """メモ帳 / Excel が付ける BOM (U+FEFF) と CRLF で、文字表・TSV・フォント一覧がずれないこと.
+
+        BOM を文字として数えると 0 番がずれ、全文が別の字に化ける (エラーは出ない)。"""
+        import boku2
+        import proofread
+        import relative_search
+        import font_view
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = os.path.join(tmp, "font.txt")
+            bom = os.path.join(tmp, "font_bom.txt")
+            with open(plain, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("あいう\nえお\n")
+            with open(bom, "w", encoding="utf-8-sig", newline="\r\n") as fh:
+                fh.write("あいう\nえお\n")
+            with open(bom, "rb") as fh:
+                self.assertTrue(fh.read().startswith(b"\xef\xbb\xbf"))
+            self.assertEqual(boku2.load_font(bom), boku2.load_font(plain))
+            self.assertEqual(boku2.load_font(bom)[0], "あ")
+            pairs = os.path.join(tmp, "pairs_bom.txt")
+            with open(pairs, "w", encoding="utf-8-sig", newline="\r\n") as fh:
+                fh.write("0=あ\n1=い\n")
+            self.assertEqual(boku2.load_font(pairs), ["あ", "い"])
+            self.assertEqual(boku2.parse_glyph_table("\ufeffあい"), ["あ", "い"])
+
+            # 校正ツールのフォント一覧 (1 行 1 字): 先頭の字が落ちない
+            chars = os.path.join(tmp, "chars_bom.txt")
+            with open(chars, "w", encoding="utf-8-sig", newline="\r\n") as fh:
+                fh.write("# 見出し\nあ\nい\n")
+            self.assertEqual(proofread.load_font_chars(chars), {"あ", "い"})
+            self.assertEqual(font_view.load_chars(chars), ["あ", "い"])
+            self.assertEqual(relative_search.build_order("x", chars), ["あ", "い"])
+
+            # Excel の「CSV UTF-8」で保存した TSV: 見出しの id が "\ufeffid" にならない
+            tsv = os.path.join(tmp, "bom.tsv")
+            with open(tsv, "w", encoding="utf-8-sig", newline="\r\n") as fh:
+                fh.write("id\toffset\tsize\toriginal\ttranslation\n0\t0\t2\tあい\tうえ\n")
+            rows = scrp.read_tsv(tsv)
+            self.assertEqual([r["id"] for r in rows], ["0"])
+            self.assertEqual(rows[0]["translation"], "うえ")
+
+            # docs/01 の .tbl (16進=文字) も同じ
+            tbl = os.path.join(tmp, "bom.tbl")
+            with open(tbl, "w", encoding="utf-8-sig", newline="\r\n") as fh:
+                fh.write("00=あ\n01=い\n")
+            self.assertEqual(scrp.load_table(tbl).by_bytes[b"\x00"], "あ")
+
     def test_windows_shell_leaves_patterns_unexpanded(self):
         """Windows の cmd / PowerShell は `MAP/*.*` を展開せずそのまま渡す。道具側で展開すること."""
         import boku2

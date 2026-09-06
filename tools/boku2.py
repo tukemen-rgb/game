@@ -335,6 +335,7 @@ def parse_glyph_table(text: str) -> list:
     import re
     pair = re.compile(r"^\s*(\d+)\s*(?:[=:：＝]|\t| )\s*(\S)\s*$")
     table: dict[int, str] = {}
+    text = text.replace("\ufeff", "")     # Windows のメモ帳/Excel が先頭に付ける BOM は文字ではない
     for line in text.replace("\r", "").split("\n"):
         m = pair.match(line)
         if m:
@@ -351,7 +352,7 @@ def load_font(path: str | None) -> list | None:
     """フォント画像を左上から書き出したテキスト、または「番号=文字」の対応表."""
     if not path:
         return None
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8-sig") as fh:      # -sig: BOM 付きでも同じに読む
         return parse_glyph_table(fh.read())
 
 

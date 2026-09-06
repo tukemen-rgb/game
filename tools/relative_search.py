@@ -45,7 +45,7 @@ KATAKANA_FULL = [chr(c) for c in range(0x30A1, 0x30F4)]
 def build_order(name: str, charset_file: str | None) -> list[str]:
     """検索に使う「フォントの並び」の仮説を返す."""
     if charset_file:
-        with open(charset_file, encoding="utf-8") as fh:
+        with open(charset_file, encoding="utf-8-sig") as fh:
             return [line.rstrip("\n") for line in fh
                     if line.strip() and not line.startswith("#")]
     if name == "unicode":
