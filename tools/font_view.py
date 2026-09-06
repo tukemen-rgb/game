@@ -100,6 +100,9 @@ def write_png(glyphs: list[bytes], path: str, cols: int, scale: int) -> None:
 
 
 def main() -> int:
+    import sys as _sys
+    if hasattr(_sys.stdout, "reconfigure"):
+        _sys.stdout.reconfigure(errors="replace")     # Windows の cp932 コンソール/リダイレクトで落ちない
     ap = argparse.ArgumentParser(description="1bpp 16x16 フォントを表示する")
     ap.add_argument("binary", help="FONT.BIN")
     ap.add_argument("--ascii", help="アスキーアートで表示するグリフ番号 (例: 0-9,20)")

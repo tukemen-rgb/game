@@ -30,6 +30,9 @@ import scrp
 
 
 def main() -> int:
+    import sys as _sys
+    if hasattr(_sys.stdout, "reconfigure"):
+        _sys.stdout.reconfigure(errors="replace")     # Windows の cp932 コンソール/リダイレクトで落ちない
     ap = argparse.ArgumentParser(description="TSV のテキストを SCRP ファイルに入れ直す")
     ap.add_argument("tsv", help="入力 TSV (dump_text.py の出力を編集したもの)")
     ap.add_argument("-o", "--out", required=True, help="出力する .BIN")

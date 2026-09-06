@@ -622,6 +622,8 @@ def write_tsv(rows, out) -> None:
 # ---------- 入口 ----------
 
 def main(argv=None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")      # Windows の cp932 コンソール/リダイレクトで落ちない
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("unpack", help="索引で本体を切り分ける")

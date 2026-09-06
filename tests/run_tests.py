@@ -1244,6 +1244,32 @@ class TestDocs(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(REPO, t)), t)
 
 
+class TestWindowsConsole(unittest.TestCase):
+    """Windows のコンソールやリダイレクト (cp932) でも、道具が UnicodeEncodeError で落ちないこと.
+
+    PYTHONIOENCODING=cp932 で標準出力を Shift-JIS にして走らせる。cp932 に無い文字
+    (hexdump.py の «» など) は ? に置き換わって続く。"""
+
+    def _run(self, *args):
+        import subprocess
+        env = dict(os.environ, PYTHONIOENCODING="cp932")
+        return subprocess.run([sys.executable, *args], capture_output=True, cwd=REPO, env=env)
+
+    def test_tools_survive_cp932_stdout(self):
+        if not os.path.exists(os.path.join(REPO, "work", "SCRIPT.BIN")):
+            self.skipTest("work/SCRIPT.BIN がありません (make_sample.py)")
+        res = self._run(os.path.join(REPO, "tools", "hexdump.py"), "work/SCRIPT.BIN", "--message", "2")
+        self.assertEqual(res.returncode, 0, res.stderr.decode("utf-8", "replace"))
+        self.assertNotIn(b"UnicodeEncodeError", res.stderr)
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            res = self._run(os.path.join(REPO, "tools", "boku2.py"), "check", sample)
+            self.assertEqual(res.returncode, 0, res.stderr.decode("utf-8", "replace"))
+            self.assertIn("問題なし".encode("cp932"), res.stdout)
+
+
 class TestTim2(unittest.TestCase):
     """TIM2 の組み立て (tools/make_tim2.py) と、ブラウザ側の読み取りの突き合わせ."""
 

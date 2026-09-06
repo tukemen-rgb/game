@@ -137,6 +137,9 @@ def preview(data: bytes, offset: int, mapping: dict[bytes, str], width: int,
 
 
 def main() -> int:
+    import sys as _sys
+    if hasattr(_sys.stdout, "reconfigure"):
+        _sys.stdout.reconfigure(errors="replace")     # Windows の cp932 コンソール/リダイレクトで落ちない
     ap = argparse.ArgumentParser(description="相対検索で未知の文字コードから日本語を探す")
     ap.add_argument("binary", help="調べるファイル (SCRP でなくても可)")
     ap.add_argument("--search", required=True, help="探す語 (清音のかなだけにするのがコツ)")

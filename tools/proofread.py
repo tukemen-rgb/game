@@ -238,6 +238,8 @@ def check_row(row: dict, rules: dict, glossary: list[dict],
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")      # Windows の cp932 コンソール/リダイレクトで落ちない
     ap = argparse.ArgumentParser(description="抽出した TSV を機械的に校正チェックする")
     ap.add_argument("tsv", help="チェックする TSV")
     ap.add_argument("--lang", default="ja", help="rules.json 内の言語キー (既定: ja)")

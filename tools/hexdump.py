@@ -86,6 +86,9 @@ def show_struct(path: str) -> None:
 
 
 def main() -> int:
+    import sys as _sys
+    if hasattr(_sys.stdout, "reconfigure"):
+        _sys.stdout.reconfigure(errors="replace")     # Windows の cp932 コンソール/リダイレクトで落ちない
     ap = argparse.ArgumentParser(description="16 進ダンプ / SCRP 構造の表示")
     ap.add_argument("binary")
     ap.add_argument("--table", help="独自文字コードの .tbl")

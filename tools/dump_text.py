@@ -23,6 +23,9 @@ import scrp
 
 
 def main() -> int:
+    import sys as _sys
+    if hasattr(_sys.stdout, "reconfigure"):
+        _sys.stdout.reconfigure(errors="replace")     # Windows の cp932 コンソール/リダイレクトで落ちない
     ap = argparse.ArgumentParser(description="SCRP ファイルからテキストを抽出する")
     ap.add_argument("binary", help="入力の .BIN")
     ap.add_argument("-o", "--out", help="出力 TSV (省略時は入力と同じ場所に .tsv)")

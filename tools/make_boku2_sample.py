@@ -215,6 +215,8 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")      # Windows の cp932 コンソール/リダイレクトで落ちない
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=os.path.join(REPO, "work", "BOKU2SAMPLE"))
     args = ap.parse_args()
