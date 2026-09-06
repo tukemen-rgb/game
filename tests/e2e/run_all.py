@@ -15,7 +15,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-CHECKS = ["split", "msg", "map", "tim2", "sample"]
+CHECKS = ["split", "msg", "map", "tim2", "sample", "build"]
 FIXTURES = [
     ("work/PACK.IDX", ["tools/make_archive.py"]),
     ("work/FONT.TMS", ["tools/make_tim2.py"]),
