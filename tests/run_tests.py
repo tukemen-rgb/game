@@ -1391,6 +1391,42 @@ class TestDocs(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(REPO, t)), t)
 
 
+class TestOtherPythons(unittest.TestCase):
+    """手元にある別の版の Python でも、道具が構文エラーなく動くこと.
+
+    社長の Windows の Python は、ここで走らせている版と違うかもしれない。PATH にある
+    python3.X を全部探し、道具を構文チェックして、練習データの診断を通す."""
+
+    def test_tools_run_on_every_installed_python(self):
+        import glob as globmod
+        import shutil
+        import subprocess
+        import make_boku2_sample
+        found = {}
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            for p in globmod.glob(os.path.join(d, "python3.[0-9]*")):
+                base = os.path.basename(p)
+                if base.endswith("-config") or base in found:
+                    continue
+                found[base] = p
+        others = {k: v for k, v in found.items()
+                  if k != f"python{sys.version_info.major}.{sys.version_info.minor}"}
+        if not others:
+            self.skipTest("別の版の Python が見つかりません")
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            tools = sorted(globmod.glob(os.path.join(REPO, "tools", "*.py")))
+            for name, exe in sorted(others.items()):
+                with self.subTest(python=name):
+                    res = subprocess.run([exe, "-m", "py_compile", *tools], capture_output=True, text=True)
+                    self.assertEqual(res.returncode, 0, f"{name}: {res.stderr[-800:]}")
+                    res = subprocess.run([exe, os.path.join(REPO, "tools", "boku2.py"), "check", sample],
+                                         capture_output=True, text=True, encoding="utf-8", cwd=REPO)
+                    self.assertEqual(res.returncode, 0, f"{name}: {res.stderr[-800:]}")
+                    self.assertIn("問題なし", res.stdout, name)
+
+
 class TestWindowsConsole(unittest.TestCase):
     """Windows のコンソールやリダイレクト (cp932) でも、道具が UnicodeEncodeError で落ちないこと.
 
