@@ -417,6 +417,33 @@ def _rows_of(b: bytes, stem: str, base_off: int, glyphs, keep_voice: bool, allow
     return rows
 
 
+def expand_patterns(paths: list[str], folder_files: bool = False) -> list[str]:
+    """`MAP/*.*` のような指定を、道具の側で展開する.
+
+    Windows のコマンドプロンプト / PowerShell は `*` を展開せずそのまま渡してくる
+    (Linux / macOS のシェルは展開してから渡す)。どちらでも同じに動くよう、無いパスに
+    `* ? [` が入っていれば glob で探す。folder_files=True ならフォルダは直下のファイルに
+    置き換える (maps 用。text は expand_inputs が中まで辿る)。
+    見つからなければ FileNotFoundError (入口で整えて表示する)."""
+    import glob
+    out: list[str] = []
+    for p in paths:
+        if os.path.exists(p):
+            if folder_files and os.path.isdir(p):
+                out += sorted(os.path.join(p, f) for f in os.listdir(p)
+                              if os.path.isfile(os.path.join(p, f)))
+            else:
+                out.append(p)
+        elif any(c in p for c in "*?["):
+            hits = sorted(h for h in glob.glob(p) if not folder_files or os.path.isfile(h))
+            if not hits:
+                raise FileNotFoundError(f"{p}: 一致するファイルがありません")
+            out += hits
+        else:
+            raise FileNotFoundError(f"{p}: ファイルがありません")
+    return out
+
+
 def expand_inputs(paths: list[str]) -> list[str]:
     """引数のフォルダを中まで辿り、会話の入ったファイルだけを拾う.
 
@@ -642,7 +669,15 @@ def main(argv=None) -> int:
     p = sub.add_parser("check", help="吸い出したフォルダを診て、報告用の要約を出す (最初に走らせる)")
     p.add_argument("folder")
     args = ap.parse_args(argv)
+    try:
+        return run(args)
+    except (OSError, ValueError, struct.error) as exc:
+        # 途中で止まった理由を 1 行で。Python の長い追跡表示は初めての人には読めない
+        print(f"エラー: {exc}", file=sys.stderr)
+        return 1
 
+
+def run(args) -> int:
     if args.cmd == "check":
         return check(args.folder)
 
@@ -650,15 +685,16 @@ def main(argv=None) -> int:
         n = unpack(args.idx, args.img, args.out)
         print(f"{n} 個に切り分けました → {args.out}")
     elif args.cmd == "maps":
+        files = expand_patterns(args.files, folder_files=True)
         total = 0
-        for f in args.files:
+        for f in files:
             stem = os.path.splitext(os.path.basename(f))[0]
             total += split_map(f, os.path.join(args.out, stem))
-        print(f"{len(args.files)} 個の入れ物から {total} 個の部品 → {args.out}")
+        print(f"{len(files)} 個の入れ物から {total} 個の部品 → {args.out}")
     elif args.cmd == "text":
         glyphs = load_font(args.font)
         rows = []
-        for f in expand_inputs(args.files):
+        for f in expand_inputs(expand_patterns(args.files)):
             rows += text_rows(f, glyphs, args.keep_voice)
         if args.out:
             with open(args.out, "w", encoding="utf-8") as fo:
@@ -667,7 +703,7 @@ def main(argv=None) -> int:
         else:
             write_tsv(rows, sys.stdout)
     elif args.cmd == "used":
-        used = used_codes(args.files)
+        used = used_codes(expand_patterns(args.files))
         print(" ".join(str(u) for u in used))
         print(f"# {len(used)} 種 (最大 {used[-1] if used else 0})。フォント画像のこの番号だけ書き出せば本文は読める", file=sys.stderr)
     elif args.cmd == "table":

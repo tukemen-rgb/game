@@ -803,6 +803,50 @@ class TestBoku2Cli(unittest.TestCase):
             off += len(padded)
         return out + b"\0" * (head_len - len(out)) + data
 
+    def test_windows_shell_leaves_patterns_unexpanded(self):
+        """Windows の cmd / PowerShell は `MAP/*.*` を展開せずそのまま渡す。道具側で展開すること."""
+        import boku2
+        import subprocess
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            out = os.path.join(tmp, "OUT")
+            self.assertEqual(boku2.main(["unpack", os.path.join(sample, "BOKU2.IDX"),
+                                         os.path.join(sample, "BOKU2.IMG"), out]), 0)
+            # 1) 展開されなかった `MAP/*.*` をそのまま受け取っても動く
+            maps1 = os.path.join(tmp, "maps1")
+            self.assertEqual(boku2.main(["maps", os.path.join(sample, "MAP", "*.*"), "-o", maps1]), 0)
+            self.assertTrue(os.path.exists(os.path.join(maps1, "M_A01000", "1.bin")))
+            self.assertTrue(os.path.exists(os.path.join(maps1, "M_A02000", "1.bin")))
+            # 2) フォルダをそのまま渡しても同じ
+            maps2 = os.path.join(tmp, "maps2")
+            self.assertEqual(boku2.main(["maps", os.path.join(sample, "MAP"), "-o", maps2]), 0)
+            self.assertEqual(sorted(os.listdir(maps1)), sorted(os.listdir(maps2)))
+            # 3) text / used も同じ (`OUT/system/*.msg` の形)
+            tsv = os.path.join(tmp, "a.tsv")
+            self.assertEqual(boku2.main(["text", os.path.join(out, "system", "*.msg"),
+                                         os.path.join(maps1, "*", "1.bin"),
+                                         "-f", os.path.join(sample, "font.txt"), "-o", tsv]), 0)
+            with open(tsv, encoding="utf-8") as fh:
+                ids = [line.split("\t")[0] for line in fh.read().splitlines()[1:]]
+            self.assertTrue(any(i.startswith("system:") for i in ids), ids[:5])
+            self.assertTrue(any(i.startswith("M_A01000:") for i in ids), ids[:5])
+            # 4) 一致しない指定は、追跡表示ではなく 1 行の日本語で止まる
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                                  "maps", os.path.join(sample, "MAP", "*.xyz"), "-o", maps2],
+                                 capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("一致するファイルがありません", res.stderr)
+            self.assertNotIn("Traceback", res.stderr)
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                                  "maps", os.path.join(sample, "font.txt"), "-o", maps2],
+                                 capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("入れ物ではありません", res.stderr)
+            self.assertNotIn("Traceback", res.stderr)
+
     def test_unpack_maps_text_end_to_end(self):
         import boku2
         import subprocess
