@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import sys
@@ -850,6 +851,60 @@ class TestBoku2Cli(unittest.TestCase):
             with open(tbl, "w", encoding="utf-8-sig", newline="\r\n") as fh:
                 fh.write("00=あ\n01=い\n")
             self.assertEqual(scrp.load_table(tbl).by_bytes[b"\x00"], "あ")
+
+    def test_excel_round_trip(self):
+        """Excel で開いて直して保存し直す往復が、どの保存形式でも壊れないこと.
+
+        出力: BOM 付き UTF-8 (BOM 無しだと Excel は cp932 と誤認して日本語が化ける)。
+        入力: 「Unicode テキスト」(UTF-16)、「CSV UTF-8」(BOM 付き)、ANSI (cp932) のどれでも。"""
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            out = os.path.join(tmp, "OUT")
+            boku2.main(["unpack", os.path.join(sample, "BOKU2.IDX"), os.path.join(sample, "BOKU2.IMG"), out])
+            tsv = os.path.join(tmp, "all.tsv")
+            self.assertEqual(boku2.main(["text", out, "-f", os.path.join(sample, "font.txt"), "-o", tsv]), 0)
+            with open(tsv, "rb") as fh:
+                raw = fh.read()
+            self.assertTrue(raw.startswith(codecs.BOM_UTF8 + b"id\t"), raw[:12])
+            self.assertNotIn(b"\r\n", raw)
+            base = scrp.read_tsv(tsv)
+            self.assertIn("config:0", [r["id"] for r in base])
+
+            # Excel が保存し直した体で、同じ内容を 4 通りの形式に書き、全部同じに読めること
+            text = raw.decode("utf-8-sig").replace("\n", "\r\n")
+            variants = {
+                "unicode_text.txt": codecs.BOM_UTF16_LE + text.encode("utf-16-le"),
+                "csv_utf8.tsv": codecs.BOM_UTF8 + text.encode("utf-8"),
+                "ansi.tsv": text.encode("cp932"),
+                "plain.tsv": text.encode("utf-8"),
+            }
+            for name, data in variants.items():
+                p = os.path.join(tmp, name)
+                with open(p, "wb") as fh:
+                    fh.write(data)
+                got = scrp.read_tsv(p)
+                self.assertEqual([(r["id"], r["original"]) for r in got],
+                                 [(r["id"], r["original"]) for r in base], name)
+
+            # 文字表と、校正ツールのフォント一覧も同じ (メモ帳の ANSI / Excel の Unicode テキスト)
+            font_text = "あ\nい\nう\nえ\nお\n"          # 1 行 1 字 (fontlist の形。文字表としても読める)
+            for name, data in {"ansi.txt": font_text.encode("cp932"),
+                               "u16.txt": codecs.BOM_UTF16_LE + font_text.encode("utf-16-le")}.items():
+                p = os.path.join(tmp, name)
+                with open(p, "wb") as fh:
+                    fh.write(data)
+                self.assertEqual(boku2.load_font(p), list("あいうえお"), name)
+                self.assertEqual(proofread.load_font_chars(p), set("あいうえお"), name)
+            # dump_text 系 (scrp.write_tsv) の出力も BOM 付き
+            p = os.path.join(tmp, "w.tsv")
+            scrp.write_tsv(p, [{"id": "0", "offset": 0, "size": 2, "original": "あ", "translation": "あ"}])
+            with open(p, "rb") as fh:
+                self.assertTrue(fh.read().startswith(codecs.BOM_UTF8))
+            self.assertEqual(scrp.read_tsv(p)[0]["original"], "あ")
 
     def test_windows_shell_leaves_patterns_unexpanded(self):
         """Windows の cmd / PowerShell は `MAP/*.*` を展開せずそのまま渡す。道具側で展開すること."""

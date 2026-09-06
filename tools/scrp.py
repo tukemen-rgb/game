@@ -25,9 +25,33 @@ u32 はすべてリトルエンディアンです。PS2 の CPU (MIPS R5900) が
 
 from __future__ import annotations
 
+import codecs
+import io
 import re
 import struct
 import unicodedata
+
+
+def open_text(path: str) -> io.StringIO:
+    """利用者が作った文字ファイルを、保存形式を問わず読む.
+
+    メモ帳・Excel は保存の仕方で中身が変わる:
+      UTF-8 (BOM 無し / 有り)     … メモ帳の既定、Excel の「CSV UTF-8」
+      UTF-16 (BOM 有り)           … Excel の「Unicode テキスト (*.txt)」(タブ区切り)
+      cp932 (Shift-JIS)           … メモ帳の ANSI、Excel の「CSV (コンマ区切り)」
+    どれで保存されても同じに読めるよう、BOM を見て、無ければ UTF-8 → cp932 の順に試す。
+    改行 (CRLF / CR) は LF に揃える。読んだ結果を文字列の入れ物にして返すので、
+    `with open_text(p) as fh:` とファイルと同じに使える."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+        text = raw.decode("utf-16")
+    else:
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("cp932", errors="replace")
+    return io.StringIO(text.replace("\r\n", "\n").replace("\r", "\n"))
 
 MAGIC = b"SCRP"
 VERSION = 1
@@ -167,7 +191,7 @@ def load_table(path: str) -> TableCodec:
     昔から使われている素朴な形式です。'#' 以降はコメント。
     """
     mapping: dict[bytes, str] = {}
-    with open(path, encoding="utf-8-sig") as fh:      # -sig: Windows の BOM 付きでも同じに読む
+    with open_text(path) as fh:                       # メモ帳/Excel のどの保存形式でも読む
         for lineno, line in enumerate(fh, 1):
             line = line.split("#", 1)[0].rstrip("\n")
             if not line.strip():
@@ -382,7 +406,8 @@ TSV_COLUMNS = ["id", "offset", "size", "original", "translation"]
 
 
 def write_tsv(path: str, rows: list[dict]) -> None:
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+    # BOM 付き UTF-8: Excel で開いたとき日本語が化けない (BOM 無しだと cp932 と誤認する)
+    with open(path, "w", encoding="utf-8-sig", newline="\n") as fh:
         fh.write("\t".join(TSV_COLUMNS) + "\n")
         for row in rows:
             fh.write("\t".join(str(row.get(c, "")) for c in TSV_COLUMNS) + "\n")
@@ -390,7 +415,7 @@ def write_tsv(path: str, rows: list[dict]) -> None:
 
 def read_tsv(path: str) -> list[dict]:
     rows = []
-    with open(path, encoding="utf-8-sig") as fh:      # Excel の「CSV UTF-8」は BOM 付き。見出しの id が壊れないように
+    with open_text(path) as fh:                       # Excel から保存し直した TSV (UTF-16 / BOM 付き) も読む
         header = fh.readline().rstrip("\n").split("\t")
         missing = {"id", "original"} - set(header)
         if missing:

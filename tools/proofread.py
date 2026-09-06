@@ -62,7 +62,7 @@ class Finding:
 
 
 def load_rules(path: str, lang: str) -> dict:
-    with open(path, encoding="utf-8-sig") as fh:
+    with scrp.open_text(path) as fh:
         rules = json.load(fh)
     if lang not in rules:
         raise scrp.ScrpError(f"{path}: 言語 {lang!r} の設定がありません")
@@ -71,7 +71,7 @@ def load_rules(path: str, lang: str) -> dict:
 
 def load_glossary(path: str) -> list[dict]:
     entries = []
-    with open(path, encoding="utf-8-sig") as fh:
+    with scrp.open_text(path) as fh:
         header = fh.readline().rstrip("\n").split("\t")
         if header[:2] != ["term", "forbidden"]:
             raise scrp.ScrpError(f"{path}: 見出しは 'term\\tforbidden\\tnote' である必要があります")
@@ -90,7 +90,7 @@ def load_glossary(path: str) -> list[dict]:
 
 def load_font_chars(path: str) -> set[str]:
     chars = set()
-    with open(path, encoding="utf-8-sig") as fh:
+    with scrp.open_text(path) as fh:
         for line in fh:
             line = line.rstrip("\n")
             if not line or line.startswith("#"):
@@ -101,7 +101,7 @@ def load_font_chars(path: str) -> set[str]:
 
 def load_names(path: str) -> dict[str, str]:
     names = {}
-    with open(path, encoding="utf-8-sig") as fh:
+    with scrp.open_text(path) as fh:
         fh.readline()
         for line in fh:
             line = line.rstrip("\n")

@@ -25,6 +25,10 @@ import argparse
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import scrp
+
 GLYPH_SIZE = 16
 GLYPH_BYTES = GLYPH_SIZE * GLYPH_SIZE // 8
 
@@ -40,7 +44,7 @@ def load_glyphs(path: str) -> list[bytes]:
 
 def load_chars(path: str) -> list[str]:
     chars = []
-    with open(path, encoding="utf-8-sig") as fh:
+    with scrp.open_text(path) as fh:
         for line in fh:
             line = line.rstrip("\n")
             if not line or line.startswith("#"):

@@ -30,6 +30,10 @@ import os
 import struct
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import scrp   # open_text (メモ帳/Excel のどの保存形式でも読む) と .tbl の書き出し
+
 SECTOR = 2048
 
 
@@ -352,7 +356,7 @@ def load_font(path: str | None) -> list | None:
     """フォント画像を左上から書き出したテキスト、または「番号=文字」の対応表."""
     if not path:
         return None
-    with open(path, encoding="utf-8-sig") as fh:      # -sig: BOM 付きでも同じに読む
+    with scrp.open_text(path) as fh:                  # BOM 付き / UTF-16 / cp932 でも同じに読む
         return parse_glyph_table(fh.read())
 
 
@@ -698,7 +702,8 @@ def run(args) -> int:
         for f in expand_inputs(expand_patterns(args.files)):
             rows += text_rows(f, glyphs, args.keep_voice)
         if args.out:
-            with open(args.out, "w", encoding="utf-8") as fo:
+            # BOM 付き UTF-8: Excel でそのまま開いても日本語が化けない
+            with open(args.out, "w", encoding="utf-8-sig", newline="\n") as fo:
                 write_tsv(rows, fo)
             print(f"{len(rows)} 行 → {args.out}" + ("" if glyphs else " (文字表なし: 番号のまま)"))
         else:
@@ -708,8 +713,6 @@ def run(args) -> int:
         print(" ".join(str(u) for u in used))
         print(f"# {len(used)} 種 (最大 {used[-1] if used else 0})。フォント画像のこの番号だけ書き出せば本文は読める", file=sys.stderr)
     elif args.cmd == "table":
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import scrp
         glyphs = load_font(args.font) or []
         mapping = glyph_table_mapping(glyphs)
         scrp.save_table(args.out, mapping,
