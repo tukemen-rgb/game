@@ -1483,6 +1483,21 @@ class TestDamagedData(unittest.TestCase):
             self.assertGreater(verdicts[1], len(targets) * len(self.MUTATIONS), verdicts)
 
 
+class TestBrowserDamagedData(unittest.TestCase):
+    """ブラウザ側の各読み取りも、壊れたデータで例外を投げないこと (tests/test_fuzz.mjs)."""
+
+    def test_browser_parsers_survive_damage(self):
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        res = subprocess.run([node, os.path.join(REPO, "tests", "test_fuzz.mjs")],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK", res.stdout)
+
+
 class TestOtherPythons(unittest.TestCase):
     """手元にある別の版の Python でも、道具が構文エラーなく動くこと.
 
