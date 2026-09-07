@@ -894,6 +894,12 @@ class TestBoku2Cli(unittest.TestCase):
             # 使われている番号: ページ送りの次の値は文字なので数える
             self.assertEqual(boku2.used_codes([os.path.join(tmp, "item_info.msg")]), [5, 6, 7])
             self.assertEqual(boku2.used_codes([os.path.join(tmp, "system.msg")]), [5, 7])
+        # 位置の上位 2 バイト (+10) に何か入っていても読める (公開ソースの読み取りは u16)
+        two = bytearray(self.build_tables([[[5, 0x8000]], [[2, 3, 0x8000]]]))
+        two[4 + 12 + 10:4 + 12 + 12] = b"\xAB\xCD"       # 2 つ目の項目の +10 を汚す
+        dirty = boku2.parse_tables(bytes(two))
+        self.assertIsNotNone(dirty)
+        self.assertEqual(boku2.decode(dirty[1]["msg"][0]["codes"], glyphs, tags=False), "うえ{END}")
         # 64 KiB を超える位置の表 (表の長さは u16 なので、1 つは 64 KiB 未満。3 つ並べて位置を越えさせる)
         big = self.build_tables([[[0] * 30000]] * 3 + [[[2, 3, 0x8000]]])
         tables = boku2.parse_tables(big)

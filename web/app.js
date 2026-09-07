@@ -4591,8 +4591,12 @@ function parseBokuMsgTables(b) {
   let prev = 0;
   for (let i = 0; i < t; i++) {
     const p = 4 + i * 12;
-    /* 項目 12 バイト: u32 ? / u16 表の長さ / u16 番号 / u32 表の位置 (公開ソース MSG_notes.txt) */
-    const size = u16le(b, p + 4), off = u32le(b, p + 8);
+    /* 項目 12 バイト: u32 ? / u16 表の長さ / u16 番号 / 表の位置。位置は公開ソースの MSG_notes.txt
+       では int (u32)、読み取り (unpackMapMSG) では short (u16) と食い違う。u32 で読み、
+       範囲外なら下位 16 ビットで読み直す (どちらの形でも読める) */
+    const size = u16le(b, p + 4);
+    let off = u32le(b, p + 8);
+    if (off + size > b.length && (off & 0xFFFF) + size <= b.length) off &= 0xFFFF;
     if (off < head || off + size > b.length || off < prev) return null;
     prev = off;
     const msg = size >= 8 ? parseBokuMsg(b.subarray(off, off + size), 4) : null;

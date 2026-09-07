@@ -224,8 +224,12 @@ def parse_tables(b: bytes) -> list[dict] | None:
         return None
     tables, prev = [], 0
     for i in range(t):
-        # 項目 12 バイト: u32 ? / u16 表の長さ / u16 番号 / u32 表の位置 (公開ソース MSG_notes.txt)
+        # 項目 12 バイト: u32 ? / u16 表の長さ / u16 番号 / 表の位置。位置は公開ソースの
+        # MSG_notes.txt では int (u32)、読み取り (unpackMapMSG) では short (u16) と食い違う。
+        # u32 で読み、範囲外なら下位 16 ビットで読み直す (どちらの形でも読める)
         size, ident, off = struct.unpack_from("<HHI", b, 4 + i * 12 + 4)
+        if off + size > len(b) and (off & 0xFFFF) + size <= len(b):
+            off &= 0xFFFF
         if off < head or off + size > len(b) or off < prev:
             return None
         prev = off

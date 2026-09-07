@@ -185,6 +185,11 @@ if (m.bokuMsgText(altCodes, glyphs, false, true) !== "か{BREAK}\nきく{END}") 
 if (m.bokuMsgText(altCodes, glyphs, true, true) !== "か<BREAK>きく") fail("ページ送りの校正用の書き方が違う");
 if (m.bokuMsgUsed([{ codes: altCodes }], true).join(",") !== "5,6,7") fail("ページ送りのとき 6 が使われている番号から落ちる");
 if (m.bokuMsgUsed([{ codes: altCodes }]).join(",") !== "5,7") fail("普通のとき待ち時間の値 6 を文字番号と数えた");
+/* 位置の上位 2 バイト (+10) に何か入っていても読める (公開ソースの読み取りは u16) */
+const dirty = buildTables([[[5, 0x8000]], [[2, 3, 0x8000]]]).slice();
+dirty[4 + 12 + 10] = 0xAB; dirty[4 + 12 + 11] = 0xCD;
+const mtDirty = m.parseBokuMsgTables(dirty);
+if (!mtDirty || m.bokuMsgText(mtDirty.tables[1].msg.items[0].codes, glyphs) !== "うえ{END}") fail("位置の上位 2 バイトが汚れていると読めない");
 /* 表の位置は u32: 64 KiB を超える位置の表も読める (表の長さは u16 なので 1 つは 64 KiB 未満。3 つ並べる) */
 const bigBody = [Array.from({ length: 30000 }, () => 0)];   /* 60 KB の表 */
 const mtBig = m.parseBokuMsgTables(buildTables([bigBody, bigBody, bigBody, [[2, 3, 0x8000]]]));
