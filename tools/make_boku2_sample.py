@@ -201,10 +201,15 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
         (False, 1, "item_info.msg", item_info),
         (True, 1, "namemsg", None),
         (False, 0, "namemsg.msg", names),
-        (True, 0, "submenu", None),                 # system の最後の項目 (閉じるとき system も閉じる)
-        (True, 0, "msg", None),                     # submenu の最後の項目
+        # 4 段目 system/submenu/msg/config/config.msg。閉じ方は、こちらの stack 規則と
+        # 公開ソースの flag 規則の両方で同じ道筋になる形にしてある (#56): 1 つのファイルで
+        # 閉じるのは最大 2 段 (続く 0 のフォルダ + その親)、残りは段ごとに閉じる
+        (True, 1, "submenu", None),
+        (True, 1, "msg", None),
         (True, 0, "config", None),                  # msg の最後の項目
-        (False, 0, "config.msg", config),           # 4 段目: system/submenu/msg/config/config.msg
+        (False, 0, "config.msg", config),           # config と msg を閉じて submenu に戻る
+        (False, 0, "sub_readme.bin", b"\0" * 32),   # submenu を閉じて system に戻る
+        (False, 0, "sys_end.bin", b"\0" * 32),      # system を閉じて根に戻る
         (False, 0, "readme.bin", b"\0" * 64),
     ]
     idx, img, _ = build_dfi(tree)
