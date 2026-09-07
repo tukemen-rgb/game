@@ -853,6 +853,43 @@ class TestBoku2Cli(unittest.TestCase):
                 fh.write("00=あ\n01=い\n")
             self.assertEqual(scrp.load_table(tbl).by_bytes[b"\x00"], "あ")
 
+    def test_two_folder_rules_are_compared(self):
+        """フォルダの閉じ方は、こちらの stack 規則と公開ソース UNPACK.py の flag 規則がある.
+
+        練習データや普通の入れ子では一致し、深い入れ子や特殊な並びでは違い得る。
+        check はその食い違いを数えて報告する (実物でどちらが正しいかを確かめる材料)."""
+        import boku2
+        import make_boku2_sample
+        # 練習データ (4 段の入れ子を含む) では一致
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            with open(os.path.join(sample, "BOKU2.IDX"), "rb") as fh:
+                idx = fh.read()
+            size = os.path.getsize(os.path.join(sample, "BOKU2.IMG"))
+            self.assertEqual(boku2.dfi_rule_mismatch(idx, size), [])
+            import io
+            out = io.StringIO()
+            boku2.check(sample, out=out)
+            self.assertIn("フォルダの規則: 2 通り (stack / flag) で一致", out.getvalue())
+        # 食い違う並び: A (続く=0) の中に B (続く=1) と C。B の最後のファイルで
+        # flag 規則は A まで閉じてしまい、C が根に出る
+        tree = [(True, 1, "/", None), (True, 0, "A", None), (True, 1, "B", None),
+                (False, 0, "b0.bin", b"\x01" * 8), (True, 0, "C", None), (False, 0, "c0.bin", b"\x02" * 8)] + \
+               [(False, 0 if i == 7 else 1, f"r{i}.bin", b"\x03" * 8) for i in range(8)]
+        idx, img, _ = self.build_dfi(tree)
+        mism = boku2.dfi_rule_mismatch(idx, len(img))
+        self.assertTrue(mism, "食い違いが検出されない")
+        self.assertEqual(mism[0][0], "A/C/c0.bin")
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "BOKU2.IDX"), "wb") as fh:
+                fh.write(idx)
+            with open(os.path.join(tmp, "BOKU2.IMG"), "wb") as fh:
+                fh.write(img)
+            out = io.StringIO()
+            boku2.check(tmp, out=out)
+            self.assertIn("フォルダの規則が 2 通りで食い違うファイル", out.getvalue())
+
     def test_nested_containers_are_descended(self):
         """入れ物の部品がさらに入れ物 (fish_on_mem.bin の 11〜16 番) でも、その中の文言を拾うこと.
 

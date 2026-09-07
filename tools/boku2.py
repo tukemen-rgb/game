@@ -39,8 +39,15 @@ SECTOR = 2048
 
 # ---------- 索引 (DFI) ----------
 
-def read_dfi(idx: bytes, data_size: int) -> list[dict]:
-    """レコードを歩いて {path, at, len} の一覧にする。ブラウザ側 readDfi と同じ規則."""
+def read_dfi(idx: bytes, data_size: int, rule: str = "stack") -> list[dict]:
+    """レコードを歩いて {path, at, len} の一覧にする。ブラウザ側 readDfi と同じ規則.
+
+    フォルダの閉じ方 (rule):
+      "stack": ファイルの「続く」が 0 なら自分のフォルダを閉じ、閉じたフォルダの「続く」も 0 なら
+               親も閉じる (何段でも)。こちらの既定
+      "flag":  公開ソース UNPACK.py の規則。「続く」が 0 のフォルダを見たら旗を立て、次に
+               「続く」が 0 のファイルで 1 段 (旗が立っていれば 2 段) 閉じる
+    実物では両者が一致するはず (check が突き合わせる)。違えば規則の理解が足りていない."""
     if idx[:4] != b"DFI\0":
         raise ValueError("先頭が DFI ではありません")
     rec_end = 16
@@ -66,6 +73,7 @@ def read_dfi(idx: bytes, data_size: int) -> list[dict]:
     entries: list[dict] = []
     stack: list[tuple[str, int]] = []
     seen: set[str] = set()
+    escape = False
     for k in range(rec_count):
         p = 16 + k * 16
         is_dir = (idx[p] | (idx[p + 1] << 8)) == 1
@@ -73,6 +81,8 @@ def read_dfi(idx: bytes, data_size: int) -> list[dict]:
         name = names[k] if k < len(names) else ""
         if is_dir:
             stack.append(("" if name == "/" else name, more))
+            if more == 0:
+                escape = True
             continue
         lba, length = struct.unpack_from("<II", idx, p + 8)
         at = lba * SECTOR
@@ -87,10 +97,24 @@ def read_dfi(idx: bytes, data_size: int) -> list[dict]:
         if length > 0 and at + length <= data_size:
             entries.append({"path": path, "at": at, "len": length})
         if more == 0:
-            d = stack.pop() if stack else None
-            while d and d[1] == 0 and len(stack) > 1:
-                d = stack.pop()
+            if rule == "flag":
+                if stack:
+                    stack.pop()
+                if escape and stack:
+                    stack.pop()
+                escape = False
+            else:
+                d = stack.pop() if stack else None
+                while d and d[1] == 0 and len(stack) > 1:
+                    d = stack.pop()
     return entries
+
+
+def dfi_rule_mismatch(idx: bytes, data_size: int) -> list[tuple[str, str]]:
+    """2 つのフォルダ規則 (stack / flag) で道筋が違うファイルを (stack の道筋, flag の道筋) で返す."""
+    a = read_dfi(idx, data_size, "stack")
+    b = read_dfi(idx, data_size, "flag")
+    return [(x["path"], y["path"]) for x, y in zip(a, b) if x["path"] != y["path"]]
 
 
 def safe_parts(path: str) -> list[str]:
@@ -623,6 +647,15 @@ def check(folder: str, out=sys.stdout) -> int:
     if dupes:
         problems += 1
         say("→ 同じ名前があります。フォルダの入れ子の規則が実物と違うかもしれません (docs/09 #18)")
+    # フォルダの閉じ方は 2 通りの読み方 (こちらの stack / 公開ソースの flag) がある。実物で
+    # 一致していれば安心、違えば規則の理解が足りていない (docs/09 #56)
+    mism = dfi_rule_mismatch(idx, img_size)
+    if mism:
+        problems += 1
+        say(f"→ フォルダの規則が 2 通りで食い違うファイル {len(mism)} 件 (例: {mism[0][0]} / {mism[0][1]})。"
+            "この行ごと報告してください")
+    else:
+        say("フォルダの規則: 2 通り (stack / flag) で一致")
     msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
     fonts = [e for e in entries if "font" in os.path.basename(e["path"]).lower()]
     say(f".msg: {len(msgs)} 件 (例: {', '.join(os.path.basename(e['path']) for e in msgs[:4])})")
