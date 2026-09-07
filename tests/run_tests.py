@@ -1399,7 +1399,20 @@ class TestDocs(unittest.TestCase):
                     broken.append(f"{os.path.relpath(path, REPO)} → {target}")
         self.assertEqual(broken, [])
 
-    def test_manual_mentions_the_screen_features(self):
+    def test_every_diagnosis_arrow_is_explained(self):
+        """check が出し得る → の行が、全部 docs/10 の「診断の → の行の読み方」にあること (#63).
+
+        道具に → が増えたのに説明が増えていない、を防ぐ。boku2.py の say("→ …") を拾って照合する."""
+        import re
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        arrows = re.findall(r'say\(f?"→ ([^"{]+)', src)
+        self.assertGreaterEqual(len(arrows), 8, arrows)
+        for head in arrows:
+            key = re.split(r"[。、(:]", head)[0].strip()[:14]      # 行頭の言い回しで照合
+            self.assertIn(key, doc, f"docs/10 に説明が無い → の行: {head}")
         """画面にある主要な物 (要約の行、目盛りの色、ページ送り、入れ物の入れ子…) が、
         説明書 docs/07 にも書いてあること。画面だけ増えて説明書が古くなるのを防ぐ (#61)."""
         with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
