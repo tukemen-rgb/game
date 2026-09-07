@@ -1399,6 +1399,27 @@ class TestDocs(unittest.TestCase):
                     broken.append(f"{os.path.relpath(path, REPO)} → {target}")
         self.assertEqual(broken, [])
 
+    def test_manual_mentions_the_screen_features(self):
+        """画面にある主要な物 (要約の行、目盛りの色、ページ送り、入れ物の入れ子…) が、
+        説明書 docs/07 にも書いてあること。画面だけ増えて説明書が古くなるのを防ぐ (#61)."""
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            manual = fh.read()
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        pairs = [   # (画面の文言 (app.js にあること), 説明書の言い回し)
+            ("文字表に無い番号", "文字表に無い番号"),
+            ("橙の枠", "橙の枠"),
+            ("ページ送り", "ページ送り"),
+            ("フォルダの規則: 2 通り (stack / flag) で一致", "フォルダの規則: 2 通り (stack / flag) で一致"),
+            ("これはマップの入れ物です", "入れ物の中の入れ物"),
+            ("報告用の要約", "報告用の要約"),
+            ("校正用の TSV をコピー", "校正用の TSV をコピー"),
+            ("文字の番号を重ねる", "文字の番号を重ねる"),
+        ]
+        for on_screen, in_manual in pairs:
+            self.assertIn(on_screen, app, f"画面側の文言が変わった: {on_screen}")
+            self.assertIn(in_manual, manual, f"docs/07 に無い: {in_manual}")
+
     def test_every_tab_is_documented(self):
         import re
         with open(os.path.join(REPO, "web", "index.html"), encoding="utf-8") as fh:
