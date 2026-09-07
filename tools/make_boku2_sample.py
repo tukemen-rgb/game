@@ -52,6 +52,8 @@ def encode(text: str, glyphs: list[str]) -> list[int]:
         elif text.startswith("<WAIT:", i):
             end = text.index(">", i)
             codes += [0x8002, int(text[i + 6:end], 16)]; i = end + 1
+        elif text.startswith("<BREAK>", i):
+            codes.append(0x8002); i += 7      # 引数の無いページ送り (turi_info.msg などの形)
         else:
             ch = text[i]
             if ch not in glyphs:
@@ -83,7 +85,7 @@ def build_tables(tables: list[list[list[int]]]) -> bytes:
     bodies = [build_msg(t, 4) for t in tables]
     out, p, data = struct.pack("<I", len(tables)), head, b""
     for i, b in enumerate(bodies):
-        out += struct.pack("<IHHHH", 0x0000_0001, len(b), 100 + i, p, 0)
+        out += struct.pack("<IHHI", 0x0000_0001, len(b), 100 + i, p)     # 位置は u32 (MSG_notes.txt)
         data += b
         p += len(b)
     return out + data
@@ -137,6 +139,9 @@ def build_dfi(tree: list[tuple[bool, int, str, bytes | None]]) -> tuple[bytes, b
 MENU = ["はじめから", "つづきから", "せってい", "おわる"]
 NAMES = ["ぼく", "おかあさん", "しずか"]
 CONFIG = ["おんりょう", "しんどう", "がめん"]           # 深いフォルダ (system/submenu/msg/config/) の例
+# 0x8002 が引数の無いページ送りになるメニュー (公開ソースの ALT_NEWLINE_FILES の 1 つ)。
+# 待ち時間として読むと <BREAK> の次の字を飛ばしてしまう、その確認用
+ITEM_INFO = ["あみ<BREAK>むしをつかまえる", "つりざお<BREAK>さかなをつる"]
 DIARY = ["きょうは、", "をした。", "たのしかった。"]     # 日記の雛形: 見出しの無い並び (diary.bin の 0 番)
 MAPS = {
     "M_A01000": [
@@ -162,6 +167,8 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
     answer["system"] = [(f"system:{i}", t) for i, t in enumerate(MENU)]
     answer["namemsg"] = [(f"namemsg:{i}", t) for i, t in enumerate(NAMES)]
     answer["config"] = [(f"config:{i}", t) for i, t in enumerate(CONFIG)]
+    item_info = build_msg([encode(t, glyphs) for t in ITEM_INFO], 8)
+    answer["item_info"] = [(f"item_info:{i}", t) for i, t in enumerate(ITEM_INFO)]
     # 日記の入れ物 (12 バイト刻み): 0 番が見出しの無い並び、1 番が画像
     raw = b"".join(struct.pack(f"<{len(c)}H", *c) for c in (encode(t, glyphs) for t in DIARY))
     diary_img = make_tim2.build_tim2(8, 8, 5, [1] * 64,
@@ -182,6 +189,7 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
         (True, 1, "system", None),
         (False, 1, "bk_font.tms", tms),
         (False, 1, "system.msg", menu),
+        (False, 1, "item_info.msg", item_info),
         (True, 1, "namemsg", None),
         (False, 0, "namemsg.msg", names),
         (True, 0, "submenu", None),                 # system の最後の項目 (閉じるとき system も閉じる)

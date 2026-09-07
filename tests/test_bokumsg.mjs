@@ -95,7 +95,7 @@ function buildTables(tables) {
     dv.setUint32(4 + i * 12, 0xDEAD, true);          /* 不明 */
     dv.setUint16(8 + i * 12, body.length, true);      /* 表の長さ */
     dv.setUint16(10 + i * 12, 100 + i, true);         /* 番号? */
-    dv.setUint16(12 + i * 12, p, true);               /* 表の位置 */
+    dv.setUint32(12 + i * 12, p, true);               /* 表の位置 (u32。公開ソース MSG_notes.txt) */
     buf.set(body, p);
     p += body.length;
   });
@@ -178,6 +178,17 @@ if (sparse[5] !== "か" || sparse[6] !== "き" || sparse[7] !== "く" || sparse[
 if (sparse[8] !== undefined || sparse[0] !== undefined) fail("無い番号が空になっていない");
 if (m.bokuMsgText(entries[0], sparse) !== "かき\nく{END}") fail("対応表で復号できない");
 if (m.bokuMsgText([0, 5, 0x8000], sparse) !== "[0]か{END}") fail("無い番号が [番号] にならない");
+/* 8.5 一部のメニュー (turi_info.msg など) では 0x8002 が引数の無いページ送り。次の字を飛ばさない */
+const altCodes = [5, 0x8002, 6, 7, 0x8000];
+if (m.bokuMsgText(altCodes, glyphs) !== "か{WAIT 6}く{END}") fail("普通の読み方 (待ち時間 + 値) が変わった");
+if (m.bokuMsgText(altCodes, glyphs, false, true) !== "か{BREAK}\nきく{END}") fail(`ページ送りの読み方が違う: ${m.bokuMsgText(altCodes, glyphs, false, true)}`);
+if (m.bokuMsgText(altCodes, glyphs, true, true) !== "か<BREAK>きく") fail("ページ送りの校正用の書き方が違う");
+if (m.bokuMsgUsed([{ codes: altCodes }], true).join(",") !== "5,6,7") fail("ページ送りのとき 6 が使われている番号から落ちる");
+if (m.bokuMsgUsed([{ codes: altCodes }]).join(",") !== "5,7") fail("普通のとき待ち時間の値 6 を文字番号と数えた");
+/* 表の位置は u32: 64 KiB を超える位置の表も読める (表の長さは u16 なので 1 つは 64 KiB 未満。3 つ並べる) */
+const bigBody = [Array.from({ length: 30000 }, () => 0)];   /* 60 KB の表 */
+const mtBig = m.parseBokuMsgTables(buildTables([bigBody, bigBody, bigBody, [[2, 3, 0x8000]]]));
+if (!mtBig || mtBig.tables[3].off < 0x10000 || m.bokuMsgText(mtBig.tables[3].msg.items[0].codes, glyphs) !== "うえ{END}") fail("64 KiB を超える位置の表が読めない");
 /* 9. docs/01 の「16進=文字」テーブルにする (2 バイトのリトルエンディアン) */
 const tbl = m.glyphsToHexTable(sparse).trimEnd().split("\n");
 if (!tbl.includes("0500=か") || !tbl.includes("0900=こ")) fail(`テーブルの行が違う: ${tbl.slice(0, 3)}`);

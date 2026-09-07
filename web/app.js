@@ -4591,7 +4591,8 @@ function parseBokuMsgTables(b) {
   let prev = 0;
   for (let i = 0; i < t; i++) {
     const p = 4 + i * 12;
-    const size = u16le(b, p + 4), off = u16le(b, p + 8);
+    /* 項目 12 バイト: u32 ? / u16 表の長さ / u16 番号 / u32 表の位置 (公開ソース MSG_notes.txt) */
+    const size = u16le(b, p + 4), off = u32le(b, p + 8);
     if (off < head || off + size > b.length || off < prev) return null;
     prev = off;
     const msg = size >= 8 ? parseBokuMsg(b.subarray(off, off + size), 4) : null;
@@ -4650,7 +4651,16 @@ function bokuMsgVoice(codes) {
  * 2 バイトの並びを文字にする。glyphs はフォントの並び (配列)。無ければ番号のまま。
  * tags を立てると校正ツール (tools/proofread.py) の書き方 (<BR> / <WAIT:xx>) にする
  */
-function bokuMsgText(codes, glyphs, tags) {
+/* 0x8002 が「待ち時間 + u16」ではなく引数の無い「ページ送り」になるファイル
+   (公開ソース MSG.py の ALT_NEWLINE_FILES)。待ち時間として読むと 1 字飛ばして本文がずれる */
+const ALT_BREAK_FILES = new Set(["turi_info.msg", "phot_info.msg", "okan_info.msg", "item_info.msg",
+                                 "insect_menu.msg", "fishing.msg", "fish_info.msg"]);
+function isAltBreak(name) {
+  const base = String(name || "").split(/[\\/]/).pop().toLowerCase();
+  return ALT_BREAK_FILES.has(base);
+}
+
+function bokuMsgText(codes, glyphs, tags, alt) {
   const voice = bokuMsgVoice(codes);
   if (voice) return tags ? `<VOICE:${voice}>` : `{VOICE ${voice}}`;
   let s = "";
@@ -4658,6 +4668,7 @@ function bokuMsgText(codes, glyphs, tags) {
     const c = codes[i];
     if (c === 0x8000) { if (!tags) s += "{END}"; break; }
     if (c === 0x8001) { s += tags ? "<BR>" : "\n"; continue; }
+    if (c === 0x8002 && alt) { s += tags ? "<BREAK>" : "{BREAK}\n"; continue; }
     if (c === 0x8002) {
       const n = codes[i + 1] ?? 0;
       s += tags ? `<WAIT:${n.toString(16).toUpperCase().padStart(2, "0")}>` : `{WAIT ${n}}`;
@@ -4715,13 +4726,13 @@ function glyphsToHexTable(glyphs) {
  * 本文で実際に使われている文字番号の一覧 (昇順)。制御コードと待ち時間の値は除く。
  * フォント画像の全部を書き出さなくても、この番号だけ書き出せば読める
  */
-function bokuMsgUsed(items) {
+function bokuMsgUsed(items, alt) {
   const used = new Set();
   for (const it of items) {
     if (bokuMsgVoice(it.codes)) continue;
     for (let i = 0; i < it.codes.length; i++) {
       const c = it.codes[i];
-      if (c === 0x8002) { i++; continue; }
+      if (c === 0x8002 && !alt) { i++; continue; }
       if (c < 0x8000) used.add(c);
     }
   }
@@ -4732,13 +4743,13 @@ function bokuMsgUsed(items) {
  * 読めた行を校正ツール向けの TSV にする (docs/04 の exercises/qa_target.tsv と同じ列)。
  * translation の列は original の写し。ここを直したものが校正の対象になる
  */
-function bokuMsgTsv(items, glyphs) {
+function bokuMsgTsv(items, glyphs, alt) {
   const esc = (t) => t.replace(/\t/g, " ").replace(/\r?\n/g, "<BR>");
   const lines = ["id\toffset\tsize\toriginal\ttranslation"];
   for (const it of items) {
     if (!it.codes.length) continue;
     if (bokuMsgVoice(it.codes)) continue;                     /* 音声の番号は文章ではない */
-    const text = esc(bokuMsgText(it.codes, glyphs, true));
+    const text = esc(bokuMsgText(it.codes, glyphs, true, alt));
     lines.push(`${it.i}\t0x${it.at.toString(16).toUpperCase()}\t${it.codes.length * 2}\t${text}\t${text}`);
   }
   return lines.join("\n") + "\n";
@@ -4792,15 +4803,18 @@ $("msgparse").addEventListener("click", () => {
   const glyphs = glyphText.trim() ? parseGlyphTable(glyphText) : null;
   const glyphCount = glyphs ? glyphs.filter((g) => g !== undefined).length : 0;
   const filled = r.items.filter((it) => it.codes.length);
+  /* 一部のメニュー (turi_info.msg など) は 0x8002 が引数の無いページ送り (公開ソースで確認) */
+  const alt = isAltBreak(state.current && (state.current.name || state.current.path || ""));
+  if (alt) tablesInfo += "0x8002 はページ送り (待ち時間ではない) · ";
   let maxCode = 0;
   for (const it of filled) {
     for (let i = 0; i < it.codes.length; i++) {
       const c = it.codes[i];
-      if (c === 0x8002) { i++; continue; }                    /* 待ち時間の値は文字番号ではない */
+      if (c === 0x8002 && !alt) { i++; continue; }            /* 待ち時間の値は文字番号ではない */
       if (c < 0x8000 && c > maxCode) maxCode = c;
     }
   }
-  const used = bokuMsgUsed(filled);
+  const used = bokuMsgUsed(filled, alt);
   state.usedGlyphs = new Set(used);                            /* TIM2 の目盛りで強調する */
   /* 文字表に無い番号 (本文に [番号] のまま残るもの)。目盛りでは橙で示し、まずそこを書き出せばよい */
   const missing = glyphs ? used.filter((c) => glyphs[c] === undefined || glyphs[c] === null) : [];
@@ -4857,7 +4871,7 @@ $("msgparse").addEventListener("click", () => {
   for (const it of (r.sjis ? r.items : filled).slice(0, 400)) {
     const tr = document.createElement("tr");
     const cells = [String(it.i), hx(it.at), r.sjis ? `${it.text.length} 字` : `${it.codes.length} 字`,
-                   r.sjis ? it.text : bokuMsgText(it.codes, glyphs)];
+                   r.sjis ? it.text : bokuMsgText(it.codes, glyphs, false, alt)];
     cells.forEach((text, ci) => {
       const td = document.createElement("td");
       if (ci === 3) { td.className = "jp"; td.style.whiteSpace = "pre-wrap"; }
@@ -4894,7 +4908,7 @@ $("msgparse").addEventListener("click", () => {
   ta.spellcheck = false;
   ta.readOnly = true;
   ta.style.minHeight = "120px";
-  ta.value = bokuMsgTsv(filled, glyphs);
+  ta.value = bokuMsgTsv(filled, glyphs, alt);
   ta.hidden = true;
   btn.addEventListener("click", async () => {
     ta.hidden = false;

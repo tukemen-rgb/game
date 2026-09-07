@@ -224,7 +224,8 @@ def parse_tables(b: bytes) -> list[dict] | None:
         return None
     tables, prev = [], 0
     for i in range(t):
-        size, ident, off = struct.unpack_from("<HHH", b, 4 + i * 12 + 4)
+        # 項目 12 バイト: u32 ? / u16 表の長さ / u16 番号 / u32 表の位置 (公開ソース MSG_notes.txt)
+        size, ident, off = struct.unpack_from("<HHI", b, 4 + i * 12 + 4)
         if off < head or off + size > len(b) or off < prev:
             return None
         prev = off
@@ -300,8 +301,21 @@ def voice_id(codes: list[int]) -> str | None:
     return s
 
 
-def decode(codes: list[int], glyphs: list[str] | None, tags: bool = True) -> str:
-    """ブラウザ側 bokuMsgText と同じ。tags=True で校正ツールの書き方 (<BR> / <WAIT:xx>)."""
+# 0x8002 が「待ち時間 + u16」ではなく、引数の無い「ページ送り」になるファイル
+# (公開ソース MSG.py の ALT_NEWLINE_FILES)。ここでは 0x8002 の次の値も文字なので、
+# 待ち時間として読むと 1 字飛ばして本文がずれる
+ALT_BREAK_FILES = {"turi_info.msg", "phot_info.msg", "okan_info.msg", "item_info.msg",
+                   "insect_menu.msg", "fishing.msg", "fish_info.msg"}
+
+
+def is_alt_break(name: str) -> bool:
+    return os.path.basename(name).lower() in ALT_BREAK_FILES
+
+
+def decode(codes: list[int], glyphs: list[str] | None, tags: bool = True, alt: bool = False) -> str:
+    """ブラウザ側 bokuMsgText と同じ。tags=True で校正ツールの書き方 (<BR> / <WAIT:xx>).
+
+    alt=True (ALT_BREAK_FILES) では 0x8002 は引数の無いページ送り <BREAK>."""
     v = voice_id(codes)
     if v:
         return f"<VOICE:{v}>" if tags else "{VOICE " + v + "}"
@@ -315,6 +329,8 @@ def decode(codes: list[int], glyphs: list[str] | None, tags: bool = True) -> str
             break
         if c == 0x8001:
             out.append("<BR>" if tags else "\n")
+        elif c == 0x8002 and alt:
+            out.append("<BREAK>" if tags else "{BREAK}\n")
         elif c == 0x8002:
             n = codes[i + 1] if i + 1 < len(codes) else 0
             out.append(f"<WAIT:{n:02X}>" if tags else "{WAIT %d}" % n)
@@ -373,10 +389,10 @@ def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> 
         parent = os.path.basename(os.path.dirname(os.path.abspath(path)))
         if parent:
             stem = parent
-    return text_rows_bytes(b, stem, glyphs, keep_voice)
+    return text_rows_bytes(b, stem, glyphs, keep_voice, alt=is_alt_break(path))
 
 
-def text_rows_bytes(b: bytes, stem: str, glyphs, keep_voice: bool = False):
+def text_rows_bytes(b: bytes, stem: str, glyphs, keep_voice: bool = False, alt: bool = False):
     got = parse_map_rec(b)
     if got:
         # 入れ物: 部品ごとに読む。刻み 8 (マップなど) の 0 番は命令列なので、
@@ -388,12 +404,12 @@ def text_rows_bytes(b: bytes, stem: str, glyphs, keep_voice: bool = False):
                 continue
             allow_raw = rec == 12 or it["i"] != 0
             rows += _rows_of(b[it["at"]:it["at"] + it["len"]], f"{stem}#{it['i']}", it["at"], glyphs,
-                             keep_voice, allow_raw)
+                             keep_voice, allow_raw, alt)
         return rows
-    return _rows_of(b, stem, 0, glyphs, keep_voice, True)
+    return _rows_of(b, stem, 0, glyphs, keep_voice, True, alt)
 
 
-def _rows_of(b: bytes, stem: str, base_off: int, glyphs, keep_voice: bool, allow_raw: bool):
+def _rows_of(b: bytes, stem: str, base_off: int, glyphs, keep_voice: bool, allow_raw: bool, alt: bool = False):
     """1 つの塊から行を作る。表の一覧 → 単体 (8/4 刻み) → 見出しの無い並び の順に試す."""
     rows = []
     tables = parse_tables(b)
@@ -404,14 +420,14 @@ def _rows_of(b: bytes, stem: str, base_off: int, glyphs, keep_voice: bool, allow
             for it in tb["msg"]:
                 if it["codes"] and (keep_voice or not voice_id(it["codes"])):
                     rows.append((f"{stem}:{tb['i']}-{it['i']}", base_off + tb["off"] + it["at"],
-                                 len(it["codes"]) * 2, decode(it["codes"], glyphs)))
+                                 len(it["codes"]) * 2, decode(it["codes"], glyphs, alt=alt)))
         return rows
     msg = parse_msg(b, 8) or parse_msg(b, 4) or (parse_raw(b) if allow_raw else None)
     if msg:
         for it in msg:
             if it["codes"] and (keep_voice or not voice_id(it["codes"])):
                 rows.append((f"{stem}:{it['i']}", base_off + it["at"], len(it["codes"]) * 2,
-                             decode(it["codes"], glyphs)))
+                             decode(it["codes"], glyphs, alt=alt)))
         return rows
     if allow_raw:
         sj = parse_sjis_list(b)

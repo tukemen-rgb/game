@@ -51,7 +51,7 @@ function buildTables(tables) {
   const dv = new DataView(buf.buffer);
   dv.setUint32(0, tables.length, true);
   let p = head;
-  bodies.forEach((body, i) => { dv.setUint32(4 + i * 12, 0xDEAD, true); dv.setUint16(8 + i * 12, body.length, true); dv.setUint16(10 + i * 12, 100 + i, true); dv.setUint16(12 + i * 12, p, true); buf.set(body, p); p += body.length; });
+  bodies.forEach((body, i) => { dv.setUint32(4 + i * 12, 0xDEAD, true); dv.setUint16(8 + i * 12, body.length, true); dv.setUint16(10 + i * 12, 100 + i, true); dv.setUint32(12 + i * 12, p, true); buf.set(body, p); p += body.length; });
   return buf;
 }
 function buildMap(parts, rec) {

@@ -784,7 +784,7 @@ class TestBoku2Cli(unittest.TestCase):
         bodies = [cls.build_msg(t, 4) for t in tables]
         out, p, data = struct.pack("<I", len(tables)), head, b""
         for i, b in enumerate(bodies):
-            out += struct.pack("<IHHHH", 0xDEAD, len(b), 100 + i, p, 0)
+            out += struct.pack("<IHHI", 0xDEAD, len(b), 100 + i, p)     # 位置は u32 (MSG_notes.txt)
             data += b
             p += len(b)
         return out + data
@@ -852,6 +852,34 @@ class TestBoku2Cli(unittest.TestCase):
             with open(tbl, "w", encoding="utf-8-sig", newline="\r\n") as fh:
                 fh.write("00=あ\n01=い\n")
             self.assertEqual(scrp.load_table(tbl).by_bytes[b"\x00"], "あ")
+
+    def test_alt_break_files_and_u32_table_offset(self):
+        """公開ソースで確認した 2 点: (1) turi_info.msg など 7 つのメニューでは 0x8002 が
+        引数の無いページ送り (待ち時間として読むと次の字を飛ばす)、(2) 表の一覧の位置は u32."""
+        import boku2
+        glyphs = list("あいうえおかきくけこ")
+        codes = [5, 0x8002, 6, 7, 0x8000]
+        self.assertEqual(boku2.decode(codes, glyphs, tags=False), "か{WAIT 6}く{END}")
+        self.assertEqual(boku2.decode(codes, glyphs, tags=False, alt=True), "か{BREAK}\nきく{END}")
+        self.assertEqual(boku2.decode(codes, glyphs, alt=True), "か<BREAK>きく")
+        self.assertTrue(boku2.is_alt_break("OUT/system/Item_Info.msg"))
+        self.assertFalse(boku2.is_alt_break("OUT/system/system.msg"))
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, want in [("item_info.msg", "か<BREAK>きく"), ("system.msg", "か<WAIT:06>く")]:
+                p = os.path.join(tmp, name)
+                with open(p, "wb") as fh:
+                    fh.write(self.build_msg([codes], 8))
+                rows = boku2.text_rows(p, glyphs)
+                self.assertEqual([r[3] for r in rows], [want], name)
+            # 使われている番号: ページ送りの次の値は文字なので数える
+            self.assertEqual(boku2.used_codes([os.path.join(tmp, "item_info.msg")]), [5, 6, 7])
+            self.assertEqual(boku2.used_codes([os.path.join(tmp, "system.msg")]), [5, 7])
+        # 64 KiB を超える位置の表 (表の長さは u16 なので、1 つは 64 KiB 未満。3 つ並べて位置を越えさせる)
+        big = self.build_tables([[[0] * 30000]] * 3 + [[[2, 3, 0x8000]]])
+        tables = boku2.parse_tables(big)
+        self.assertIsNotNone(tables)
+        self.assertGreater(tables[3]["off"], 0x10000)
+        self.assertEqual(boku2.decode(tables[3]["msg"][0]["codes"], glyphs, tags=False), "うえ{END}")
 
     def test_helpful_messages_for_common_mistakes(self):
         """初めての人がよく踏む 3 つに、次の一手が分かる文言を出すこと.
