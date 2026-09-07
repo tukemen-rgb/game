@@ -3278,6 +3278,16 @@ async function buildIdxReport() {
     lines.push("   " + [...b.subarray(recEnd, recEnd + 64)].map((v) => hex(v, 2)).join(" "));
   }
   if (c.dupes) { problems++; lines.push("→ 同じ名前があります。フォルダの入れ子の規則が実物と違うかもしれません (docs/09 #18)"); }
+  /* フォルダの閉じ方は 2 通りの読み方がある (こちらの stack / 公開ソースの flag)。CLI の check と同じ行 (docs/09 #56) */
+  if (c.known === "DFI") {
+    const mism = dfiRuleMismatch(b, dataEntry.size);
+    if (mism.length) {
+      problems++;
+      lines.push(`→ フォルダの規則が 2 通りで食い違うファイル ${mism.length} 件 (例: ${mism[0][0]} / ${mism[0][1]})。この行ごと報告してください`);
+    } else {
+      lines.push("フォルダの規則: 2 通り (stack / flag) で一致");
+    }
+  }
 
   const msgs = items.filter((it) => /\.msg$/i.test(it.name));
   lines.push(`.msg: ${msgs.length} 件 (例: ${msgs.slice(0, 4).map((it) => it.base || it.name).join(", ")})`);
@@ -3403,7 +3413,11 @@ function nameAt(b, p) {
  * 名前は最後にまとめて並びます。**並び順はレコードの順とは限りません**
  * (同じ作りのファイルが続く区間では、後ろから前へ下がっていきます)。
  */
-function readDfi(idx, dataSize) {
+function readDfi(idx, dataSize, rule) {
+  /* rule: "stack" (既定。閉じたフォルダの「続く」が 0 なら親も閉じる、何段でも) か
+           "flag" (公開ソース UNPACK.py の規則。「続く」0 のフォルダで旗を立て、次の
+           「続く」0 のファイルで 1〜2 段閉じる)。実物では両者が一致するはず */
+  rule = rule || "stack";
   if (idx.length < 32) return null;
   if (!(idx[0] === 0x44 && idx[1] === 0x46 && idx[2] === 0x49 && idx[3] === 0x00)) return null;
 
@@ -3444,7 +3458,7 @@ function readDfi(idx, dataSize) {
   const out = [];
   const stack = [];
   const seen = new Set();
-  let bad = 0, dupes = 0;
+  let bad = 0, dupes = 0, escape = false;
   for (let k = 0; k < recCount; k++) {
     const p = 16 + k * 16;
     const isDir = (idx[p] | (idx[p + 1] << 8)) === 1;
@@ -3452,6 +3466,7 @@ function readDfi(idx, dataSize) {
     const name = names[k] || "";
     if (isDir) {
       stack.push({ name: name === "/" ? "" : name, more });     /* 名前が無いフォルダは省く */
+      if (more === 0) escape = true;
       continue;
     }
     const lba = u32le(idx, p + 8), len = u32le(idx, p + 12);
@@ -3473,8 +3488,14 @@ function readDfi(idx, dataSize) {
       bad++;
     }
     if (more === 0) {
-      let d = stack.pop();
-      while (d && d.more === 0 && stack.length > 1) d = stack.pop();
+      if (rule === "flag") {
+        if (stack.length) stack.pop();
+        if (escape && stack.length) stack.pop();
+        escape = false;
+      } else {
+        let d = stack.pop();
+        while (d && d.more === 0 && stack.length > 1) d = stack.pop();
+      }
     }
   }
   if (out.length < 8 || bad > out.length * 0.05) return null;
@@ -3496,6 +3517,17 @@ function readDfi(idx, dataSize) {
     coverage: Math.min(1, used / Math.max(1, dataSize)),
     entries: out,
   };
+}
+
+/* 2 つのフォルダ規則 (stack / flag) で道筋が違うファイルを [stack の道筋, flag の道筋] で返す (docs/09 #56) */
+function dfiRuleMismatch(idx, dataSize) {
+  const a = readDfi(idx, dataSize, "stack"), b = readDfi(idx, dataSize, "flag");
+  if (!a || !b) return [];
+  const out = [];
+  for (let i = 0; i < Math.min(a.entries.length, b.entries.length); i++) {
+    if (a.entries[i].name !== b.entries[i].name) out.push([a.entries[i].name, b.entries[i].name]);
+  }
+  return out;
 }
 
 function analyzeNamedIndex(idx, dataSize) {

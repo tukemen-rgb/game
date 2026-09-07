@@ -31,6 +31,7 @@ async def main():
         print("report:", report.replace("\n", " | ")[:400])
         if not ("DFI: 期待どおり" in report and "問題なし" in report and "TIM2 (位置 0x80)" in report
                 and "[入れ物] 文言の入れ物: あり diary.bin, fish_on_mem.bin" in report
+                and "フォルダの規則: 2 通り (stack / flag) で一致" in report
                 and "[MAP] 1 件 / 入れ物として読めた 1 件 / 1 番が会話だった 1 件" in report and "はじめから" not in report):
             errors.append("report failed")
         # 3. 切り分け

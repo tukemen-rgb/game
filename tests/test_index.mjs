@@ -72,7 +72,7 @@ const ascii2 = (bytes) => {
 };
 const named = new Function("u32le", "ascii",
   src.slice(nstart, nend)
-  + "\nreturn { analyzeNamedIndex, namedEntries, isNameAt, scoreNamedLayout, readDfi };")(
+  + "\nreturn { analyzeNamedIndex, namedEntries, isNameAt, scoreNamedLayout, readDfi, dfiRuleMismatch };")(
   u32le, ascii2);
 
 /* 実物と同じ形の索引を組み立てる。
@@ -286,6 +286,37 @@ function buildRealDfi(dirCount, filesPerDir) {
 }
 
 const real = buildRealDfi(80, 24);
+
+/* レコードの並びをそのまま索引にする (フォルダの閉じ方の規則を試すため) */
+function encodeRecs(recs) {
+  const recEnd = 16 + recs.length * 16;
+  const nameBuf = [];
+  for (const r of recs) { for (const ch of r.name) nameBuf.push(ch.charCodeAt(0)); nameBuf.push(0); }
+  const buf = new Uint8Array(recEnd + nameBuf.length);
+  const dv = new DataView(buf.buffer);
+  buf.set([0x44, 0x46, 0x49, 0x00], 0);
+  dv.setUint32(4, 0x100, true);
+  let p = 16, lba = 16;
+  for (const r of recs) {
+    dv.setUint16(p, r.dir ? 1 : 0, true);
+    dv.setUint16(p + 2, r.more, true);
+    dv.setUint32(p + 4, 0x1234, true);
+    if (!r.dir) { dv.setUint32(p + 8, lba, true); dv.setUint32(p + 12, 2048, true); lba += 1; }
+    p += 16;
+  }
+  buf.set(nameBuf, recEnd);
+  return { buf, dataSize: lba * 2048 };
+}
+/* 普通の入れ子 (実物と同じ形) では、stack 規則と公開ソースの flag 規則が一致する */
+if (named.dfiRuleMismatch(real.buf, real.dataSize).length !== 0) fail("普通の入れ子で 2 つの規則が食い違う");
+/* A(続く 0) の中に B(続く 1) と C が並ぶ形では違う。flag 規則は B の最後のファイルで A まで閉じ、C が根に出る */
+const odd = encodeRecs([
+  { dir: true, more: 1, name: "/" }, { dir: true, more: 0, name: "A" }, { dir: true, more: 1, name: "B" },
+  { dir: false, more: 0, name: "b0.bin" }, { dir: true, more: 0, name: "C" }, { dir: false, more: 0, name: "c0.bin" },
+  ...Array.from({ length: 8 }, (_, i) => ({ dir: false, more: i === 7 ? 0 : 1, name: `r${i}.bin` })),
+]);
+const mism = named.dfiRuleMismatch(odd.buf, odd.dataSize);
+if (!mism.length || mism[0][0] !== "A/C/c0.bin" || mism[0][1] !== "C/c0.bin") fail(`食い違いが検出されない: ${JSON.stringify(mism.slice(0, 2))}`);
 
 /* 分かっている形は当てにいかず、そのまま読む */
 const dfiCand = named.readDfi(real.buf, real.dataSize);
