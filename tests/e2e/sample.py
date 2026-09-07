@@ -63,6 +63,18 @@ async def main():
         await page.click("#msgparse")
         await page.wait_for_timeout(200)
         menu = await page.eval_on_selector_all("#msgbox tbody td:nth-child(4)", "els => els.map(e => e.textContent)")
+        # 6.5 item_info.msg (0x8002 が引数の無いページ送りになるファイル): ファイル名で見分けて {BREAK} と読む
+        await page.fill("#treeq", "item_info")
+        await page.click("#tree .filerow:has(.nm:text-is('item_info.msg'))")
+        await page.wait_for_timeout(300)
+        await page.click('[data-tab="format"]')
+        await page.click("#msgparse")
+        await page.wait_for_timeout(200)
+        note_item = await page.text_content("#msgnote")
+        item = await page.eval_on_selector_all("#msgbox tbody td:nth-child(4)", "els => els.map(e => e.textContent)")
+        print("item note:", note_item); print("item:", item)
+        if "0x8002 はページ送り" not in note_item or item != ["あみ{BREAK}\nむしをつかまえる{END}", "つりざお{BREAK}\nさかなをつる{END}"]:
+            errors.append("alt-break file failed")
         # 7. マップの入れ物 → 1.bin → 会話
         await page.fill("#treeq", "M_A01000")
         await page.click("#tree .filerow:has(.nm:text-is('M_A01000.BIN'))")
