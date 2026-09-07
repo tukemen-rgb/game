@@ -853,6 +853,26 @@ class TestBoku2Cli(unittest.TestCase):
                 fh.write("00=あ\n01=い\n")
             self.assertEqual(scrp.load_table(tbl).by_bytes[b"\x00"], "あ")
 
+    def test_nested_containers_are_descended(self):
+        """入れ物の部品がさらに入れ物 (fish_on_mem.bin の 11〜16 番) でも、その中の文言を拾うこと.
+
+        文言として読めた部品には降りない (誤認を避ける)。深さは 2 段まで。"""
+        import boku2
+        glyphs = list("あいうえおかきくけこ")
+        msg = self.build_msg([[5, 6, 0x8000], [0, 1, 0x8000]], 4)
+        inner = self.build_map([b"\x22" * 32, b"\x33" * 48, msg])
+        outer = self.build_map([b"\x11" * 40, inner, None])
+        rows = boku2.text_rows_bytes(outer, "fish", glyphs)
+        self.assertEqual([(r[0], r[3]) for r in rows], [("fish#1#2:0", "かき"), ("fish#1#2:1", "あい")])
+        # 位置は外側のファイルの先頭からの値
+        outer_off = rows[0][1]
+        self.assertEqual(outer[outer_off:outer_off + 6], bytes([5, 0, 6, 0, 0, 0x80]))
+        # 3 段目には降りない (2 段まで)
+        third = self.build_map([b"\x44" * 16, outer])
+        self.assertEqual([r[0] for r in boku2.text_rows_bytes(third, "t", glyphs)], ["t#1#1#2:0", "t#1#1#2:1"])
+        fourth = self.build_map([b"\x55" * 16, third])
+        self.assertEqual(boku2.text_rows_bytes(fourth, "f", glyphs), [])
+
     def test_alt_break_files_and_u32_table_offset(self):
         """公開ソースで確認した 2 点: (1) turi_info.msg など 7 つのメニューでは 0x8002 が
         引数の無いページ送り (待ち時間として読むと次の字を飛ばす)、(2) 表の一覧の位置は u32."""
@@ -1250,8 +1270,8 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertIn("DFI: 期待どおり", res.stdout)
             self.assertIn("問題なし", res.stdout)
             self.assertIn("[フォント] system/bk_font.tms: TIM2 (位置 0x80)", res.stdout)
-            self.assertIn("[入れ物] 文言の入れ物: あり diary.bin", res.stdout)
-            self.assertIn("見つからない fish_on_mem.bin, on_mem_event.bin, saveload.bin", res.stdout)
+            self.assertIn("[入れ物] 文言の入れ物: あり diary.bin, fish_on_mem.bin", res.stdout)
+            self.assertIn("見つからない on_mem_event.bin, saveload.bin", res.stdout)
             self.assertIn("1 番が会話だった 2 件", res.stdout)
             self.assertNotIn("はじめから", res.stdout)          # 本文は出さない
             broken = os.path.join(tmp, "BROKEN")

@@ -142,6 +142,9 @@ CONFIG = ["おんりょう", "しんどう", "がめん"]           # 深いフ�
 # 0x8002 が引数の無いページ送りになるメニュー (公開ソースの ALT_NEWLINE_FILES の 1 つ)。
 # 待ち時間として読むと <BREAK> の次の字を飛ばしてしまう、その確認用
 ITEM_INFO = ["あみ<BREAK>むしをつかまえる", "つりざお<BREAK>さかなをつる"]
+# 魚の説明: fish_on_mem.bin の 11〜16 番の部品がさらに入れ物で、その 2 番が説明文
+# (公開ソース UNPACK.py の IMG_MAP_FILES)。入れ物の入れ子の確認用
+FISH = ["フナ<BR>ぬまにいる", "コイ<BR>かわにいる"]
 DIARY = ["きょうは、", "をした。", "たのしかった。"]     # 日記の雛形: 見出しの無い並び (diary.bin の 0 番)
 MAPS = {
     "M_A01000": [
@@ -175,6 +178,11 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
                                      [(0, 0, 0, 255), (255, 255, 255, 255)] + [(0, 0, 0, 0)] * 254, clut_type=3)
     diary = build_map([raw, diary_img], rec=12)
     answer["diary"] = [(f"diary#0:{i}", t) for i, t in enumerate(DIARY)]
+    # 入れ子の入れ物: 外側の 1 番が内側の入れ物で、その 2 番が説明文 (.msg 4 バイト刻み)
+    fish_msg = build_msg([encode(t, glyphs) for t in FISH], 4)
+    inner = build_map([b"\x22" * 32, b"\x33" * 48, fish_msg])
+    fish_on_mem = build_map([b"\x11" * 40, inner, None])
+    answer["fish_on_mem"] = [(f"fish_on_mem#1#2:{i}", t) for i, t in enumerate(FISH)]
 
     font_tim2, _ = make_tim2.font_sheet(rows=(len(glyphs) + COLS - 1) // COLS, cols=COLS, cell=CELL)
     tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + font_tim2
@@ -184,6 +192,7 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
     tree = [
         (True, 1, "/", None),
         (False, 1, "diary.bin", diary),
+        (False, 1, "fish_on_mem.bin", fish_on_mem),
         (True, 1, "00diary", None),
     ] + [(False, 0 if i == 7 else 1, f"nik{i:03d}.tm2", photo[i]) for i in range(8)] + [
         (True, 1, "system", None),

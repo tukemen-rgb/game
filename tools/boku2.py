@@ -392,7 +392,8 @@ def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> 
     return text_rows_bytes(b, stem, glyphs, keep_voice, alt=is_alt_break(path))
 
 
-def text_rows_bytes(b: bytes, stem: str, glyphs, keep_voice: bool = False, alt: bool = False):
+def text_rows_bytes(b: bytes, stem: str, glyphs, keep_voice: bool = False, alt: bool = False,
+                    base: int = 0, depth: int = 0):
     got = parse_map_rec(b)
     if got:
         # 入れ物: 部品ごとに読む。刻み 8 (マップなど) の 0 番は命令列なので、
@@ -402,11 +403,21 @@ def text_rows_bytes(b: bytes, stem: str, glyphs, keep_voice: bool = False, alt: 
         for it in parts:
             if not it["len"]:
                 continue
-            allow_raw = rec == 12 or it["i"] != 0
-            rows += _rows_of(b[it["at"]:it["at"] + it["len"]], f"{stem}#{it['i']}", it["at"], glyphs,
-                             keep_voice, allow_raw, alt)
+            part = b[it["at"]:it["at"] + it["len"]]
+            # 部品がさらに入れ物のことがある (fish_on_mem.bin の 11〜16 番の中の 2 番が魚の説明。
+            # 公開ソース UNPACK.py の IMG_MAP_FILES)。入れ物は 8 バイト刻みの .msg と形が
+            # 同じなので、先に入れ物として試す (位置が 16 バイト揃えで長さがつながる、という
+            # 入れ物の方が条件が厳しい)。2 段まで降り、それより深いものは文言として読まない
+            inner = parse_map_rec(part)
+            if inner and sum(1 for x in inner[1] if x["len"]) >= 2:
+                found = (text_rows_bytes(part, f"{stem}#{it['i']}", glyphs, keep_voice, alt,
+                                         base + it["at"], depth + 1) if depth < 2 else [])
+            else:
+                allow_raw = rec == 12 or it["i"] != 0
+                found = _rows_of(part, f"{stem}#{it['i']}", base + it["at"], glyphs, keep_voice, allow_raw, alt)
+            rows += found
         return rows
-    return _rows_of(b, stem, 0, glyphs, keep_voice, True, alt)
+    return _rows_of(b, stem, base, glyphs, keep_voice, True, alt)
 
 
 def _rows_of(b: bytes, stem: str, base_off: int, glyphs, keep_voice: bool, allow_raw: bool, alt: bool = False):
