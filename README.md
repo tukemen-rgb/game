@@ -125,7 +125,13 @@ python3 tests/run_tests.py
    (`make_elf.py` が答えを表示するので突き合わせられる)
 10. **実物と同じ形で通す** — `make_boku2_sample.py` のデータを構造探査台と
     `boku2.py` で索引 → 会話 → 文字表 → 校正用 TSV まで通し、`answer.tsv` と
-    突き合わせる (docs/10)
+    突き合わせる (課題 8、docs/10)
+11. **わざと壊して診断を読む** — `make_boku2_sample.py --break msg` などで 5 通りに
+    壊したデータを `boku2.py check` にかけ、`→` の行がどの段の外れ方かを読む (課題 9)。
+    実物で最初に貼るのはこの出力 (docs/10 の「報告するとき」)
+
+Windows で使う場合は、先に docs/10 の「Windows で使うとき」(`python3` → `py -3` の
+読み替えなど) を一度だけ読んでください。
 
 ## ディレクトリ構成
 
