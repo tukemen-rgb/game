@@ -5217,7 +5217,7 @@ function renderTim2(b, at) {
   const hint = document.createElement("p");
   hint.className = "hint";
   hint.textContent = "フォント画像なら「文字の番号を重ねる」を押してください。番号が .msg の文字番号に対応します"
-    + " (僕の夏休み 2 のフォントは 1 行 17 字、刻み 22 ドット。描かれる枠は 23 ドットで 1 ドット重なる)。番号順に文字を書き出したものが、.msg 読みに貼る文字表です。";
+    + " (僕の夏休み 2 のフォントは 1 行 23 字、刻み 22 ドット。描かれる枠は 23 ドットで 1 ドット重なる。列数は画像の幅から自動で決まる)。番号順に文字を書き出したものが、.msg 読みに貼る文字表です。";
   wrap.append(hint);
 
   const holder = document.createElement("div");

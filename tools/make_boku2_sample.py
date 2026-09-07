@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import make_tim2  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-COLS = 17          # フォント画像の 1 行の文字数 (公開ソースの asm_notes: char % 17)
+COLS = 23          # フォント画像の 1 行の文字数 (公開ソース reprint.py の N_COLUMNS = 23。asm_notes の「17」は 0x17)
 CELL = 22          # 文字の刻み (0x16)。実機は 0x17 = 23 ドットの枠を 22 刻みで描く (asm_notes.txt)
 
 # ---------- 文字表 (フォントの並び) ----------
