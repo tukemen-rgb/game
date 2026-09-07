@@ -220,3 +220,33 @@ python3 tools/boku2.py text work/OUT -f work/BOKU2SAMPLE/font.txt -o work/all.ts
 
 要点: ここまでの課題 1〜6 の道具 (16 進、文字テーブル、ポインタ表、フォント、校正) が、
 実物と同じ形でも **そのまま通る** こと。形式が変わっても考え方は変わらない。
+
+## 課題 9 — わざと壊して、診断の「→」を読む
+
+実物では、練習データのように「問題なし」とは限らない。`check` が `→` の行を出したとき、
+それが索引・本体・.msg・フォント・入れ物のどの段で外れたかを読めるようになる練習。
+壊し方は 5 通り (`--break` の選択肢)。
+
+```text
+python3 tools/make_boku2_sample.py --break idx  --out work/BROKEN   # 索引の先頭 (DFI ではなくなる)
+python3 tools/make_boku2_sample.py --break name --out work/BROKEN   # 索引の名前の置き場
+python3 tools/make_boku2_sample.py --break msg  --out work/BROKEN   # system.msg の先頭
+python3 tools/make_boku2_sample.py --break font --out work/BROKEN   # bk_font.tms の TIM2 の目印
+python3 tools/make_boku2_sample.py --break map  --out work/BROKEN   # MAP の入れ物の先頭
+python3 tools/boku2.py check work/BROKEN                            # 終了コードは 1 (問題あり)
+```
+
+やること (5 通りそれぞれで):
+
+1. `check` の出力から `→` の行を書き出す。「先頭 16 バイト …」のような手がかりが
+   付いていれば、それも一緒に
+2. [10-僕夏2の手順.md](../docs/10-僕夏2の手順.md) の「困ったとき」の表で、その行に
+   対応する症状を探す
+3. 構造探査台にも同じ `work/BROKEN` を読ませ、「報告用の要約」に **同じ行** が出る
+   ことを確かめる (ブラウザと一括処理は同じ診断を出す)
+
+**確認:** 5 通りとも `→` の行が 1 つ以上出て、`== 結果` が「問題あり」になる。
+`idx` だけは索引が読めないので、そこで診断が止まる (それが正しい)。
+
+要点: 実物で最初に貼るのはこの出力 ([10-僕夏2の手順.md](../docs/10-僕夏2の手順.md) の
+「報告するとき」)。**どの段で外れたか** を自分で言えれば、次の手はほぼ決まる。

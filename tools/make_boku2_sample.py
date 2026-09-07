@@ -236,16 +236,68 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
     return answer
 
 
+# 診断 (boku2.py check) の読み方を練習するための壊し方。実物で起き得る外れ方を 1 つずつ再現する
+DAMAGE = {
+    "idx":  "索引の先頭 4 バイトを壊す (DFI ではなくなる → 索引が読めない)",
+    "name": "索引の名前の置き場を壊す (名前が付かないファイルが多い)",
+    "msg":  "system.msg の先頭を壊す (.msg が読めない)",
+    "font": "bk_font.tms の TIM2 の目印を壊す (フォントが TIM2 として読めない)",
+    "map":  "MAP の 1 つを壊す (入れ物として読めない)",
+}
+
+
+def damage(out_dir: str, kind: str) -> str:
+    """out_dir の練習データを kind の壊し方で壊し、何をしたかを返す (check の練習用)."""
+    idx_path = os.path.join(out_dir, "BOKU2.IDX")
+    img_path = os.path.join(out_dir, "BOKU2.IMG")
+    if kind == "idx":
+        with open(idx_path, "r+b") as fh:
+            fh.write(b"XXXX")
+        return "BOKU2.IDX の先頭 4 バイトを XXXX にした"
+    with open(idx_path, "rb") as fh:
+        idx = fh.read()
+    if kind == "name":
+        rec_end = 16
+        while rec_end + 16 <= len(idx) and (idx[rec_end] | (idx[rec_end + 1] << 8)) in (0, 1):
+            rec_end += 16
+        with open(idx_path, "r+b") as fh:
+            fh.seek(rec_end)
+            fh.write(b"\xff" * 64)
+        return f"BOKU2.IDX の名前の置き場 (0x{rec_end:X} から 64 バイト) を FF で埋めた"
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import boku2
+    entries = boku2.read_dfi(idx, os.path.getsize(img_path))
+    if kind in ("msg", "font"):
+        want = "system/system.msg" if kind == "msg" else "system/bk_font.tms"
+        e = next(x for x in entries if x["path"] == want)
+        with open(img_path, "r+b") as fh:
+            fh.seek(e["at"] + (0 if kind == "msg" else 0x80))
+            fh.write(b"\xee" * 16)
+        return f"BOKU2.IMG の {want} の先頭 16 バイト{'' if kind == 'msg' else ' (TIM2 の位置)'}を EE で埋めた"
+    if kind == "map":
+        name = sorted(os.listdir(os.path.join(out_dir, "MAP")))[0]
+        with open(os.path.join(out_dir, "MAP", name), "r+b") as fh:
+            fh.write(b"\xee" * 16)
+        return f"MAP/{name} の先頭 16 バイトを EE で埋めた"
+    raise ValueError(kind)
+
+
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")      # Windows の cp932 コンソール/リダイレクトで落ちない
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=os.path.join(REPO, "work", "BOKU2SAMPLE"))
+    ap.add_argument("--break", dest="damage", choices=sorted(DAMAGE),
+                    help="わざと壊す (診断の読み方の練習用): " + " / ".join(f"{k}={v}" for k, v in DAMAGE.items()))
     args = ap.parse_args()
     answer = build_sample(args.out)
     n = sum(len(v) for v in answer.values())
     print(f"{args.out}: BOKU2.IDX / BOKU2.IMG / MAP/*.BIN / font.txt / answer.tsv ({n} 行)")
-    print("次: docs/10-僕夏2の手順.md の手順を、このフォルダで最後まで試せます")
+    if args.damage:
+        print("壊した: " + damage(args.out, args.damage))
+        print(f"次: python3 tools/boku2.py check {args.out} で、→ の行を読む練習 (exercises 課題 9)")
+    else:
+        print("次: docs/10-僕夏2の手順.md の手順を、このフォルダで最後まで試せます")
 
 
 if __name__ == "__main__":

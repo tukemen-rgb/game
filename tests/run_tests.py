@@ -1529,6 +1529,36 @@ class TestDocs(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(REPO, t)), t)
 
 
+class TestDamageDrill(unittest.TestCase):
+    """診断の読み方の練習 (make_boku2_sample.py --break …) が、意図した → の行を出すこと."""
+
+    EXPECT = {
+        "idx": "DFI でないので",
+        "name": "名前が付かないファイルが多い",
+        "msg": "読めない .msg の例: system/system.msg",
+        "font": "TIM2 として読めません",
+        "map": "入れ物として読めないファイルの例",
+    }
+
+    def test_each_damage_kind_is_diagnosed(self):
+        import io
+        import boku2
+        import make_boku2_sample
+        for kind, want in self.EXPECT.items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                folder = os.path.join(tmp, "S")
+                make_boku2_sample.build_sample(folder)
+                note = make_boku2_sample.damage(folder, kind)
+                self.assertTrue(note)
+                out = io.StringIO()
+                rc = boku2.check(folder, out=out)
+                self.assertEqual(rc, 1, f"{kind}: 問題なしになった\n{out.getvalue()}")
+                self.assertIn(want, out.getvalue(), kind)
+                self.assertIn("→", out.getvalue(), kind)
+        # 壊し方の一覧と選択肢が一致していること (README に書く名前がずれないように)
+        self.assertEqual(set(make_boku2_sample.DAMAGE), set(self.EXPECT))
+
+
 class TestDamagedData(unittest.TestCase):
     """壊れたデータでも、診断と抽出が追跡表示 (Traceback) で止まらないこと.
 
