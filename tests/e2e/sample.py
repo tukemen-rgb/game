@@ -79,6 +79,34 @@ async def main():
         print("item note:", note_item); print("item:", item)
         if "0x8002 はページ送り" not in note_item or item != ["あみ{BREAK}\nむしをつかまえる{END}", "つりざお{BREAK}\nさかなをつる{END}"]:
             errors.append("alt-break file failed")
+        # 6.7 入れ物の中の入れ物 (fish_on_mem.bin → 1.bin がまた入れ物 → その 2.bin が魚の説明)。
+        #     画面では「切り分ける」を 2 回。CLI (#53) の再帰と同じ答えになること
+        await page.fill("#treeq", "fish_on_mem")
+        await page.click("#tree .filerow:has(.nm:text-is('fish_on_mem.bin'))")
+        await page.wait_for_timeout(300)
+        await page.click('[data-tab="format"]')
+        await page.click("#mapsplit")
+        await page.wait_for_function("document.querySelector('#capnote').textContent.includes('マップの入れ物として')", timeout=20000)
+        await page.fill("#treeq", "1.bin")
+        await page.click("#tree .filerow:has(.nm:text-is('1.bin'))")
+        await page.wait_for_timeout(300)
+        await page.click('[data-tab="format"]')
+        await page.click("#msgparse")
+        await page.wait_for_timeout(200)
+        note_inner = await page.text_content("#msgnote")
+        await page.click("#mapsplit")
+        await page.wait_for_function("document.querySelectorAll('#tree .filerow').length > 0", timeout=20000)
+        await page.wait_for_timeout(300)
+        await page.fill("#treeq", "2.bin")
+        await page.click("#tree .filerow:has(.nm:text-is('2.bin'))")
+        await page.wait_for_timeout(300)
+        await page.click('[data-tab="format"]')
+        await page.click("#msgparse")
+        await page.wait_for_timeout(200)
+        fish = await page.eval_on_selector_all("#msgbox tbody td:nth-child(4)", "els => els.map(e => e.textContent)")
+        print("inner note:", note_inner); print("fish:", fish)
+        if "入れ物です" not in note_inner or fish != ["フナ\nぬまにいる{END}", "コイ\nかわにいる{END}"]:
+            errors.append("nested container failed")
         # 7. マップの入れ物 → 1.bin → 会話
         await page.fill("#treeq", "M_A01000")
         await page.click("#tree .filerow:has(.nm:text-is('M_A01000.BIN'))")
@@ -87,7 +115,9 @@ async def main():
         await page.click("#mapsplit")
         await page.wait_for_function("document.querySelector('#capnote').textContent.includes('マップの入れ物として')", timeout=20000)
         await page.fill("#treeq", "1.bin")
-        await page.click("#tree .filerow:has(.nm:text-is('1.bin'))")
+        # 1.bin は fish_on_mem の部品にもあるので、いちばん後に増えた (マップの) 1.bin を選ぶ
+        await page.eval_on_selector_all("#tree .filerow",
+                                        "els => els.filter(e => e.querySelector('.nm').textContent === '1.bin').pop().click()")
         await page.wait_for_timeout(300)
         await page.click('[data-tab="format"]')
         await page.click("#msgparse")
