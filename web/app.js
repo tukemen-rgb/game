@@ -5208,14 +5208,16 @@ function renderTim2(b, at) {
   const zoomIn = mk("拡大率", "tim2zoom", 2);
   const gridOn = document.createElement("button");
   gridOn.className = "chipbtn"; gridOn.textContent = "文字の番号を重ねる"; gridOn.setAttribute("aria-pressed", "false");
-  const cwIn = mk("1 文字の幅", "tim2cw", 23), chIn = mk("1 文字の高さ", "tim2ch", 23);
+  /* 僕の夏休み 2 の実機の描画ルーチン (公開ソース asm_notes.txt): 文字の刻みは 0x16 = 22 ドット、
+     描く枠は 0x17 = 23 ドット (1 ドット重なる)。番号を振る刻みは 22 */
+  const cwIn = mk("1 文字の幅", "tim2cw", 22), chIn = mk("1 文字の高さ", "tim2ch", 22);
   const oxIn = mk("左の余白", "tim2ox", 0), oyIn = mk("上の余白", "tim2oy", 0);
   controls.append(gridOn);
   wrap.append(controls);
   const hint = document.createElement("p");
   hint.className = "hint";
   hint.textContent = "フォント画像なら「文字の番号を重ねる」を押してください。番号が .msg の文字番号に対応します"
-    + " (僕の夏休み 2 のフォントは 1 行 17 字、1 字 23 ドット前後)。番号順に文字を書き出したものが、.msg 読みに貼る文字表です。";
+    + " (僕の夏休み 2 のフォントは 1 行 17 字、刻み 22 ドット。描かれる枠は 23 ドットで 1 ドット重なる)。番号順に文字を書き出したものが、.msg 読みに貼る文字表です。";
   wrap.append(hint);
 
   const holder = document.createElement("div");

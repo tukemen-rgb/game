@@ -53,6 +53,10 @@ async def main():
         await page.click('[data-tab="format"]')
         await page.wait_for_selector("#formatbox canvas")
         fmt = await page.text_content("#formatbox")
+        # 目盛りの既定値は実機の刻み 22 ドット (asm_notes.txt の *0x16)。23 だと 1 列ごとに 1 ドットずれる
+        cw, ch = await page.input_value("#tim2cw"), await page.input_value("#tim2ch")
+        if (cw, ch) != ("22", "22"):
+            errors.append(f"grid default is {cw}x{ch}, want 22x22")
         # 6. 文字表を貼る → 日本語になる
         font = open(os.path.join(S, "font.txt"), encoding="utf-8").read()
         await page.fill("#treeq", "system.msg")

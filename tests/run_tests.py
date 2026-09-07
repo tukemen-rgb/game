@@ -1298,8 +1298,8 @@ class TestBoku2Sample(unittest.TestCase):
                 self.assertEqual(res.returncode, 0, res.stderr)
                 at, w, h = json.loads(res.stdout)
                 self.assertEqual(at, 0x80)
-                self.assertEqual(w, 17 * 23)
-                self.assertEqual(h % 23, 0)
+                self.assertEqual(w, 17 * make_boku2_sample.CELL)      # 刻み 22 (asm_notes.txt の *0x16)
+                self.assertEqual(h % make_boku2_sample.CELL, 0)
 
 
 class TestDocs(unittest.TestCase):
