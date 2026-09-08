@@ -1410,9 +1410,19 @@ class TestDocs(unittest.TestCase):
             doc = fh.read()
         arrows = re.findall(r'say\(f?"→ ([^"{]+)', src)
         self.assertGreaterEqual(len(arrows), 8, arrows)
+        keys = set()
         for head in arrows:
             key = re.split(r"[。、(:]", head)[0].strip()[:14]      # 行頭の言い回しで照合
+            keys.add(key)
             self.assertIn(key, doc, f"docs/10 に説明が無い → の行: {head}")
+        # ブラウザの要約の → も、同じ言い回しで、CLI に無いものを増やしていないこと (#64)
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        js_arrows = re.findall(r'lines\.push\([`"]→ ([^`"$]+)', app)
+        self.assertGreaterEqual(len(js_arrows), 6, js_arrows)
+        for head in js_arrows:
+            key = re.split(r"[。、(:]", head)[0].strip()[:14]
+            self.assertIn(key, keys, f"ブラウザだけにある → の行 (CLI と docs/10 に合わせる): {head}")
     def test_manual_mentions_the_screen_features(self):
         """画面にある主要な物 (要約の行、目盛りの色、ページ送り、入れ物の入れ子…) が、
         説明書 docs/07 にも書いてあること。画面だけ増えて説明書が古くなるのを防ぐ (#61)."""
