@@ -4755,6 +4755,188 @@ function parseGlyphTable(text) {
   return Array.from(text.replace(/\r?\n/g, ""));
 }
 
+/* ==================== 文字表の下書き (形が似ている字を当てる) ====================
+ *
+ * 実物のフォントは 1656 字あり、番号順に手で書き写すのが通し作業で一番重い。ここでは
+ * フォント画像の各マスの「インクの形」と、ブラウザで同じ大きさに描いた文字の形を
+ * 突き合わせて、下書きを作る。書体が違うので当たりは保証しない。**人が目で直す前提**の
+ * 下書きであって、答えではない。合っているかどうかは、貼ってから .msg を読み直せば分かる。
+ */
+
+const GLYPH_FEAT = 16;                         /* 形は 16×16 に均してから比べる */
+/** 下書きの候補。この作品の本文はほぼ仮名と数字と記号なので、まずそこを埋める */
+const GLYPH_CANDIDATES =
+  "0123456789" +
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" +
+  "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん" +
+  "ぁぃぅぇぉっゃゅょがぎぐげござじずぜぞだぢづでどばびぶべぼぱぴぷぺぽ" +
+  "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン" +
+  "ァィゥェォッャュョガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴー" +
+  "。、，．・：；？！゛゜「」『』（）〜…";
+
+/**
+ * 画像のどちらが「字」かを決める。透明が多ければ透明度が字、そうでなければ
+ * 地の明るさの逆 (明るい地なら暗い方が字)
+ */
+function glyphInkPolarity(rgba) {
+  const n = rgba.length / 4;
+  let clear = 0, lum = 0;
+  for (let i = 0; i < rgba.length; i += 4) {
+    if (rgba[i + 3] < 128) clear++;
+    lum += (rgba[i] * 299 + rgba[i + 1] * 587 + rgba[i + 2] * 114) / 1000;
+  }
+  if (clear > n * 0.15) return { alpha: true, invert: false };
+  return { alpha: false, invert: lum / Math.max(1, n) > 127 };
+}
+
+/** 画像の 1 マスぶんのインク (0〜1) を取り出す */
+function glyphCellInk(rgba, imgW, x0, y0, cw, ch, pol) {
+  const out = new Float32Array(cw * ch);
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const i = ((y0 + y) * imgW + (x0 + x)) * 4;
+      let v;
+      if (pol.alpha) v = rgba[i + 3] / 255;
+      else {
+        const l = (rgba[i] * 299 + rgba[i + 1] * 587 + rgba[i + 2] * 114) / 255000;
+        v = pol.invert ? 1 - l : l;
+      }
+      out[y * cw + x] = v;
+    }
+  }
+  return out;
+}
+
+/**
+ * インクの形を、大きさと位置によらない特徴にする。字の外枠で切り出して 16×16 に均し、
+ * 合計 1 に正規化する。空きマスは null (字が無い所を当てにいかないため)
+ */
+function inkFeature(cell, cw, ch, size) {
+  size = size || GLYPH_FEAT;
+  let max = 0, total = 0;
+  for (const v of cell) { if (v > max) max = v; total += v; }
+  if (max < 0.2 || total < 1.5) return null;
+  const th = max * 0.35;
+  let x0 = cw, x1 = -1, y0 = ch, y1 = -1;
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      if (cell[y * cw + x] < th) continue;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  if (x1 < x0 || y1 < y0) return null;
+  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+  const f = new Float32Array(size * size);
+  let sum = 0;
+  for (let j = 0; j < size; j++) {
+    for (let i = 0; i < size; i++) {
+      const sx = x0 + (i * bw) / size, ex = x0 + ((i + 1) * bw) / size;
+      const sy = y0 + (j * bh) / size, ey = y0 + ((j + 1) * bh) / size;
+      let acc = 0, cnt = 0;
+      for (let y = Math.floor(sy); y < Math.max(Math.floor(sy) + 1, Math.ceil(ey)); y++) {
+        for (let x = Math.floor(sx); x < Math.max(Math.floor(sx) + 1, Math.ceil(ex)); x++) {
+          if (x < 0 || y < 0 || x >= cw || y >= ch) continue;
+          acc += cell[y * cw + x];
+          cnt++;
+        }
+      }
+      const v = cnt ? acc / cnt : 0;
+      f[j * size + i] = v;
+      sum += v;
+    }
+  }
+  if (sum <= 0) return null;
+  for (let i = 0; i < f.length; i++) f[i] /= sum;
+  return f;
+}
+
+/** 形の似ぐあい (0〜1)。同じ形なら 1、重なりが無ければ 0 */
+function glyphFeatureScore(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += Math.min(a[i], b[i]);
+  return s;
+}
+
+/**
+ * マスと候補の総当たりから、似ている順に 1 対 1 で割り当てる。
+ * フォントには同じ字が 2 回出てこないので、使った候補は他のマスに回さない。
+ *   cells: [{ n, feat }]  cands: [{ ch, feat }]  →  [{ n, ch, score }] (番号順)
+ */
+function draftGlyphMatches(cells, cands, opts) {
+  const min = (opts && opts.minScore != null) ? opts.minScore : 0.55;
+  const pairs = [];
+  /* 点数そのものは当たり外れの目安にならない (合っている字と間違えた字で分布が重なる。
+     実測は docs/11 第 10 節)。効くのは 1 番目と 2 番目の差で、差が小さいマスほど怪しい */
+  const margin = new Map();
+  for (const c of cells) {
+    if (!c.feat) continue;
+    let b1 = 0, b2 = 0;
+    for (const k of cands) {
+      const s = glyphFeatureScore(c.feat, k.feat);
+      if (s > b1) { b2 = b1; b1 = s; } else if (s > b2) { b2 = s; }
+      if (s >= min) pairs.push({ n: c.n, ch: k.ch, score: s });
+    }
+    margin.set(c.n, b1 - b2);
+  }
+  pairs.sort((p, q) => q.score - p.score || p.n - q.n);
+  const tookN = new Set(), tookCh = new Set(), out = [];
+  for (const p of pairs) {
+    if (tookN.has(p.n) || tookCh.has(p.ch)) continue;
+    tookN.add(p.n);
+    tookCh.add(p.ch);
+    out.push({ n: p.n, ch: p.ch, score: p.score, margin: margin.get(p.n) || 0 });
+  }
+  out.sort((a, b) => a.n - b.n);
+  return out;
+}
+
+/** 候補の文字を、マスと同じ大きさでブラウザに描いて特徴にする */
+function glyphCandidateFeatures(chars, cw, ch) {
+  const cv = document.createElement("canvas");
+  cv.width = cw; cv.height = ch;
+  const g = cv.getContext("2d", { willReadFrequently: true });
+  const out = [];
+  for (const c of chars) {
+    g.fillStyle = "#000";
+    g.fillRect(0, 0, cw, ch);
+    g.fillStyle = "#fff";
+    g.font = `${Math.max(6, Math.floor(ch * 0.86))}px ${getComputedStyle(document.body).fontFamily}`;
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(c, cw / 2, ch / 2);
+    const d = g.getImageData(0, 0, cw, ch).data;
+    const cell = new Float32Array(cw * ch);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+      cell[p] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 255000;
+    }
+    const feat = inkFeature(cell, cw, ch);
+    if (feat) out.push({ ch: c, feat });
+  }
+  return out;
+}
+
+/** 下書きを既存の文字表に混ぜる。人が書いた分は上書きしない (番号=文字 の行にそろえる) */
+function mergeGlyphDraft(existingText, draft) {
+  const map = existingText.trim() ? parseGlyphTable(existingText) : [];
+  let added = 0;
+  for (const d of draft) {
+    if (map[d.n] !== undefined && map[d.n] !== null && map[d.n] !== "") continue;
+    map[d.n] = d.ch;
+    added++;
+  }
+  const lines = [];
+  for (let i = 0; i < map.length; i++) {
+    const g = map[i];
+    if (g === undefined || g === null || g === "") continue;
+    lines.push(`${i}=${g}`);
+  }
+  return { text: lines.join("\n") + "\n", added };
+}
+
 /**
  * 文字表を docs/01 の「16進=文字」のテーブルにする。
  * 文字番号は 2 バイトのリトルエンディアンなので、ファイル上の並び (下位, 上位) の 16 進で書く。
@@ -5263,7 +5445,11 @@ function renderTim2(b, at) {
      描く枠は 0x17 = 23 ドット (1 ドット重なる)。番号を振る刻みは 22 */
   const cwIn = mk("1 文字の幅", "tim2cw", 22), chIn = mk("1 文字の高さ", "tim2ch", 22);
   const oxIn = mk("左の余白", "tim2ox", 0), oyIn = mk("上の余白", "tim2oy", 0);
-  controls.append(gridOn);
+  const draftBtn = document.createElement("button");
+  draftBtn.className = "chipbtn";
+  draftBtn.id = "tim2draft";
+  draftBtn.textContent = "文字表の下書きを作る";
+  controls.append(gridOn, draftBtn);
   wrap.append(controls);
   const hint = document.createElement("p");
   hint.className = "hint";
@@ -5323,6 +5509,46 @@ function renderTim2(b, at) {
   gridOn.addEventListener("click", () => {
     gridOn.setAttribute("aria-pressed", gridOn.getAttribute("aria-pressed") === "true" ? "false" : "true");
     draw();
+  });
+  draftBtn.addEventListener("click", () => {
+    const cw = Math.max(1, Number(cwIn.value) || 1), ch = Math.max(1, Number(chIn.value) || 1);
+    const ox = Number(oxIn.value) || 0, oy = Number(oyIn.value) || 0;
+    const cols = Math.max(1, Math.floor((pic.width - ox) / cw));
+    const rows = Math.max(0, Math.floor((pic.height - oy) / ch));
+    const total = cols * rows;
+    const pol = glyphInkPolarity(rgba);
+    /* 要る所から埋める。文字表に足りない番号 → 使われている番号 → 先頭から */
+    const missing = state.missingGlyphs && state.missingGlyphs.size ? [...state.missingGlyphs] : null;
+    const used = state.usedGlyphs && state.usedGlyphs.size ? [...state.usedGlyphs] : null;
+    let targets = missing || used;
+    if (!targets) {
+      targets = [];
+      for (let n = 0; n < Math.min(total, 400); n++) targets.push(n);
+    }
+    targets = targets.filter((n) => n >= 0 && n < total);
+    const cells = targets.map((n) => {
+      const x = ox + (n % cols) * cw, y = oy + Math.floor(n / cols) * ch;
+      return { n, feat: inkFeature(glyphCellInk(rgba, pic.width, x, y, cw, ch, pol), cw, ch) };
+    });
+    const cands = glyphCandidateFeatures(GLYPH_CANDIDATES, cw, ch);
+    const draft = draftGlyphMatches(cells, cands);
+    const ta = $("msgglyphs");
+    const merged = mergeGlyphDraft(ta.value, draft);
+    ta.value = merged.text;
+    try { localStorage.setItem("boku2.glyphs", ta.value); } catch (err) { /* 保存できない設定でも困らない */ }
+    /* 2 番目の候補と差が小さいマスほど怪しい。まずここを疑えば直しが速い
+       (点数そのものは当たり外れの目安にならない。実測は docs/11 第 10 節) */
+    const shaky = draft.slice().sort((a, b) => a.margin - b.margin).slice(0, 12)
+      .map((d) => `${d.n}=${d.ch}`).join(" ");
+    hint.textContent = `形の似ている字を当てて ${merged.added} 字を文字表に入れました`
+      + ` (調べたマス ${cells.length} / 候補 ${cands.length} 字)。書体が違うので当たりは保証しません。`
+      + "必ず目で確かめてください。「.msg として読む」を押し直すと、当たっているかが本文で分かります。"
+      + "漢字は候補に入れていないので手で足してください。人が書いた分は上書きしません。"
+      + (missing || used ? "" : " 先に .msg を読んでからだと、本文で要る番号だけに絞れます"
+        + " (いまは先頭から順に見たので、漢字や模様のマスにも仮名を当てています)。")
+      + (shaky ? ` 紛らわしい順 (2 番目の候補と差が小さい順): ${shaky}。` : "")
+      + "とくに 小書きの字 (っ ゃ) と大きい字、濁点・半濁点の有無、数字と英字 (0 と O、1 と I)、"
+      + "句点と半濁点 (。と ゜) は形が近いので間違えます。";
   });
   draw();
   return wrap;

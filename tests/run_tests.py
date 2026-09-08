@@ -1877,6 +1877,22 @@ class TestBokuMsgInBrowser(unittest.TestCase):
         self.assertNotIn("Traceback", res.stderr)
 
 
+class TestGlyphDraftInBrowser(unittest.TestCase):
+    """文字表の下書き (フォント画像の形から候補の字を当てる)."""
+
+    def test_glyph_draft(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        res = subprocess.run([node, os.path.join(REPO, "tests", "test_glyphdraft.mjs")],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK", res.stdout)
+
+
 class TestSniffInBrowser(unittest.TestCase):
     """名前の無いファイルに中身から見当を付ける sniffKind."""
 
