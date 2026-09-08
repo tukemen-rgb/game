@@ -1423,6 +1423,26 @@ class TestDocs(unittest.TestCase):
         for head in js_arrows:
             key = re.split(r"[。、(:]", head)[0].strip()[:14]
             self.assertIn(key, keys, f"ブラウザだけにある → の行 (CLI と docs/10 に合わせる): {head}")
+    def test_every_proofread_rule_is_explained(self):
+        """proofread.py が出し得る rule 名が、全部 docs/04 の「検査の一覧」にあること (#65)."""
+        import re
+        with open(os.path.join(REPO, "tools", "proofread.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        with open(os.path.join(REPO, "docs", "04-校正とQA.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        rules = set(re.findall(r'"(?:ERROR|WARN|INFO)",\s*"([a-z_]+)"', src))
+        rules |= set(re.findall(r'\("(?:ERROR|WARN)",\s*"([a-z_]+)"\)', src))
+        rules |= set(re.findall(r'entry\.get\([^)]*\),\s*"([a-z_]+)"', src))
+        self.assertGreaterEqual(len(rules), 11, sorted(rules))
+        table = doc.split("### 検査の一覧", 1)[1].split("\n## ", 1)[0]
+        for rule in sorted(rules):
+            self.assertIn(f"`{rule}`", table, f"docs/04 の検査の一覧に無い rule: {rule}")
+        # 逆に、表にあるのに道具が出さない名前も無いこと (名前が変わったら表も変える)
+        for name in re.findall(r"^\| `([a-z_]+)` \|", table, re.M):
+            if name == "rule":
+                continue                                   # 見出しの行
+            self.assertIn(name, rules, f"表にあるが道具が出さない rule: {name}")
+
     def test_manual_mentions_the_screen_features(self):
         """画面にある主要な物 (要約の行、目盛りの色、ページ送り、入れ物の入れ子…) が、
         説明書 docs/07 にも書いてあること。画面だけ増えて説明書が古くなるのを防ぐ (#61)."""
