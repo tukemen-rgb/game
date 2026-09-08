@@ -3297,15 +3297,30 @@ async function buildIdxReport() {
   const found = CONTAINERS.filter((n) => bases.has(n)), missing = CONTAINERS.filter((n) => !bases.has(n));
   lines.push(`[入れ物] 文言の入れ物: あり ${found.join(", ") || "なし"}` + (missing.length ? ` / 見つからない ${missing.join(", ")}` : ""));
   let okMsg = 0, badMsg = null;
+  const usedHere = new Set();                                   /* 読めた .msg で使われている文字番号 (文字表の出来具合を診る) */
   const sjisDecode = DECODERS.sjis ? (x) => DECODERS.sjis.decode(x) : null;
   for (const it of msgs.slice(0, 50)) {
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, it.len);
-    if (detectBokuMsg(bytes) || parseBokuMsgTables(bytes) || parseBokuMsgRaw(bytes) || parseSjisList(bytes, sjisDecode)) okMsg++;
-    else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16) };
+    const r = detectBokuMsg(bytes) || parseBokuMsgTables(bytes) || parseBokuMsgRaw(bytes) || parseSjisList(bytes, sjisDecode);
+    if (r) {
+      okMsg++;
+      const list = r.items ? r.items.filter((x) => x.codes && x.codes.length) : [];
+      for (const c of bokuMsgUsed(list, isAltBreak(it.name))) usedHere.add(c);
+    } else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16) };
   }
   if (msgs.length) {
     lines.push(`  先頭 ${Math.min(50, msgs.length)} 件のうち読めた形: ${okMsg} 件`);
     if (badMsg) { problems++; lines.push(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト ${[...badMsg.head].map((v) => hex(v, 2)).join(" ")}`); }
+    /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
+    const glyphText = $("msgglyphs").value;
+    const glyphs = glyphText.trim() ? parseGlyphTable(glyphText) : null;
+    if (glyphs) {
+      const missing = [...usedHere].filter((c) => glyphs[c] === undefined || glyphs[c] === null).sort((a, b) => a - b);
+      lines.push(`[文字表] 貼ってある文字表: ${glyphs.filter((g) => g !== undefined && g !== null).length} 字 / 上の .msg で使われている番号 ${usedHere.size} 種のうち文字表に無い ${missing.length} 種`
+        + (missing.length ? ` (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""}。フォント画像の目盛りで橙の枠の字を書き足す)` : "。この範囲は全部読める"));
+    } else {
+      lines.push("[文字表] 文字表はまだ貼っていない (「.msg として読む」の欄に貼ってから、もう一度この要約を作ると出来具合が出る)");
+    }
   }
   for (const it of items.filter((x) => /font/i.test(x.base || x.name)).slice(0, 3)) {
     /* 見出しの検証は画素の長さまで見るので、ファイル全体を読む (フォントは数百 KB) */

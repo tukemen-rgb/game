@@ -34,6 +34,9 @@ async def main():
                 and "フォルダの規則: 2 通り (stack / flag) で一致" in report
                 and "[MAP] 1 件 / 入れ物として読めた 1 件 / 1 番が会話だった 1 件" in report and "はじめから" not in report):
             errors.append("report failed")
+        # 文字表をまだ貼っていないので、その旨が出る (boku2.py check の [文字表] と同じ項目)
+        if "[文字表] 文字表はまだ貼っていない" not in report:
+            errors.append("report should say the glyph table is not pasted yet")
         # 3. 切り分け
         await page.click("#idxpreview button.btn.primary")
         await page.wait_for_function("document.querySelector('#capnote').textContent.includes('切り分けました')", timeout=30000)
@@ -68,6 +71,14 @@ async def main():
         await page.click("#msgparse")
         await page.wait_for_timeout(200)
         menu = await page.eval_on_selector_all("#msgbox tbody td:nth-child(4)", "els => els.map(e => e.textContent)")
+        # 6.2 文字表を貼ったあとに要約を作り直すと、文字表の出来具合が出る (練習データは全部読める)
+        await page.evaluate("document.getElementById('idxreport').click()")
+        await page.wait_for_function("document.querySelector('#idxreporttext').value.includes('[文字表] 貼ってある文字表')", timeout=20000)
+        report2 = await page.input_value("#idxreporttext")
+        line = next((ln for ln in report2.split("\n") if ln.startswith("[文字表]")), "")
+        print("glyph line:", line)
+        if "文字表に無い 0 種。この範囲は全部読める" not in line:
+            errors.append(f"report glyph line: {line!r}")
         # 6.5 item_info.msg (0x8002 が引数の無いページ送りになるファイル): ファイル名で見分けて {BREAK} と読む
         await page.fill("#treeq", "item_info")
         await page.click("#tree .filerow:has(.nm:text-is('item_info.msg'))")
