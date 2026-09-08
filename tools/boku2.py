@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import struct
 import sys
 
@@ -664,6 +665,7 @@ def check(folder: str, out=sys.stdout) -> int:
     say(f"[入れ物] 文言の入れ物: あり {', '.join(found) or 'なし'}"
         + (f" / 見つからない {', '.join(missing)}" if missing else ""))
 
+    used_here: set[int] = set()
     with open(img_path, "rb") as img:
         ok_msg, first_bad = 0, None
         for e in msgs[:50]:
@@ -671,6 +673,9 @@ def check(folder: str, out=sys.stdout) -> int:
             b = img.read(e["len"])
             if parse_msg(b, 8) or parse_msg(b, 4) or parse_tables(b) or parse_raw(b) or parse_sjis_list(b):
                 ok_msg += 1
+                # 文字表の確認用に、使われている番号も拾っておく (文字表なしの復号は [番号] の形)
+                for _, _, _, text in text_rows_bytes(b, e["path"], None, alt=is_alt_break(e["path"])):
+                    used_here.update(int(m) for m in re.findall(r"\[(\d+)\]", text))
             elif first_bad is None:
                 first_bad = (e, b[:16])
         if msgs:
@@ -679,6 +684,17 @@ def check(folder: str, out=sys.stdout) -> int:
                 problems += 1
                 e, head = first_bad
                 say(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト {head.hex(' ').upper()}")
+        # 文字表 (font.txt) がこのフォルダにあれば、その出来具合も診る (docs/10 の手順 3 の途中経過)
+        font_txt = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "font.txt"), None)
+        if font_txt:
+            glyphs = load_font(font_txt) or []
+            missing = sorted(u for u in used_here if u >= len(glyphs) or glyphs[u] is None)
+            say(f"[文字表] font.txt: {sum(1 for g in glyphs if g)} 字 / 上の .msg で使われている番号 {len(used_here)} 種のうち"
+                f"文字表に無い {len(missing)} 種"
+                + (f" (例: {' '.join(str(u) for u in missing[:10])}{' …' if len(missing) > 10 else ''})。"
+                   "フォント画像のこの番号を書き足す (docs/10 の手順 3)" if missing else "。この範囲は全部読める"))
+        else:
+            say("[文字表] font.txt はまだ無い (作ったらこのフォルダに置くと、ここで出来具合を確かめられる)")
         for e in fonts[:3]:
             img.seek(e["at"])
             info = tim2_info(img.read(min(e["len"], 0x100)))

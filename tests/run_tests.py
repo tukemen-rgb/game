@@ -1594,6 +1594,37 @@ class TestDocs(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(REPO, t)), t)
 
 
+class TestCheckFontTable(unittest.TestCase):
+    """check が、フォルダに font.txt があればその出来具合 (使われている番号のうち無い数) を出すこと (#67)."""
+
+    def test_font_table_progress_line(self):
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            self.assertRegex(out.getvalue(), r"\[文字表\] font\.txt: \d+ 字 / 上の \.msg で使われている番号 \d+ 種のうち文字表に無い 0 種。この範囲は全部読める")
+            # 文字表を先頭 3 字に削ると、無い番号が出る
+            fp = os.path.join(folder, "font.txt")
+            with open(fp, encoding="utf-8") as fh:
+                full = fh.read()
+            with open(fp, "w", encoding="utf-8") as fh:
+                fh.write("".join(boku2.parse_glyph_table(full)[:3]))
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            self.assertRegex(out.getvalue(), r"文字表に無い [1-9]\d* 種 \(例: \d+")
+            self.assertIn("docs/10 の手順 3", out.getvalue())
+            # 無ければ「まだ無い」
+            os.remove(fp)
+            out = io.StringIO()
+            rc = boku2.check(folder, out=out)
+            self.assertIn("[文字表] font.txt はまだ無い", out.getvalue())
+            self.assertEqual(rc, 0)                         # 文字表の有無は「問題」には数えない
+
+
 class TestDamageDrill(unittest.TestCase):
     """診断の読み方の練習 (make_boku2_sample.py --break …) が、意図した → の行を出すこと."""
 
