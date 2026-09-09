@@ -207,7 +207,7 @@ def split_map(path: str, out_dir: str) -> int:
 
 # ---------- 会話 ----------
 
-def parse_msg(b: bytes, stride: int) -> list[dict] | None:
+def parse_msg(b: bytes, stride: int, info: dict | None = None) -> list[dict] | None:
     if len(b) < 8:
         return None
     n = struct.unpack_from("<I", b, 0)[0]
@@ -227,14 +227,34 @@ def parse_msg(b: bytes, stride: int) -> list[dict] | None:
         nonzero += 1
     if not nonzero:
         return None
+    # 8 バイト刻みの後ろ 4 バイトは、その項目のバイト長 (公開ソースの書き出し側で確認、#71)。
+    # 鵜呑みにせず、次の位置から出した長さと突き合わせてから使う。合っていれば最後の項目も
+    # 詰め物を含まずに切れる。合わなければ今までどおり次の位置だけで読む
+    sizes, agree, checked = None, 0, 0
+    if stride >= 8:
+        sizes = [struct.unpack_from("<I", b, 4 + i * stride + 4)[0] for i in range(n)]
+        for i, s in enumerate(starts):
+            if not s or not sizes[i]:
+                continue
+            end = next((t for t in starts[i + 1:] if t), None)
+            if end is None:                 # 最後の項目は突き合わせる相手がいない
+                continue
+            checked += 1
+            if s + sizes[i] == end:
+                agree += 1
+    use_size = sizes is not None and checked > 0 and agree >= checked * 0.9
     items = []
     for i, s in enumerate(starts):
         if not s:
             items.append({"i": i, "at": 0, "codes": []})
             continue
         end = next((t for t in starts[i + 1:] if t), len(b))
+        if use_size and sizes[i] > 0 and not sizes[i] & 1 and s + sizes[i] <= len(b):
+            end = s + sizes[i]
         codes = list(struct.unpack_from(f"<{(end - s) // 2}H", b, s))
         items.append({"i": i, "at": s, "codes": codes})
+    if info is not None and sizes is not None:
+        info.update(len_field="ok" if use_size else "ng", agree=agree, checked=checked)
     return items
 
 
@@ -668,11 +688,17 @@ def check(folder: str, out=sys.stdout) -> int:
     used_here: set[int] = set()
     with open(img_path, "rb") as img:
         ok_msg, first_bad = 0, None
+        len_ok, len_ng = 0, 0            # 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が合うか
         for e in msgs[:50]:
             img.seek(e["at"])
             b = img.read(e["len"])
-            if parse_msg(b, 8) or parse_msg(b, 4) or parse_tables(b) or parse_raw(b) or parse_sjis_list(b):
+            info: dict = {}
+            if parse_msg(b, 8, info) or parse_msg(b, 4) or parse_tables(b) or parse_raw(b) or parse_sjis_list(b):
                 ok_msg += 1
+                if info.get("len_field") == "ok":
+                    len_ok += 1
+                elif info.get("len_field") == "ng":
+                    len_ng += 1
                 # 文字表の確認用に、使われている番号も拾っておく (文字表なしの復号は [番号] の形)
                 for _, _, _, text in text_rows_bytes(b, e["path"], None, alt=is_alt_break(e["path"])):
                     used_here.update(int(m) for m in re.findall(r"\[(\d+)\]", text))
@@ -680,6 +706,9 @@ def check(folder: str, out=sys.stdout) -> int:
                 first_bad = (e, b[:16])
         if msgs:
             say(f"  先頭 {min(50, len(msgs))} 件のうち読めた形: {ok_msg} 件")
+            if len_ok or len_ng:
+                say(f"  位置表の長さの欄: 合う {len_ok} 件 / 合わない {len_ng} 件"
+                    + ("" if not len_ng else " (合わない分は位置だけで読んでいる。この行ごと報告)"))
             if first_bad:
                 problems += 1
                 e, head = first_bad

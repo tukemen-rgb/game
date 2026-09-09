@@ -1877,6 +1877,78 @@ class TestBokuMsgInBrowser(unittest.TestCase):
         self.assertNotIn("Traceback", res.stderr)
 
 
+class TestMsgLengthField(unittest.TestCase):
+    """位置表 8 バイト刻みの後ろ 4 バイト = その項目のバイト長 (#71).
+
+    公開ソースの書き出し側で確認した形。鵜呑みにせず、次の位置から出した長さと
+    突き合わせてから使う。合っていれば最後の項目を詰め物ごと読まずに済む。
+    """
+
+    @staticmethod
+    def build(entries, len_of, pad):
+        n = len(entries)
+        tab = 4 + n * 8
+        head = struct.pack("<I", n)
+        body, p = b"", tab
+        for e in entries:
+            head += struct.pack("<II", p if e else 0, len_of(e) if e else 0)
+            body += struct.pack(f"<{len(e)}H", *e)
+            p += len(e) * 2
+        return head + body + b"\xcd" * pad
+
+    def setUp(self):
+        self.entries = [[0, 1, 0x8000], [2, 3, 4, 0x8000], [5, 0x8000]]
+
+    def test_correct_length_trims_the_padding(self):
+        info: dict = {}
+        items = boku2.parse_msg(self.build(self.entries, lambda e: len(e) * 2, 8), 8, info)
+        self.assertIsNotNone(items)
+        self.assertEqual(info.get("len_field"), "ok")
+        self.assertEqual(items[2]["codes"], [5, 0x8000])
+
+    def test_a_field_that_is_not_the_length_is_ignored(self):
+        info: dict = {}
+        items = boku2.parse_msg(self.build(self.entries, lambda e: 0x1234, 8), 8, info)
+        self.assertIsNotNone(items)
+        self.assertEqual(info.get("len_field"), "ng")
+        # 位置だけで読むので、最後の項目は詰め物まで含む (今までどおりで壊れない)
+        self.assertEqual(len(items[2]["codes"]), 6)
+
+    def test_zero_fields_are_not_trusted(self):
+        info: dict = {}
+        items = boku2.parse_msg(self.build(self.entries, lambda e: 0, 8), 8, info)
+        self.assertIsNotNone(items)
+        self.assertEqual(info.get("len_field"), "ng")
+
+    def test_four_byte_stride_has_no_length_field(self):
+        n = 2
+        entries = [[0, 0x8000], [1, 0x8000]]
+        tab = 4 + n * 4
+        head, body, p = struct.pack("<I", n), b"", tab
+        for e in entries:
+            head += struct.pack("<I", p)
+            body += struct.pack(f"<{len(e)}H", *e)
+            p += len(e) * 2
+        info: dict = {}
+        self.assertIsNotNone(boku2.parse_msg(head + body, 4, info))
+        self.assertNotIn("len_field", info)
+
+    def test_the_practice_data_writes_a_real_length(self):
+        """練習データが実物と同じ形になっていること (#56 と同じ種類の思い込みを防ぐ)."""
+        import subprocess
+
+        path = os.path.join(REPO, "work", "BOKU2SAMPLE", "BOKU2.IMG")
+        if not os.path.exists(path):
+            self.skipTest("練習データがありません")
+        out = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                              "check", os.path.join(REPO, "work", "BOKU2SAMPLE")],
+                             capture_output=True, text=True)
+        self.assertIn("位置表の長さの欄: 合う", out.stdout)
+        self.assertNotIn("合わない 0 件 (", out.stdout)
+        line = next(ln for ln in out.stdout.splitlines() if "長さの欄" in ln)
+        self.assertIn("合わない 0 件", line, line)
+
+
 class TestGlyphDraftInBrowser(unittest.TestCase):
     """文字表の下書き (フォント画像の形から候補の字を当てる)."""
 

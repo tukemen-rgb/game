@@ -3296,7 +3296,7 @@ async function buildIdxReport() {
   const bases = new Set(items.map((it) => (it.base || it.name).toLowerCase()));
   const found = CONTAINERS.filter((n) => bases.has(n)), missing = CONTAINERS.filter((n) => !bases.has(n));
   lines.push(`[入れ物] 文言の入れ物: あり ${found.join(", ") || "なし"}` + (missing.length ? ` / 見つからない ${missing.join(", ")}` : ""));
-  let okMsg = 0, badMsg = null;
+  let okMsg = 0, badMsg = null, lenOk = 0, lenNg = 0;
   const usedHere = new Set();                                   /* 読めた .msg で使われている文字番号 (文字表の出来具合を診る) */
   const sjisDecode = DECODERS.sjis ? (x) => DECODERS.sjis.decode(x) : null;
   for (const it of msgs.slice(0, 50)) {
@@ -3304,12 +3304,19 @@ async function buildIdxReport() {
     const r = detectBokuMsg(bytes) || parseBokuMsgTables(bytes) || parseBokuMsgRaw(bytes) || parseSjisList(bytes, sjisDecode);
     if (r) {
       okMsg++;
+      if (r.lenField === "ok") lenOk++;
+      else if (r.lenField === "ng") lenNg++;
       const list = r.items ? r.items.filter((x) => x.codes && x.codes.length) : [];
       for (const c of bokuMsgUsed(list, isAltBreak(it.name))) usedHere.add(c);
     } else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16) };
   }
   if (msgs.length) {
     lines.push(`  先頭 ${Math.min(50, msgs.length)} 件のうち読めた形: ${okMsg} 件`);
+    if (lenOk || lenNg) {
+      /* 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が実物でも本当に長さかを見る行 */
+      lines.push(`  位置表の長さの欄: 合う ${lenOk} 件 / 合わない ${lenNg} 件`
+        + (lenNg ? " (合わない分は位置だけで読んでいる。この行ごと報告)" : ""));
+    }
     if (badMsg) { problems++; lines.push(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト ${[...badMsg.head].map((v) => hex(v, 2)).join(" ")}`); }
     /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
     const glyphText = $("msgglyphs").value;
@@ -4539,17 +4546,36 @@ function parseBokuMsg(b, stride) {
     nonEmpty++;
   }
   if (!nonEmpty) return null;
+  /* 8 バイト刻みの後ろ 4 バイトは、その項目のバイト長 (公開ソースの書き出し側で確認、#71)。
+     鵜呑みにせず、次の位置から出した長さと突き合わせてから使う。合っていれば最後の項目も
+     詰め物を含まずに切れる。合わなければ今までどおり次の位置だけで読む */
+  let sizes = null, agree = 0, checked = 0;
+  if (stride >= 8) {
+    sizes = [];
+    for (let i = 0; i < n; i++) sizes.push(u32le(b, 4 + i * stride + 4));
+    for (let i = 0; i < n; i++) {
+      if (!starts[i] || !sizes[i]) continue;
+      let e = -1;
+      for (let j = i + 1; j < n; j++) if (starts[j]) { e = starts[j]; break; }
+      if (e < 0) continue;                       /* 最後の項目は突き合わせる相手がいない */
+      checked++;
+      if (starts[i] + sizes[i] === e) agree++;
+    }
+  }
+  const useSize = !!sizes && checked > 0 && agree >= checked * 0.9;
   const items = [];
   for (let i = 0; i < n; i++) {
     const s = starts[i];
     if (!s) { items.push({ i, at: 0, codes: [] }); continue; }
     let e = b.length;
     for (let j = i + 1; j < n; j++) if (starts[j]) { e = starts[j]; break; }
+    if (useSize && sizes[i] > 0 && !(sizes[i] & 1) && s + sizes[i] <= b.length) e = s + sizes[i];
     const codes = [];
     for (let p = s; p + 1 < e; p += 2) codes.push(u16le(b, p));
     items.push({ i, at: s, codes });
   }
-  return { count: n, stride, items };
+  return { count: n, stride, items, lenField: sizes ? (useSize ? "ok" : "ng") : null,
+           lenAgree: agree, lenChecked: checked };
 }
 
 /**

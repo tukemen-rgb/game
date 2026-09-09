@@ -37,6 +37,10 @@ async def main():
         # 文字表をまだ貼っていないので、その旨が出る (boku2.py check の [文字表] と同じ項目)
         if "[文字表] 文字表はまだ貼っていない" not in report:
             errors.append("report should say the glyph table is not pasted yet")
+        # 位置表 8 バイト刻みの後ろ 4 バイト (項目のバイト長) の突き合わせ結果 (#71)
+        if "位置表の長さの欄: 合う 4 件 / 合わない 0 件" not in report:
+            line = next((ln for ln in report.split("\n") if "長さの欄" in ln), "(行が無い)")
+            errors.append(f"length-field line: {line!r}")
         # 3. 切り分け
         await page.click("#idxpreview button.btn.primary")
         await page.wait_for_function("document.querySelector('#capnote').textContent.includes('切り分けました')", timeout=30000)

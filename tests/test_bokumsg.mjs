@@ -228,7 +228,58 @@ if (m.parseBokuMsgRaw(new Uint8Array([5, 0, 6, 0]))) fail("終わりの無い並
   if (m.parseSjisList(sjisOf("はい"), dec)) fail("区切りの無い並びを通した");
   void sjBytes;
 }
+
+/* ---- 位置表 8 バイト刻みの後ろ 4 バイト = その項目のバイト長 (#71) ----
+ * 公開ソースの書き出し側で確認した。鵜呑みにせず、次の位置から出した長さと
+ * 突き合わせてから使う。合っていれば、最後の項目を詰め物ごと読まずに済む。 */
+{
+  /** 長さの欄に何を書くかを選べる .msg (末尾に詰め物を付ける) */
+  const build8 = (entries, lenOf, pad) => {
+    const n = entries.length, tab = 4 + n * 8;
+    const bodies = entries.map((codes) => {
+      const b = new Uint8Array(codes.length * 2);
+      codes.forEach((c, i) => { b[i * 2] = c & 255; b[i * 2 + 1] = c >> 8; });
+      return b;
+    });
+    const body = bodies.reduce((a, b) => a + b.length, 0);
+    const buf = new Uint8Array(tab + body + pad);
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(0, n, true);
+    let p = tab;
+    entries.forEach((codes, i) => {
+      dv.setUint32(4 + i * 8, codes.length ? p : 0, true);
+      dv.setUint32(8 + i * 8, codes.length ? lenOf(codes) : 0, true);
+      buf.set(bodies[i], p);
+      p += bodies[i].length;
+    });
+    for (let q = tab + body; q < buf.length; q++) buf[q] = 0xCD;   /* 詰め物 */
+    return buf;
+  };
+  const entries = [[0, 1, 0x8000], [2, 3, 4, 0x8000], [5, 0x8000]];
+
+  /* 正しい長さが入っていれば、最後の項目は詰め物を含まない */
+  const good = m.parseBokuMsg(build8(entries, (c) => c.length * 2, 8), 8);
+  if (!good) fail("長さの欄が正しい .msg を読めない");
+  if (good.lenField !== "ok") fail(`長さの欄を使わなかった: ${good.lenField}`);
+  if (good.items[2].codes.length !== 2) fail(`最後の項目が詰め物ごと読まれた: ${good.items[2].codes}`);
+  if (good.items[2].codes[1] !== 0x8000) fail("最後の項目の終わりが違う");
+
+  /* 長さの欄が別の意味だった場合は、今までどおり位置だけで読む (壊れない) */
+  const bad = m.parseBokuMsg(build8(entries, () => 0x1234, 8), 8);
+  if (!bad) fail("長さの欄が合わない .msg を読めない");
+  if (bad.lenField !== "ng") fail(`合わない欄を使ってしまった: ${bad.lenField}`);
+  if (bad.items[2].codes.length !== 6) fail(`位置だけの読みになっていない: ${bad.items[2].codes.length}`);
+
+  /* 全部 0 の欄でも落ちない (突き合わせる材料が無いので使わない) */
+  const zero = m.parseBokuMsg(build8(entries, () => 0, 8), 8);
+  if (!zero || zero.lenField !== "ng") fail("長さの欄が 0 のときに使ってしまった");
+
+  /* 4 バイト刻みには長さの欄が無いので、そもそも見ない */
+  const four = m.detectBokuMsg(buildMsg([[0, 1, 0x8000], [2, 0x8000]], 4));
+  if (four && four.stride === 4 && four.lenField !== null) fail("4 バイト刻みで長さの欄を見た");
+}
+
 fs.mkdirSync(path.join(repo, "work"), { recursive: true });
 fs.writeFileSync(path.join(repo, "work", "MSG_EXPORT.tsv"), tsv);
 
-console.log("OK  .msg 8 バイト刻み / 4 バイト刻み / 制御コード / 表が複数の会話ファイル / マップの入れ物 / 音声 / 校正用 TSV / 誤認しない");
+console.log("OK  .msg 8 バイト刻み / 4 バイト刻み / 制御コード / 表が複数の会話ファイル / マップの入れ物 / 音声 / 校正用 TSV / 誤認しない / 位置表の長さの欄");

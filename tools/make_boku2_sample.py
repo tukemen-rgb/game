@@ -68,14 +68,23 @@ def encode(text: str, glyphs: list[str]) -> list[int]:
 # ---------- 各形式の組み立て ----------
 
 def build_msg(entries: list[list[int]], stride: int) -> bytes:
-    """u32 件数 + 位置表 (stride 刻み) + 本文。空の項目は位置 0."""
+    """u32 件数 + 位置表 (stride 刻み) + 本文。空の項目は位置 0.
+
+    8 バイト刻みのときの後ろ 4 バイトは、その項目のバイト長 (公開ソースの書き出し側で確認)。
+    ここを 0 のままにしていると、実物と違う練習データになる (#71)。
+    """
     tab = 4 + len(entries) * stride
     head = struct.pack("<I", len(entries))
     body, p = b"", tab
     for e in entries:
-        head += struct.pack("<I", p if e else 0) + b"\0" * (stride - 4)
+        size = len(e) * 2
+        head += struct.pack("<I", p if e else 0)
+        if stride >= 8:
+            head += struct.pack("<I", size if e else 0) + b"\0" * (stride - 8)
+        else:
+            head += b"\0" * (stride - 4)
         body += struct.pack(f"<{len(e)}H", *e)
-        p += len(e) * 2
+        p += size
     return head + body
 
 
