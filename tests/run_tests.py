@@ -1651,6 +1651,34 @@ class TestDamageDrill(unittest.TestCase):
                 self.assertEqual(rc, 1, f"{kind}: 問題なしになった\n{out.getvalue()}")
                 self.assertIn(want, out.getvalue(), kind)
                 self.assertIn("→", out.getvalue(), kind)
+                # どの壊れ方でも締めの行まで出ること。途中で止める壊れ方 (idx) だけ
+                # 締めが無く、道具が落ちたのか診た結果なのか分からなかった (#73)
+                self.assertIn("== 結果:", out.getvalue(), f"{kind}: 締めの行が無い\n{out.getvalue()}")
+                self.assertIn("この出力ごと報告してください", out.getvalue(), kind)
+
+    def test_stopping_early_says_what_was_not_checked(self):
+        """途中で止めたときは、この先を診ていないことまで書くこと (#73)."""
+        import io
+        import boku2
+        import make_boku2_sample
+        # 1. 索引と本体が無い (フォルダの指定違い。素人が最初に踏む)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            self.assertEqual(boku2.check(tmp, out=out), 1)
+            self.assertIn("索引と本体が見つからないのでここで止めました", out.getvalue())
+            self.assertIn("この先 (本体・.msg・フォント・MAP) は診ていません", out.getvalue())
+        # 2. 索引が DFI でない (別の版か、ファイルの取り違え)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            make_boku2_sample.damage(folder, "idx")
+            out = io.StringIO()
+            self.assertEqual(boku2.check(folder, out=out), 1)
+            self.assertIn("索引が読めないのでここで止めました", out.getvalue())
+            self.assertIn("この先 (本体・.msg・フォント・MAP) は診ていません", out.getvalue())
+            # 診ていない段の行を、さも診たかのように出していないこと
+            self.assertNotIn("[フォント]", out.getvalue())
+            self.assertNotIn("[MAP]", out.getvalue())
         # 壊し方の一覧と選択肢が一致していること (README に書く名前がずれないように)
         self.assertEqual(set(make_boku2_sample.DAMAGE), set(self.EXPECT))
 

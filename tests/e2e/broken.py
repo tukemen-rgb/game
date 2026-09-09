@@ -50,6 +50,15 @@ async def run_kind(b, kind, errors):
     if kind == "idx":
         if "DFI: 期待どおり" in report:
             errors.append("idx: 壊した索引を DFI と読んだ")
+        # 索引が読めないときこそ報告する材料が要る。要約は作れて、
+        # この先を診ていないことまで書いてあること (#73、CLI の check と同じ)
+        if not report:
+            errors.append("idx: 索引が読めないと要約を作れない (報告する材料が無い)")
+        elif ("索引が読めないのでここで止めました" not in report
+              or "この先 (本体・.msg・フォント・MAP) は診ていません" not in report):
+            errors.append(f"idx: 止めた理由と診ていない範囲が書かれていない: {report[:200]!r}")
+        elif "[フォント]" in report or "[MAP]" in report:
+            errors.append("idx: 診ていない段の行を出している")
         return
     want = EXPECT[kind]
     if want not in report or "問題なし" in report or "確認事項" not in report:

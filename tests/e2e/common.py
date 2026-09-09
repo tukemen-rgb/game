@@ -33,3 +33,16 @@ async def launch(p):
     if path:
         return await p.chromium.launch(executable_path=path)
     return await p.chromium.launch()
+
+
+async def select_file(page, query: str, name: str):
+    """一覧からファイルを選ぶ。固定の待ち時間ではなく、選ばれたことを待つ.
+
+    固定の 300 ミリ秒待ちにしていたら、検査をまとめて走らせたときだけ落ちた (#73)。
+    選び終わる前に次のボタンを押していて、押した先が別のファイルだった。
+    """
+    await page.fill("#treeq", query)
+    row = f"#tree .filerow:has(.nm:text-is('{name}'))"
+    await page.wait_for_selector(row, timeout=20000)
+    await page.click(row)
+    await page.wait_for_selector(row + '[aria-current="true"]', timeout=20000)

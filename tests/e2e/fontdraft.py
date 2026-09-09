@@ -11,7 +11,7 @@ import sys
 
 from playwright.async_api import async_playwright
 
-from common import REPO, WORK, launch
+from common import REPO, WORK, launch, select_file
 
 # 当てさせる字。仮名を中心に、数字と記号も混ぜる
 CHARS = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもアイウエオカキクケコ0123456789。、"
@@ -150,9 +150,7 @@ async def main():
         await page.click("#idxpreview button.btn.primary")
         await page.wait_for_function(
             "document.querySelector('#capnote').textContent.includes('切り分けました')", timeout=30000)
-        await page.fill("#treeq", "font")
-        await page.click("#tree .filerow:has(.nm:text-is('bk_font.tms'))")
-        await page.wait_for_timeout(300)
+        await select_file(page, "font", "bk_font.tms")
         await page.click('[data-tab="format"]')
         await page.wait_for_selector("#formatbox canvas")
         # 人が先に書いた分は踏まないこと。候補に足す欄も使う

@@ -3239,7 +3239,8 @@ $("idxrun").addEventListener("click", async () => {
   }
   state.idxPick = -1;
   const top = state.idxCands[0];
-  $("idxreport").hidden = !(top && top.known === "DFI");
+  /* 索引が読めなくても要約は作れる。むしろ読めないときこそ報告する材料が要る (#73) */
+  $("idxreport").hidden = false;
   $("idxreportbox").hidden = true;
   state.idxPair = { idxEntry, dataEntry };
   note.textContent = state.idxCands.length
@@ -3264,7 +3265,16 @@ async function buildIdxReport() {
   const b = state.idxBuf;
   lines.push(`== 診断 (構造探査台): ${idxEntry.name} → ${dataEntry.name}`);
   lines.push(`[索引] ${b.length.toLocaleString()} バイト / 先頭 4 バイト ${[...b.subarray(0, 4)].map((v) => hex(v, 2)).join(" ")}`
-    + (c.known === "DFI" ? " (DFI: 期待どおり)" : " (DFI ではない)"));
+    + (c && c.known === "DFI" ? " (DFI: 期待どおり)" : " (DFI ではない!)"));
+  if (!c || c.known !== "DFI") {
+    if (!c) lines.push("   索引らしい並びが 1 つも見つかりませんでした");
+    /* この先は索引が読めることが前提なので診ない。CLI の check と同じ行を出す (#73) */
+    lines.push("→ 先頭が DFI でないので、この道具の索引の読みは使えません。先頭 64 バイトを報告してください");
+    lines.push("   " + [...b.subarray(0, 64)].map((v) => hex(v, 2)).join(" "));
+    lines.push("\n== 結果: 確認事項 1 件 (上の → の行)。索引が読めないのでここで止めました"
+      + "。この先 (本体・.msg・フォント・MAP) は診ていません。この出力ごと報告してください");
+    return lines.join("\n");
+  }
   const items = namedEntries(b, c, dataEntry.size, 100000);
   const recEnd = 16 + c.count * 16;
   lines.push(`レコード ${c.count} 件 (名前の置き場は ${hx(recEnd)} から) / ファイル ${items.length} 件 / 名前が付いた ${c.named_ok ?? "?"} 件`

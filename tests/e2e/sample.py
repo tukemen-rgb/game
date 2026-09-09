@@ -2,7 +2,7 @@
 import asyncio, os, sys
 from playwright.async_api import async_playwright
 
-from common import REPO, WORK, launch
+from common import REPO, WORK, launch, select_file
 S = os.path.join(REPO, "work", "BOKU2SAMPLE")
 
 async def main():
@@ -47,17 +47,13 @@ async def main():
         names = await page.eval_on_selector_all("#tree .filerow .nm", "els => els.map(e => e.textContent)")
         dirs = await page.eval_on_selector_all("#tree .dir", "els => els.map(e => e.textContent)")
         # 4. system.msg を読む (文字表なし)
-        await page.fill("#treeq", "system.msg")
-        await page.click("#tree .filerow:has(.nm:text-is('system.msg'))")
-        await page.wait_for_timeout(300)
+        await select_file(page, "system.msg", "system.msg")
         await page.click('[data-tab="format"]')
         await page.click("#msgparse")
         await page.wait_for_timeout(200)
         note_msg = await page.text_content("#msgnote")
         # 5. フォント画像
-        await page.fill("#treeq", "font")
-        await page.click("#tree .filerow:has(.nm:text-is('bk_font.tms'))")
-        await page.wait_for_timeout(300)
+        await select_file(page, "font", "bk_font.tms")
         await page.click('[data-tab="format"]')
         await page.wait_for_selector("#formatbox canvas")
         fmt = await page.text_content("#formatbox")
@@ -67,9 +63,7 @@ async def main():
             errors.append(f"grid default is {cw}x{ch}, want 22x22")
         # 6. 文字表を貼る → 日本語になる
         font = open(os.path.join(S, "font.txt"), encoding="utf-8").read()
-        await page.fill("#treeq", "system.msg")
-        await page.click("#tree .filerow:has(.nm:text-is('system.msg'))")
-        await page.wait_for_timeout(300)
+        await select_file(page, "system.msg", "system.msg")
         await page.click('[data-tab="format"]')
         await page.fill("#msgglyphs", font)
         await page.click("#msgparse")
@@ -84,9 +78,7 @@ async def main():
         if "文字表に無い 0 種。この範囲は全部読める" not in line:
             errors.append(f"report glyph line: {line!r}")
         # 6.5 item_info.msg (0x8002 が引数の無いページ送りになるファイル): ファイル名で見分けて {BREAK} と読む
-        await page.fill("#treeq", "item_info")
-        await page.click("#tree .filerow:has(.nm:text-is('item_info.msg'))")
-        await page.wait_for_timeout(300)
+        await select_file(page, "item_info", "item_info.msg")
         await page.click('[data-tab="format"]')
         await page.click("#msgparse")
         await page.wait_for_timeout(200)
@@ -97,25 +89,19 @@ async def main():
             errors.append("alt-break file failed")
         # 6.7 入れ物の中の入れ物 (fish_on_mem.bin → 1.bin がまた入れ物 → その 2.bin が魚の説明)。
         #     画面では「切り分ける」を 2 回。CLI (#53) の再帰と同じ答えになること
-        await page.fill("#treeq", "fish_on_mem")
-        await page.click("#tree .filerow:has(.nm:text-is('fish_on_mem.bin'))")
-        await page.wait_for_timeout(300)
+        await select_file(page, "fish_on_mem", "fish_on_mem.bin")
         await page.click('[data-tab="format"]')
         await page.click("#mapsplit")
         await page.wait_for_function("document.querySelector('#capnote').textContent.includes('マップの入れ物として')", timeout=20000)
-        await page.fill("#treeq", "1.bin")
-        await page.click("#tree .filerow:has(.nm:text-is('1.bin'))")
-        await page.wait_for_timeout(300)
+        await select_file(page, "1.bin", "1.bin")
         await page.click('[data-tab="format"]')
         await page.click("#msgparse")
         await page.wait_for_timeout(200)
         note_inner = await page.text_content("#msgnote")
         await page.click("#mapsplit")
-        await page.wait_for_function("document.querySelectorAll('#tree .filerow').length > 0", timeout=20000)
-        await page.wait_for_timeout(300)
-        await page.fill("#treeq", "2.bin")
-        await page.click("#tree .filerow:has(.nm:text-is('2.bin'))")
-        await page.wait_for_timeout(300)
+        await page.wait_for_function(
+            "[...document.querySelectorAll('#tree .filerow .nm')].some(e => e.textContent === '2.bin')", timeout=20000)
+        await select_file(page, "2.bin", "2.bin")
         await page.click('[data-tab="format"]')
         await page.click("#msgparse")
         await page.wait_for_timeout(200)
@@ -124,9 +110,7 @@ async def main():
         if "入れ物です" not in note_inner or fish != ["フナ\nぬまにいる{END}", "コイ\nかわにいる{END}"]:
             errors.append("nested container failed")
         # 7. マップの入れ物 → 1.bin → 会話
-        await page.fill("#treeq", "M_A01000")
-        await page.click("#tree .filerow:has(.nm:text-is('M_A01000.BIN'))")
-        await page.wait_for_timeout(300)
+        await select_file(page, "M_A01000", "M_A01000.BIN")
         await page.click('[data-tab="format"]')
         await page.click("#mapsplit")
         await page.wait_for_function("document.querySelector('#capnote').textContent.includes('マップの入れ物として')", timeout=20000)
@@ -134,7 +118,10 @@ async def main():
         # 1.bin は fish_on_mem の部品にもあるので、いちばん後に増えた (マップの) 1.bin を選ぶ
         await page.eval_on_selector_all("#tree .filerow",
                                         "els => els.filter(e => e.querySelector('.nm').textContent === '1.bin').pop().click()")
-        await page.wait_for_timeout(300)
+        # 固定の待ち時間ではなく、選ばれたことを待つ (#73)
+        await page.wait_for_function(
+            "(() => { const r = document.querySelector('#tree .filerow[aria-current=\"true\"]');"
+            " return r && r.querySelector('.nm').textContent === '1.bin'; })()", timeout=20000)
         await page.click('[data-tab="format"]')
         await page.click("#msgparse")
         await page.wait_for_timeout(200)

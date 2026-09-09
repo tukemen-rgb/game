@@ -603,6 +603,16 @@ def tim2_info(b: bytes) -> dict | None:
     return None
 
 
+def stopped_here(problems: int, why: str) -> str:
+    """途中で止めたときの締めの行。この先を診ていないことまで書く.
+
+    素人が最初に踏むのは「フォルダ違い」と「ファイル違い」で、そこで締めの行が
+    出ないと、道具が落ちたのか診た結果なのかが分からない (#73)。
+    """
+    return (f"\n== 結果: 確認事項 {problems} 件 (上の → の行)。{why}ここで止めました"
+            "。この先 (本体・.msg・フォント・MAP) は診ていません。この出力ごと報告してください")
+
+
 def check(folder: str, out=sys.stdout) -> int:
     """吸い出したフォルダを一通り診て、報告用の要約を出す (ゲームの本文は出さない).
 
@@ -630,6 +640,7 @@ def check(folder: str, out=sys.stdout) -> int:
             if os.path.isdir(sub) and any(m.lower() == "boku2.idx" for m in os.listdir(sub)):
                 say(f"   一段下の {n}/ に BOKU2.IDX があります。そちらを指定してください: boku2.py check {sub}")
                 break
+        say(stopped_here(1, "索引と本体が見つからないので"))
         return 1
 
     with open(idx_path, "rb") as fh:
@@ -640,6 +651,7 @@ def check(folder: str, out=sys.stdout) -> int:
     if idx[:4] != b"DFI\0":
         say("→ 先頭が DFI でないので、この道具の索引の読みは使えません。先頭 64 バイトを報告してください")
         say("   " + idx[:64].hex(" ").upper())
+        say(stopped_here(1, "索引が読めないので"))
         return 1
     rec_end = 16
     while rec_end + 16 <= len(idx) and (idx[rec_end] | (idx[rec_end + 1] << 8)) in (0, 1):
