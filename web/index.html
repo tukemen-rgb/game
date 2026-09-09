@@ -416,6 +416,10 @@
             <label for="msgglyphs">フォントの文字の並び (bk_font.tms を「既知の形式」で開き、番号順に書き出す。改行は無視)。「12=あ」のように番号と文字の対応を 1 行ずつ書いてもよい</label>
             <textarea id="msgglyphs" rows="3" spellcheck="false" placeholder="例: 。、，．・：；？！゛゜…   または   12=あ&#10;13=い"></textarea>
           </div>
+          <div class="field" style="margin-top:8px">
+            <label for="msgcands">下書きの候補に足す字 (「文字表の下書きを作る」で使う)。既定は仮名・数字・記号だけなので、漢字はここに貼る。並べるだけでよい</label>
+            <textarea id="msgcands" rows="2" spellcheck="false" placeholder="例: 日月火水木金土山川田人子女男目口耳手足"></textarea>
+          </div>
           <div id="msgbox"></div>
         </div>
 

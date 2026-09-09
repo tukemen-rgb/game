@@ -15,7 +15,7 @@ const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] <
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
   src.slice(s, e) + "\nreturn { glyphInkPolarity, glyphCellInk, inkFeature, glyphFeatureScore,"
-  + " draftGlyphMatches, mergeGlyphDraft, parseGlyphTable, GLYPH_CANDIDATES, applyGlyphOrder, GLYPH_SEQUENCES };")(u32le, u16le);
+  + " draftGlyphMatches, mergeGlyphDraft, parseGlyphTable, GLYPH_CANDIDATES, applyGlyphOrder, GLYPH_SEQUENCES, glyphExtraCandidates };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -249,4 +249,27 @@ const featOf = (txt) => { const c = cellOf(txt); return m.inkFeature(c.cell, c.w
   }
 }
 
-console.log("OK  文字表の下書き: 形の似ぐあい / 空きマス / 地と字の判定 / マスの切り出し / 1 対 1 の割り当て / 人の書いた分を踏まない / 並び順で直す / 裏付けのある区間だけ伸ばす");
+/* ---- 候補に自分で字を足す (漢字など) ---- */
+{
+  const base = m.GLYPH_CANDIDATES;
+  /* 空白と改行は字ではない */
+  const got = m.glyphExtraCandidates(" 日 月\n火\t水 ", base);
+  if (got !== "日月火水") fail(`空白を落とせていない: ${JSON.stringify(got)}`);
+
+  /* 同じ字を 2 回入れない */
+  if (m.glyphExtraCandidates("日日月月", base) !== "日月") fail("重なった字を落とせていない");
+
+  /* 既定の候補にすでにある字は足さない (候補に同じ字が 2 つあると割り当てが乱れる) */
+  if (m.glyphExtraCandidates("あア0日", base) !== "日") fail("既定と重なる字を落とせていない");
+
+  /* 空でも落ちない */
+  if (m.glyphExtraCandidates("", base) !== "" || m.glyphExtraCandidates(null, base) !== "") {
+    fail("空の入力で落ちる");
+  }
+
+  /* 足した字は、他と混ざらない別の字として扱える */
+  const all = base + m.glyphExtraCandidates("日月", base);
+  if (new Set(Array.from(all)).size !== Array.from(all).length) fail("足したあとに同じ字が 2 回ある");
+}
+
+console.log("OK  文字表の下書き: 形の似ぐあい / 空きマス / 地と字の判定 / マスの切り出し / 1 対 1 の割り当て / 人の書いた分を踏まない / 並び順で直す / 裏付けのある区間だけ伸ばす / 候補に足す字");

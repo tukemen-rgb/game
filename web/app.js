@@ -5024,6 +5024,22 @@ function applyGlyphOrder(draft, opts) {
   return { draft: out, fixed };
 }
 
+/**
+ * 画面に貼ってもらった「候補に足す字」を取り出す。空白と改行は落とし、
+ * 既定の候補にある字と重なる分も落とす (同じ字を 2 回候補に入れない)
+ */
+function glyphExtraCandidates(text, base) {
+  if (!text) return "";
+  const have = new Set(Array.from(base || ""));
+  const out = [];
+  for (const c of Array.from(text)) {
+    if (/\s/.test(c) || have.has(c)) continue;
+    have.add(c);
+    out.push(c);
+  }
+  return out.join("");
+}
+
 /** 候補の文字を、マスと同じ大きさでブラウザに描いて特徴にする */
 function glyphCandidateFeatures(chars, cw, ch) {
   const cv = document.createElement("canvas");
@@ -5290,6 +5306,13 @@ try {
   const saved = localStorage.getItem("boku2.glyphs");
   if (saved) $("msgglyphs").value = saved;
 } catch (err) { /* 保存が使えない環境では黙って諦める */ }
+try {
+  const savedCands = localStorage.getItem("boku2.cands");
+  if (savedCands) $("msgcands").value = savedCands;
+} catch (err) { /* 端末に保存できない設定でも困らない */ }
+$("msgcands").addEventListener("input", () => {
+  try { localStorage.setItem("boku2.cands", $("msgcands").value); } catch (err) { /* 同上 */ }
+});
 $("msgglyphs").addEventListener("input", () => {
   try { localStorage.setItem("boku2.glyphs", $("msgglyphs").value); } catch (err) { /* 同上 */ }
 });
@@ -5660,7 +5683,9 @@ function renderTim2(b, at) {
       const x = ox + (n % cols) * cw, y = oy + Math.floor(n / cols) * ch;
       return { n, feat: inkFeature(glyphCellInk(rgba, pic.width, x, y, cw, ch, pol), cw, ch) };
     });
-    const cands = glyphCandidateFeatures(GLYPH_CANDIDATES, cw, ch);
+    /* 既定の候補は仮名・数字・記号だけ。漢字などは画面の欄に貼ってもらって足す */
+    const extra = glyphExtraCandidates($("msgcands").value, GLYPH_CANDIDATES);
+    const cands = glyphCandidateFeatures(GLYPH_CANDIDATES + extra, cw, ch);
     /* 並び順で直すとき、区間の外へ伸ばすかどうかを画像で確かめるための物差し */
     const featCache = new Map(cands.map((k) => [k.ch, k.feat]));
     const cellFeat = new Map(cells.map((c) => [c.n, c.feat]));
@@ -5683,10 +5708,14 @@ function renderTim2(b, at) {
       .map((d) => `${d.n}=${d.ch}`).join(" ");
     hint.textContent = `形の似ている字を当てて ${merged.added} 字を文字表に入れました`
       + ` (調べたマス ${cells.length} / 候補 ${cands.length} 字`
+      + (extra ? ` (うち貼った字 ${Array.from(extra).length})` : "")
+      + ``
       + (ordered.fixed.length ? ` / うち ${ordered.fixed.length} 字は並び順で直した` : "")
       + ")。書体が違うので当たりは保証しません。"
       + "必ず目で確かめてください。「.msg として読む」を押し直すと、当たっているかが本文で分かります。"
-      + "漢字は候補に入れていないので手で足してください。人が書いた分は上書きしません。"
+      + (extra ? "貼った候補も混ぜてあります。" : "漢字は既定の候補に入れていないので、"
+        + "「下書きの候補に足す字」の欄に貼るとそこも当てにいきます。")
+      + "人が書いた分は上書きしません。"
       + (missing || used ? "" : " 先に .msg を読んでからだと、本文で要る番号だけに絞れます"
         + " (いまは先頭から順に見たので、漢字や模様のマスにも仮名を当てています)。")
       + (shaky ? ` 紛らわしい順 (2 番目の候補と差が小さい順): ${shaky}。` : "")

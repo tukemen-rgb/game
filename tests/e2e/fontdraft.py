@@ -66,6 +66,38 @@ MEASURE = """(chars => {
 })"""
 
 
+# 漢字は既定の候補に入っていない。画面の欄に貼ったときだけ当たること (#72)
+KANJI = """(chars => {
+  const CHARS = Array.from(chars);
+  const CW = 22, CH = 22, COLS = 8;
+  const rows = Math.ceil(CHARS.length / COLS);
+  const cv = document.createElement("canvas");
+  cv.width = CW * COLS; cv.height = CH * rows;
+  const g = cv.getContext("2d", { willReadFrequently: true });
+  g.fillStyle = "#000"; g.fillRect(0, 0, cv.width, cv.height);
+  g.fillStyle = "#fff"; g.textAlign = "center"; g.textBaseline = "middle";
+  CHARS.forEach((c, n) => {
+    const x = (n % COLS) * CW, y = Math.floor(n / COLS) * CH;
+    g.font = Math.floor(CH * 0.74) + "px sans-serif";
+    g.fillText(c, x + CW / 2, y + CH / 2);
+  });
+  const rgba = g.getImageData(0, 0, cv.width, cv.height).data;
+  const pol = { alpha: false, invert: false };
+  const cells = CHARS.map((c, n) => {
+    const x = (n % COLS) * CW, y = Math.floor(n / COLS) * CH;
+    return { n, feat: inkFeature(glyphCellInk(rgba, cv.width, x, y, CW, CH, pol), CW, CH) };
+  });
+  const hit = (candText) => {
+    const cands = glyphCandidateFeatures(candText, CW, CH);
+    const got = draftGlyphMatches(cells, cands, {});
+    return got.filter((d) => CHARS[d.n] === d.ch).length;
+  };
+  const extra = glyphExtraCandidates(chars, GLYPH_CANDIDATES);
+  return { total: CHARS.length, without: hit(GLYPH_CANDIDATES),
+           with: hit(GLYPH_CANDIDATES + extra), extra: Array.from(extra).length };
+})"""
+
+
 async def main():
     async with async_playwright() as p:
         b = await launch(p)
@@ -98,6 +130,16 @@ async def main():
         if r["cands"] < 200:
             bad.append(f"候補が少ない: {r['cands']}")
 
+        # 1.5 漢字は貼ったときだけ当たる (#72)
+        k = await page.evaluate(KANJI, "日月火水木金土山")
+        print("kanji:", k)
+        if k["extra"] != k["total"]:
+            bad.append(f"貼った漢字の数が合わない: {k['extra']}/{k['total']}")
+        if k["with"] <= k["without"]:
+            bad.append(f"漢字を貼っても当たりが増えない: {k['without']} -> {k['with']}")
+        if k["with"] < k["total"] * 0.5:
+            bad.append(f"貼った漢字の当たりが少ない: {k['with']}/{k['total']}")
+
         # 2. 練習データのフォント画像で、操作が最後まで通ること
         await page.set_input_files("#fileinput", [WORK + "/BOKU2SAMPLE/BOKU2.IDX",
                                                   WORK + "/BOKU2SAMPLE/BOKU2.IMG"])
@@ -113,8 +155,9 @@ async def main():
         await page.wait_for_timeout(300)
         await page.click('[data-tab="format"]')
         await page.wait_for_selector("#formatbox canvas")
-        # 人が先に書いた分は踏まないこと
+        # 人が先に書いた分は踏まないこと。候補に足す欄も使う
         await page.fill("#msgglyphs", "0=あ\n1=い\n")
+        await page.fill("#msgcands", "日月火水")
         await page.click("#tim2draft")
         await page.wait_for_timeout(2000)
         table = await page.input_value("#msgglyphs")
@@ -128,6 +171,8 @@ async def main():
             bad.append("番号=文字 の形になっていない行がある")
         if "必ず目で確かめてください" not in hint:
             bad.append("下書きだと分かる断りが出ていない")
+        if "うち貼った字 4" not in hint or "貼った候補も混ぜてあります" not in hint:
+            bad.append(f"貼った候補の数が知らせに出ていない: {hint[:200]!r}")
 
         await b.close()
         ok = not bad and not errors
