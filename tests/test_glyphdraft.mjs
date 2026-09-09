@@ -15,7 +15,7 @@ const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] <
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
   src.slice(s, e) + "\nreturn { glyphInkPolarity, glyphCellInk, inkFeature, glyphFeatureScore,"
-  + " draftGlyphMatches, mergeGlyphDraft, parseGlyphTable, GLYPH_CANDIDATES };")(u32le, u16le);
+  + " draftGlyphMatches, mergeGlyphDraft, parseGlyphTable, GLYPH_CANDIDATES, applyGlyphOrder, GLYPH_SEQUENCES };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -189,4 +189,64 @@ const featOf = (txt) => { const c = cellOf(txt); return m.inkFeature(c.cell, c.w
   if (new Set(Array.from(c)).size !== Array.from(c).length) fail("候補に同じ字が 2 回入っている");
 }
 
-console.log("OK  文字表の下書き: 形の似ぐあい / 空きマス / 地と字の判定 / マスの切り出し / 1 対 1 の割り当て / 人の書いた分を踏まない");
+/* ---- 並び順で直す ---- */
+{
+  const d = (n, ch) => ({ n, ch, score: 0.7, margin: 0.05 });
+  /* 続いたマスが続いた字に当たっていれば、間の外れを並びで直す */
+  const r = m.applyGlyphOrder([d(10, "あ"), d(11, "い"), d(12, "ぬ"), d(13, "え"), d(14, "お")]);
+  const got = new Map(r.draft.map((x) => [x.n, x.ch]));
+  if (got.get(12) !== "う") fail(`並びで直せていない: ${got.get(12)}`);
+  if (r.fixed.length !== 1 || r.fixed[0].from !== "ぬ" || r.fixed[0].to !== "う") {
+    fail(`直した記録が違う: ${JSON.stringify(r.fixed)}`);
+  }
+  if (!r.draft.find((x) => x.n === 12).byOrder) fail("並びで直した印が付いていない");
+
+  /* 支持が 4 つ未満なら何もしない */
+  const few = m.applyGlyphOrder([d(10, "あ"), d(11, "い"), d(12, "ぬ")]);
+  if (few.fixed.length) fail("支持が足りないのに直した");
+
+  /* まばらな一致 (広い区間に 4 つだけ) も当てにしない */
+  const sparse = m.applyGlyphOrder([d(0, "あ"), d(10, "か"), d(20, "た"), d(30, "は")]);
+  if (sparse.fixed.length) fail("まばらな一致で区間を埋めた");
+
+  /* 並びが五十音でないフォントでは、支持が集まらず何も起きない */
+  const shuffled = m.applyGlyphOrder([d(0, "ん"), d(1, "あ"), d(2, "そ"), d(3, "き"), d(4, "ぬ")]);
+  if (shuffled.fixed.length) fail("並びが違うのに直してしまった");
+}
+
+/* ---- 区間を外へ伸ばすのは、画像の裏付けがあるときだけ ---- */
+{
+  const d = (n, ch) => ({ n, ch, score: 0.7, margin: 0.05 });
+  const base = [d(0, "あ"), d(1, "い"), d(2, "う"), d(3, "え"), d(4, "ぬ")];
+  /* 物差しが無ければ伸ばさない (4 番は区間の外) */
+  const noEye = m.applyGlyphOrder(base.map((x) => ({ ...x })));
+  if (noEye.fixed.length) fail("裏付けが無いのに区間を伸ばした");
+
+  /* 似ていると言う物差しなら伸ばす */
+  const yes = m.applyGlyphOrder(base.map((x) => ({ ...x })), { similar: (n, c) => (c === "お" ? 0.95 : 1) });
+  if (!yes.fixed.length || yes.draft.find((x) => x.n === 4).ch !== "お") {
+    fail(`裏付けがあるのに伸ばさなかった: ${JSON.stringify(yes.fixed)}`);
+  }
+
+  /* 似ていないと言う物差しなら伸ばさない (仮名の並びが数字のマスに食い込むのを止める) */
+  const no = m.applyGlyphOrder(base.map((x) => ({ ...x })), { similar: (n, c) => (c === "お" ? 0.3 : 1) });
+  if (no.fixed.length) fail("似ていないのに区間を伸ばした");
+}
+
+/* ---- 並びで直した字が、他のマスに二重に残らない ---- */
+{
+  const d = (n, ch) => ({ n, ch, score: 0.7, margin: 0.05 });
+  const r = m.applyGlyphOrder([d(10, "あ"), d(11, "い"), d(12, "ぬ"), d(13, "え"), d(14, "お"), d(40, "う")]);
+  const us = r.draft.filter((x) => x.ch === "う");
+  if (us.length !== 1 || us[0].n !== 12) fail(`同じ字が 2 つ残った: ${JSON.stringify(us)}`);
+}
+
+/* ---- 並びの一覧 ---- */
+{
+  if (!m.GLYPH_SEQUENCES.some((s) => s.startsWith("あいうえお"))) fail("五十音の並びが無い");
+  for (const seq of m.GLYPH_SEQUENCES) {
+    if (new Set(Array.from(seq)).size !== Array.from(seq).length) fail(`並びに同じ字が 2 回: ${seq}`);
+  }
+}
+
+console.log("OK  文字表の下書き: 形の似ぐあい / 空きマス / 地と字の判定 / マスの切り出し / 1 対 1 の割り当て / 人の書いた分を踏まない / 並び順で直す / 裏付けのある区間だけ伸ばす");

@@ -38,7 +38,20 @@ MEASURE = """(chars => {
     return { n, feat: inkFeature(glyphCellInk(rgba, cv.width, x, y, CW, CH, pol), CW, CH) };
   });
   const cands = glyphCandidateFeatures(GLYPH_CANDIDATES, CW, CH);
-  const got = draftGlyphMatches(cells, cands, {});
+  const raw = draftGlyphMatches(cells, cands, {});
+  const shapeOnly = raw.filter((d) => CHARS[d.n] === d.ch).length;
+  /* 並び順で直す。区間を外へ伸ばすかどうかは画像で確かめる */
+  const featCache = new Map(cands.map((k) => [k.ch, k.feat]));
+  const cellFeat = new Map(cells.map((c) => [c.n, c.feat]));
+  const similar = (n, c) => {
+    if (!featCache.has(c)) {
+      const f = glyphCandidateFeatures([c], CW, CH);
+      featCache.set(c, f.length ? f[0].feat : null);
+    }
+    return glyphFeatureScore(cellFeat.get(n), featCache.get(c));
+  };
+  const ordered = applyGlyphOrder(raw, { similar });
+  const got = ordered.draft;
   let right = 0;
   const wrong = [];
   for (const d of got) {
@@ -46,7 +59,8 @@ MEASURE = """(chars => {
     else wrong.push(`${d.n}:${CHARS[d.n]}->${d.ch}`);
   }
   const ns = new Set(got.map((d) => d.n)), chs = new Set(got.map((d) => d.ch));
-  return { total: CHARS.length, matched: got.length, right, wrong,
+  return { total: CHARS.length, matched: got.length, right, wrong, shapeOnly,
+           orderFixed: ordered.fixed.length,
            uniqueN: ns.size === got.length, uniqueCh: chs.size === got.length,
            cands: cands.length };
 })"""
@@ -64,13 +78,19 @@ async def main():
         # 1. 当たり具合を測る
         r = await page.evaluate(MEASURE, CHARS)
         rate = r["right"] / max(1, r["total"])
-        print("draft:", {k: r[k] for k in ("total", "matched", "right", "cands")},
+        print("draft:", {k: r[k] for k in ("total", "matched", "right", "shapeOnly", "orderFixed", "cands")},
               f"rate={rate:.2f}")
         print("wrong:", " ".join(r["wrong"][:20]))
         bad = []
-        # 書体が変われば率は動く。仕組みが働いていることを見る線として 6 割を置く
-        if rate < 0.6:
+        # 書体が変われば率は動く。仕組みが働いていることを見る線として 7 割を置く
+        # (#70 の実測は 53/57 = 0.93。形だけの #69 は 46/57 = 0.81 だった)
+        if rate < 0.7:
             bad.append(f"正解率が低い: {rate:.2f}")
+        # 並び順で直す規則が、形だけより悪くしていないこと
+        if r["right"] < r["shapeOnly"]:
+            bad.append(f"並び順で直して悪くなった: {r['shapeOnly']} -> {r['right']}")
+        if not r["orderFixed"]:
+            bad.append("並び順で直した字が 1 つも無い")
         if r["matched"] < r["total"] * 0.8:
             bad.append(f"当てられたマスが少ない: {r['matched']}/{r['total']}")
         if not r["uniqueN"] or not r["uniqueCh"]:

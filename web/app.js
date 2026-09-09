@@ -4894,6 +4894,110 @@ function draftGlyphMatches(cells, cands, opts) {
   return out;
 }
 
+/* フォント画像に「続けて並んでいそうな字」の並び。五十音順に並べるのが普通なので、
+   続いたマスが続いた字に当たっていれば、その区間は並びで埋め直せる */
+const GLYPH_SEQUENCES = [
+  "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん",
+  "がぎぐげござじずぜぞだぢづでどばびぶべぼ",
+  "ぱぴぷぺぽ",
+  "ぁぃぅぇぉっゃゅょ",
+  "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン",
+  "ガギグゲゴザジズゼゾダヂヅデドバビブベボ",
+  "パピプペポ",
+  "ァィゥェォッャュョ",
+  "0123456789",
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  "abcdefghijklmnopqrstuvwxyz",
+];
+
+/**
+ * 下書きを並び順で直す。形だけで当てると、小書きの字と大きい字、濁点の有無、
+ * 0 と O のような**形の近い組**を取り違える (#69 の実測)。続いたマスが続いた字に
+ * 当たっていれば、その区間はまとめて並びで上書きできる。
+ *
+ * 支持したマスが 4 つ未満、または区間の半分に満たなければ何もしない。
+ * 五十音順に並んでいないフォントでは支持が集まらないので、**自分で自分を止める**。
+ */
+function applyGlyphOrder(draft, opts) {
+  const minAnchors = (opts && opts.minAnchors) || 4;
+  /* 区間を外へ伸ばすときは、画像の裏付けを要る。裏付けの手段が無ければ伸ばさない
+     (裏付け無しで伸ばすと、仮名の並びが数字のマスまで食い込んで 0 が サ になる) */
+  const similar = opts && opts.similar;
+  const reach = (opts && opts.reach != null) ? opts.reach : (similar ? 4 : 0);
+  const byN = new Map(draft.map((d) => [d.n, d]));
+  const fixed = [];
+
+  /* 1. 支持の集まった区間を拾う。ずれ (並びの位置 − マスの番号) が同じマスが仲間 */
+  const runs = [];
+  const anchored = new Set();
+  for (const seq of GLYPH_SEQUENCES) {
+    const chars = Array.from(seq);
+    const where = new Map(chars.map((c, i) => [c, i]));
+    const groups = new Map();
+    for (const d of draft) {
+      const i = where.get(d.ch);
+      if (i === undefined) continue;
+      const off = i - d.n;
+      if (!groups.has(off)) groups.set(off, []);
+      groups.get(off).push(d.n);
+    }
+    for (const [off, ns] of groups) {
+      if (ns.length < minAnchors) continue;
+      let lo = ns[0], hi = ns[0];
+      for (const n of ns) { if (n < lo) lo = n; if (n > hi) hi = n; }
+      if (ns.length < (hi - lo + 1) * 0.5) continue;   /* まばらな一致は当てにしない */
+      runs.push({ chars, off, lo, hi });
+      for (const n of ns) anchored.add(n);
+    }
+  }
+
+  /* 2. 区間の外へ少しだけ伸ばす。並びの端の字は形が近い字に取られやすく、支持に
+        入らないまま区間の外に落ちるため。他の区間の支持マスは踏まない */
+  /* 並びが言う字も、画像にそこそこ似ていること。いま付いている字は形で選んだ勝者なので
+     「それ以上」を求めると絶対に伸びない。実測では、伸ばして正しかった所の比が 0.86〜0.99、
+     伸ばすと壊れた所が 0.33〜0.61 と分かれたので、0.85 を境にする (docs/11 第 10 節) */
+  const minRatio = (opts && opts.minRatio != null) ? opts.minRatio : 0.85;
+  const backed = (n, want) => {
+    const cur = byN.get(n);
+    if (!cur) return false;
+    const base = similar(n, cur.ch);
+    return base > 0 && similar(n, want) / base >= minRatio;
+  };
+  for (const r of runs) {
+    for (let k = 0; k < reach; k++) {
+      const n = r.lo - 1, i = n + r.off;
+      if (i < 0 || !byN.has(n) || anchored.has(n) || !backed(n, r.chars[i])) break;
+      r.lo = n;
+    }
+    for (let k = 0; k < reach; k++) {
+      const n = r.hi + 1, i = n + r.off;
+      if (i >= r.chars.length || !byN.has(n) || anchored.has(n) || !backed(n, r.chars[i])) break;
+      r.hi = n;
+    }
+  }
+
+  /* 3. 区間を並びで埋める */
+  const done = new Set();
+  for (const r of runs) {
+    for (let n = r.lo; n <= r.hi; n++) {
+      const i = n + r.off;
+      if (i < 0 || i >= r.chars.length || done.has(n)) continue;
+      const cur = byN.get(n);
+      if (!cur) continue;
+      done.add(n);
+      if (cur.ch === r.chars[i]) continue;
+      fixed.push({ n, from: cur.ch, to: r.chars[i] });
+      cur.ch = r.chars[i];
+      cur.byOrder = true;
+    }
+  }
+  /* 並びで直した字と同じ字が形だけで別のマスに付いていたら、そちらを外す
+     (フォントに同じ字は 2 回出てこない) */
+  const taken = new Set(draft.filter((d) => d.byOrder).map((d) => d.ch));
+  const out = draft.filter((d) => d.byOrder || !taken.has(d.ch));
+  return { draft: out, fixed };
+}
+
 /** 候補の文字を、マスと同じ大きさでブラウザに描いて特徴にする */
 function glyphCandidateFeatures(chars, cw, ch) {
   const cv = document.createElement("canvas");
@@ -5531,7 +5635,18 @@ function renderTim2(b, at) {
       return { n, feat: inkFeature(glyphCellInk(rgba, pic.width, x, y, cw, ch, pol), cw, ch) };
     });
     const cands = glyphCandidateFeatures(GLYPH_CANDIDATES, cw, ch);
-    const draft = draftGlyphMatches(cells, cands);
+    /* 並び順で直すとき、区間の外へ伸ばすかどうかを画像で確かめるための物差し */
+    const featCache = new Map(cands.map((k) => [k.ch, k.feat]));
+    const cellFeat = new Map(cells.map((c) => [c.n, c.feat]));
+    const similar = (n, c) => {
+      if (!featCache.has(c)) {
+        const f = glyphCandidateFeatures([c], cw, ch);
+        featCache.set(c, f.length ? f[0].feat : null);
+      }
+      return glyphFeatureScore(cellFeat.get(n), featCache.get(c));
+    };
+    const ordered = applyGlyphOrder(draftGlyphMatches(cells, cands), { similar });
+    const draft = ordered.draft;
     const ta = $("msgglyphs");
     const merged = mergeGlyphDraft(ta.value, draft);
     ta.value = merged.text;
@@ -5541,7 +5656,9 @@ function renderTim2(b, at) {
     const shaky = draft.slice().sort((a, b) => a.margin - b.margin).slice(0, 12)
       .map((d) => `${d.n}=${d.ch}`).join(" ");
     hint.textContent = `形の似ている字を当てて ${merged.added} 字を文字表に入れました`
-      + ` (調べたマス ${cells.length} / 候補 ${cands.length} 字)。書体が違うので当たりは保証しません。`
+      + ` (調べたマス ${cells.length} / 候補 ${cands.length} 字`
+      + (ordered.fixed.length ? ` / うち ${ordered.fixed.length} 字は並び順で直した` : "")
+      + ")。書体が違うので当たりは保証しません。"
       + "必ず目で確かめてください。「.msg として読む」を押し直すと、当たっているかが本文で分かります。"
       + "漢字は候補に入れていないので手で足してください。人が書いた分は上書きしません。"
       + (missing || used ? "" : " 先に .msg を読んでからだと、本文で要る番号だけに絞れます"
