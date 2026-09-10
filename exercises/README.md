@@ -94,10 +94,20 @@ python3 tools/dump_text.py work/MSG_ENC.BIN --table work/my_guess.tbl -o work/mi
 `data/font_chars.txt` を見ずに、グリフ 0〜20 が何の文字か答える。
 
 ```bash
-python3 tools/font_view.py work/FONT.BIN --ascii 0-20
+python3 tools/font_view.py work/FONT.BIN --ascii 0-20 --across 4
 ```
 
-PNG で一覧を出すと、並びの規則がすぐ見えます。
+`--across 4` で 4 個ずつ横に並びます。**並びの規則は隣り合わせにして初めて
+見えます** (小書き → 大きい字、清音 → 濁音で対になっていて、濁音は右上に
+点が 2 つ足されているだけ)。1 つずつ縦に流すと 400 行を超えて画面から消えます。
+
+よく見ると `け` と `げ` だけ、字全体が 1 ドット下にずれています。点が増えた分
+だけ字の外形が変わり、**16x16 の枠の中で中央に置き直される**からです。
+形を機械で見比べて文字を当てる道具を作るなら、この 1 ドットが効きます
+(実物のフォントでも同じことが起きます。docs/11 の 10 節)。
+
+PNG で全体の一覧を出すと、行の折り返しごと見えます (Pillow が要ります。
+無ければ上の `--ascii` で同じ中身が見られます)。
 
 ```bash
 python3 tools/font_view.py work/FONT.BIN --png work/font_sheet.png --cols 24

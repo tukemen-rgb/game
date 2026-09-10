@@ -423,6 +423,191 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                         "TSV の作り方が入れ直しより後に書かれている")
 
 
+class TestEveryToolUsesTheSharedEntry(unittest.TestCase):
+    """道具はみな scrp.cli_main を通ること (#85).
+
+    #79・#83 で入れた親切な伝言 (無いファイル名と作り方) は cli_main にある。
+    ところが font_view.py / make_elf.py / boku2.py は `sys.exit(main())` で
+    自前に出口を作っていて、**その 3 つだけ素の traceback が出ていた**。
+    落ちるわけではないので、緑のまま何回も見過ごしていた (#81 と同じ形)。
+    """
+
+    #: 入口を持つ道具 (ライブラリとして読むだけのものは除く)
+    @staticmethod
+    def cli_tools() -> list[str]:
+        out = []
+        for name in sorted(os.listdir(os.path.join(REPO, "tools"))):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(REPO, "tools", name), encoding="utf-8") as fh:
+                body = fh.read()
+            if '__name__ == "__main__"' in body:
+                out.append(name)
+        return out
+
+    def test_no_tool_makes_its_own_exit(self):
+        self.assertTrue(self.cli_tools(), "道具が 1 つも見つからない")
+        for name in self.cli_tools():
+            with open(os.path.join(REPO, "tools", name), encoding="utf-8") as fh:
+                body = fh.read()
+            self.assertTrue("cli_main(main)" in body,
+                            f"tools/{name} が scrp.cli_main を通っていない "
+                            "(無いファイルの案内が出ない)")
+            self.assertFalse("sys.exit(main())" in body,
+                             f"tools/{name} が自前の出口を持っている")
+
+    def test_a_missing_file_is_explained_by_every_tool(self):
+        """入口を持つ道具はどれも、無いファイルで traceback を出さないこと."""
+        import subprocess
+
+        checked = 0
+        for name in self.cli_tools():
+            if name.startswith("make_"):
+                continue                      # 入力ファイルを取らない生成器は対象外
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", name),
+                                  os.path.join("work", "NO_SUCH_FILE.bin")],
+                                 capture_output=True, text=True, cwd=REPO)
+            out = res.stdout + res.stderr
+            if "usage:" in out and "No such file" not in out:
+                continue                      # 引数の形が違う道具 (使い方が出る) は対象外
+            self.assertNotIn("Traceback", out, f"tools/{name}: 素の例外が出ている\n{out}")
+            checked += 1
+        self.assertGreater(checked, 3, "確かめた道具が少なすぎる (選び方が外れている)")
+
+
+class TestOptionalModuleIsExplained(unittest.TestCase):
+    """追加で入れる部品が無いときに、入れ方と代わりの手を言うこと (#85).
+
+    課題 4 は「PNG で一覧を出すと並びの規則がすぐ見えます」と勧めているのに、
+    Pillow が無いと素の ImportError が出ていた。README は「Python だけで動く
+    (フォント演習だけ Pillow)」と書いてあるので、素人は必ずここを踏む。
+    """
+
+    def run_without_pillow(self, *args):
+        import subprocess
+
+        script = (
+            "import builtins, runpy, sys\n"
+            "real = builtins.__import__\n"
+            "def fake(name, *a, **k):\n"
+            "    if name == 'PIL' or name.startswith('PIL.'):\n"
+            "        raise ImportError(\"No module named 'PIL'\")\n"
+            "    return real(name, *a, **k)\n"
+            "builtins.__import__ = fake\n"
+            f"sys.argv = {list(args)!r}\n"
+            f"runpy.run_path({os.path.join(REPO, 'tools', args[0])!r}, run_name='__main__')\n"
+        )
+        return subprocess.run([sys.executable, "-c", script],
+                              capture_output=True, text=True, cwd=REPO)
+
+    def test_font_view_png_says_how_to_install_and_what_to_do_instead(self):
+        problem = ensure_practice("work/FONT.BIN", "make_sample.py")
+        if problem:
+            self.skipTest(problem)
+        res = self.run_without_pillow("font_view.py", "work/FONT.BIN", "--png",
+                                      os.path.join(REPO, "work", "unused_sheet.png"))
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertNotIn("Traceback", out, out)
+        self.assertIn("Pillow", out)
+        self.assertIn("pip install", out, "入れ方が出ていない")
+        self.assertIn("--ascii", out, "代わりの手つきが出ていない")
+
+    def test_a_typo_in_our_own_import_is_not_hidden(self):
+        """こちらの書き間違い (知らない部品名) は隠さず投げること."""
+        with self.assertRaises(ModuleNotFoundError):
+            def boom() -> int:
+                import scrp_no_such_module  # noqa: F401
+                return 0
+
+            try:
+                scrp.cli_main(boom)
+            except SystemExit as exc:          # 握りつぶされていたら失敗として扱う
+                self.fail(f"知らない部品名を握りつぶした (終了コード {exc.code})")
+
+
+class TestReadingTheFontSheet(unittest.TestCase):
+    """課題 4 (グリフから文字を特定する) が、実際にやって成立すること (#85).
+
+    要点は「並びの規則が見える」こと。1 つずつ縦に流すと 21 文字で 400 行を超え、
+    規則 (小書き→大, 清音→濁音) は見えない。横に並べて初めて見える。
+    """
+
+    def setUp(self):
+        problem = ensure_practice("work/FONT.BIN", "make_sample.py")
+        if problem:
+            self.skipTest(problem)
+        import subprocess
+
+        self.run = lambda *a: subprocess.run(
+            [sys.executable, os.path.join(REPO, "tools", "font_view.py"), *a],
+            capture_output=True, text=True, cwd=REPO)
+
+    def test_across_puts_the_glyphs_side_by_side(self):
+        res = self.run(os.path.join(REPO, "work", "FONT.BIN"), "--ascii", "10-13",
+                       "--across", "4", "--chars", os.path.join(REPO, "data", "font_chars.txt"))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        head = next(l for l in res.stdout.split("\n") if "グリフ 10" in l)
+        for want in ("グリフ 11", "グリフ 12", "グリフ 13"):
+            self.assertIn(want, head, "同じ行に並んでいない")
+
+    def test_one_per_line_still_works(self):
+        res = self.run(os.path.join(REPO, "work", "FONT.BIN"), "--ascii", "0-2")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(3, res.stdout.count("オフセット"))
+
+    def test_the_pairs_really_differ_only_by_the_dakuten(self):
+        """規則が本当にあること: 清音と濁音は右上以外がほぼ同じ.
+
+        文書で「濁音は右上に点が 2 つ足されているだけ」と言い切っているので、
+        練習データが本当にそうなっているかを機械で確かめる。
+        """
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import font_view
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        glyphs = font_view.load_glyphs(os.path.join(REPO, "work", "FONT.BIN"))
+        chars = font_view.load_chars(os.path.join(REPO, "data", "font_chars.txt"))
+        pairs = [(chars.index(a), chars.index(b)) for a, b in
+                 (("か", "が"), ("き", "ぎ"), ("く", "ぐ"), ("け", "げ"), ("こ", "ご"))]
+        size = font_view.GLYPH_SIZE
+        for plain, voiced in pairs:
+            rows_a = font_view.glyph_rows(glyphs[plain])
+            rows_b = font_view.glyph_rows(glyphs[voiced])
+            # 点が増えると外形が変わり、枠の中で中央に置き直されて 1 ドットずれることが
+            # ある (け/げ が実際そう)。縦 1 ドットまでのずれは許して比べる
+            best = min(
+                sum(rows_a[r][c] != (rows_b[r + dy][c] if 0 <= r + dy < size else 0)
+                    for r in range(size) for c in range(size)
+                    if not (r < size // 3 and c > size * 2 // 3))
+                for dy in (-1, 0, 1))
+            self.assertLessEqual(best, 3,
+                                 f"{chars[plain]} と {chars[voiced]} が右上以外でも違う "
+                                 f"(異なるマス {best})")
+
+    def test_the_dakuten_shift_is_at_most_one_dot(self):
+        """ずれても 1 ドットまでであること (文書でそう言い切っているので測る)."""
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import font_view
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        glyphs = font_view.load_glyphs(os.path.join(REPO, "work", "FONT.BIN"))
+        chars = font_view.load_chars(os.path.join(REPO, "data", "font_chars.txt"))
+        size = font_view.GLYPH_SIZE
+        worst = 0
+        for a, b in (("か", "が"), ("き", "ぎ"), ("く", "ぐ"), ("け", "げ"), ("こ", "ご")):
+            rows_a = font_view.glyph_rows(glyphs[chars.index(a)])
+            rows_b = font_view.glyph_rows(glyphs[chars.index(b)])
+            shifts = {dy: sum(rows_a[r][c] != (rows_b[r + dy][c] if 0 <= r + dy < size else 0)
+                              for r in range(size) for c in range(size)
+                              if not (r < size // 3 and c > size * 2 // 3))
+                      for dy in (-2, -1, 0, 1, 2)}
+            worst = max(worst, abs(min(shifts, key=lambda d: shifts[d])))
+        self.assertLessEqual(worst, 1, f"1 ドットより大きくずれている ({worst} ドット)")
+
+
 class TestGrowingATableByHand(unittest.TestCase):
     """課題 3 (表を手で育てる) の途中で、道具が残りの量を言うこと (#84).
 

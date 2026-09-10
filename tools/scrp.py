@@ -556,6 +556,22 @@ MAKERS = {
 }
 
 
+#: 標準では入っていない部品 -> (pip の名前, 何に使うか). ここに無い名前は書き間違い扱い
+OPTIONAL_MODULES = {
+    "PIL": ("Pillow", "画像を扱う機能で使います"),
+}
+
+
+def optional_module_error(module: str, instead: str = "") -> "ScrpError":
+    """入っていない追加部品を、入れ方と代わりの手つきで伝える (#85)."""
+    package, why = OPTIONAL_MODULES.get(module, (module, "この機能で使います"))
+    text = (f"{package} が入っていません ({why})。\n"
+            f"  入れる:  python3 -m pip install {package}")
+    if instead:
+        text += f"\n  入れずに済ませる:  {instead}"
+    return ScrpError(text)
+
+
 def missing_file_help(path: str) -> str:
     """無いファイルが練習データなら、それを作るコマンドを返す.
 
@@ -592,6 +608,11 @@ def cli_main(main) -> None:
         # 素の例外を出すと、素人は「道具が壊れた」と読む。docs/01 の最初のコマンドで
         # 必ず踏むので、無いファイル名と作り方まで言う (#79)
         path = exc.filename or ""
+        if not path:
+            # ファイル名を持たない FileNotFoundError もある (「一致するファイルが
+            # ありません」など、伝えたい言葉が本体側にある場合)。空の名前を出さない
+            print(f"エラー: {exc}", file=sys.stderr)
+            sys.exit(1)
         print(f"エラー: ファイルがありません: {path}", file=sys.stderr)
         hint = missing_file_help(path)
         if hint:
@@ -600,6 +621,16 @@ def cli_main(main) -> None:
     except IsADirectoryError as exc:
         print(f"エラー: フォルダが指定されています (ファイルを指定してください): {exc.filename}",
               file=sys.stderr)
+        sys.exit(1)
+    except ModuleNotFoundError as exc:
+        # 追加で入れる部品が要る機能がある (課題 4 の PNG など)。素の ImportError を
+        # 出すと、素人は「道具が壊れた」と読む。入れ方と、入れずに済ませる道を言う (#85)
+        top = (exc.name or "").split(".")[0]
+        if top not in OPTIONAL_MODULES:
+            raise                                  # こちらの書き間違いなので隠さない
+        package, why = OPTIONAL_MODULES[top]
+        print(f"エラー: {package} が入っていません ({why})。", file=sys.stderr)
+        print(f"  入れる:  python3 -m pip install {package}", file=sys.stderr)
         sys.exit(1)
     except PermissionError as exc:
         print(f"エラー: 読み書きの権限がありません: {exc.filename}", file=sys.stderr)

@@ -130,7 +130,11 @@ def compile_archive(texts: list[str], encoding_id: int, codec: scrp.Codec,
 
 def render_font(chars: list[str], font_path: str, size: int = 16) -> bytes:
     """1 文字 16x16・1bpp のグリフを並べた FONT.BIN を作る (Pillow が必要)."""
-    from PIL import Image, ImageDraw, ImageFont
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        raise scrp.optional_module_error(
+            "PIL", "--no-font を付けると、FONT.BIN 以外の練習データは作れます") from None
 
     font = ImageFont.truetype(font_path, size)
     out = bytearray()

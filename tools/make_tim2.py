@@ -22,6 +22,10 @@ import argparse
 import json
 import os
 import struct
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import scrp  # noqa: E402  (cli_main = 全部の道具で同じエラー表示にする)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -158,4 +162,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    scrp.cli_main(main)

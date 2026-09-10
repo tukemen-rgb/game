@@ -69,6 +69,28 @@ def print_ascii(glyphs: list[bytes], index: int, label: str = "") -> None:
     print()
 
 
+def print_ascii_grid(glyphs: list[bytes], indexes: list[int], per_row: int,
+                     chars: list[str]) -> None:
+    """指定した数だけ横に並べて出す (課題 4 の「並びの規則」はこれで見える).
+
+    1 つずつ縦に流すと、21 文字で 400 行を超えて画面から消える。並びの規則
+    (小書き→大, 清音→濁音) は**隣り合わせにして初めて**見える。実際に課題 4 を
+    解いたとき、横に並べるまで濁点の位置に気づけなかった (#85)。
+    """
+    for base in range(0, len(indexes), per_row):
+        group = indexes[base:base + per_row]
+        heads = []
+        for index in group:
+            label = chars[index] if index < len(chars) else ""
+            heads.append((f"グリフ {index}" + (f" ({label})" if label else "")).ljust(GLYPH_SIZE * 2))
+        print("  " + "  ".join(heads).rstrip())
+        rendered = [glyph_rows(glyphs[index]) for index in group]
+        for r in range(GLYPH_SIZE):
+            line = "  ".join("".join("██" if bit else "・" for bit in rows[r]) for rows in rendered)
+            print("  " + line)
+        print()
+
+
 def parse_range(spec: str, count: int) -> list[int]:
     out: list[int] = []
     for part in spec.split(","):
@@ -85,7 +107,11 @@ def parse_range(spec: str, count: int) -> list[int]:
 
 
 def write_png(glyphs: list[bytes], path: str, cols: int, scale: int) -> None:
-    from PIL import Image
+    try:
+        from PIL import Image
+    except ImportError:
+        raise scrp.optional_module_error(
+            "PIL", "--png の代わりに --ascii 0-20 を使うと、同じ中身を文字で見られます") from None
 
     rows = (len(glyphs) + cols - 1) // cols
     cell = GLYPH_SIZE + 1
@@ -112,6 +138,8 @@ def main() -> int:
     ap.add_argument("--ascii", help="アスキーアートで表示するグリフ番号 (例: 0-9,20)")
     ap.add_argument("--png", help="一覧を PNG で書き出す")
     ap.add_argument("--cols", type=int, default=24, help="PNG の 1 行あたりのグリフ数")
+    ap.add_argument("--across", type=int, metavar="N",
+                    help="--ascii を N 個ずつ横に並べる (並びの規則はこれで見える)")
     ap.add_argument("--scale", type=int, default=2, help="PNG の拡大率")
     ap.add_argument("--chars", help="グリフ順の文字一覧 (答え合わせ用)")
     ap.add_argument("--find", help="この文字のグリフ番号を調べる (--chars が必要)")
@@ -138,8 +166,12 @@ def main() -> int:
         return 0
 
     if args.ascii:
-        for index in parse_range(args.ascii, len(glyphs)):
-            print_ascii(glyphs, index, chars[index] if index < len(chars) else "")
+        indexes = parse_range(args.ascii, len(glyphs))
+        if args.across and args.across > 1:
+            print_ascii_grid(glyphs, indexes, args.across, chars)
+        else:
+            for index in indexes:
+                print_ascii(glyphs, index, chars[index] if index < len(chars) else "")
         return 0
 
     if args.png:
@@ -152,4 +184,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    scrp.cli_main(main)

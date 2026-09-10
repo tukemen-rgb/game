@@ -24,6 +24,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import make_tim2  # noqa: E402
+import scrp  # noqa: E402  (cli_main = 全部の道具で同じエラー表示にする)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COLS = 23          # フォント画像の 1 行の文字数 (公開ソース reprint.py の N_COLUMNS = 23。asm_notes の「17」は 0x17)
@@ -310,4 +311,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    scrp.cli_main(main)

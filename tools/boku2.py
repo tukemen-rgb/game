@@ -809,6 +809,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     try:
         return run(args)
+    except FileNotFoundError:
+        raise                     # 無いファイルの案内は cli_main が出す (#79、#85)
     except (OSError, ValueError, struct.error) as exc:
         # 途中で止まった理由を 1 行で。Python の長い追跡表示は初めての人には読めない
         print(f"エラー: {exc}", file=sys.stderr)
@@ -901,4 +903,4 @@ def run(args) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    scrp.cli_main(main)
