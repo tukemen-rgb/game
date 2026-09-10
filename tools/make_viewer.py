@@ -93,6 +93,12 @@ def build_data(args) -> dict:
         for i in range(archive.count):
             hex_by_id[str(i)] = archive.raw_block(i).hex(" ").upper()
 
+    # 行をまたぐ検査 (訳ぶれ) は 1 行ずつでは出ない。画面でも同じ指摘が見えるように、
+    # 先にまとめて出しておいて、該当する行に足す (#86)
+    across_rows: dict[str, list] = {}
+    for finding in proofread.check_consistency(rows, lambda rid: None):
+        across_rows.setdefault(finding.row_id, []).append(finding)
+
     messages = []
     for row in rows:
         original = row.get("original", "")
@@ -110,7 +116,8 @@ def build_data(args) -> dict:
                 "original": findings_json(
                     proofread.check_row(base_row, rules, glossary, font_set)),
                 "translation": findings_json(
-                    proofread.check_row(row, rules, glossary, font_set)),
+                    proofread.check_row(row, rules, glossary, font_set)
+                    + across_rows.get(row["id"], [])),
             },
         })
 

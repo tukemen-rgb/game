@@ -959,6 +959,48 @@ class TestProofread(unittest.TestCase):
     def rules_hit(self, original: str, translation: str) -> set[str]:
         return {f.rule for f in self.check(original, translation)}
 
+    def test_a_changed_number_is_caught(self):
+        """数字の取り違えは、字数も用語も禁則も通ってしまう (#86)."""
+        hit = self.rules_hit("報酬は<COLOR:02>８５０<COLOR:00>ギルだ。",
+                             "報酬は<COLOR:02>８５<COLOR:00>ギルだ。")
+        self.assertIn("number", hit)
+        # 数字以外では引っかかっていないこと (この訳文は他の検査を全部通る)
+        self.assertEqual({"number"}, hit, hit)
+
+    def test_the_same_number_written_differently_is_not_a_number_error(self):
+        """全角と半角は同じ数として見る (表記の揺れは halfwidth の担当)."""
+        hit = self.rules_hit("８５０ギル", "850ギル")
+        self.assertNotIn("number", hit)
+        self.assertIn("halfwidth", hit, "半角の指摘まで消えている")
+
+    def test_numbers_inside_tags_are_not_counted(self):
+        """<COLOR:02> や <VAR:00> の数字は書式であって本文ではない."""
+        self.assertNotIn("number", self.rules_hit("<COLOR:02>赤<COLOR:00>い",
+                                                  "<COLOR:03>赤<COLOR:00>い"))
+
+    def test_a_row_with_no_numbers_is_quiet(self):
+        self.assertNotIn("number", self.rules_hit("こんにちは。", "こんばんは。"))
+
+    def test_the_same_original_translated_differently_is_caught(self):
+        """訳ぶれは 1 行ずつ見ても絶対に分からない (#86)."""
+        rows = [{"id": "5", "original": "いいえ", "translation": "いいえ", "_lineno": 2},
+                {"id": "38", "original": "いいえ", "translation": "いえ", "_lineno": 3},
+                {"id": "4", "original": "はい", "translation": "はい", "_lineno": 4}]
+        found = proofread.check_consistency(rows, lambda rid: None)
+        self.assertEqual(["38"], [f.row_id for f in found], [f.message for f in found])
+        self.assertEqual("consistency", found[0].rule)
+        self.assertEqual("WARN", found[0].severity, "訳し分けが正しい場合もあるので WARN")
+        # 1 行ずつの検査では出ないことも確かめる (出るなら consistency は要らない)
+        for row in rows:
+            self.assertNotIn("consistency",
+                             {f.rule for f in proofread.check_row(
+                                 row, self.rules, self.glossary, self.font_chars)})
+
+    def test_consistent_rows_are_quiet(self):
+        rows = [{"id": "5", "original": "いいえ", "translation": "いいえ", "_lineno": 2},
+                {"id": "38", "original": "いいえ", "translation": "いいえ", "_lineno": 3}]
+        self.assertEqual([], proofread.check_consistency(rows, lambda rid: None))
+
     def test_findings_follow_the_order_of_the_file(self):
         """指摘は TSV に出てくる順に並ぶこと (訳す人は表を上から順に直す).
 
@@ -1031,6 +1073,41 @@ class TestProofread(unittest.TestCase):
         self.assertIn("empty", self.rules_hit("こんにちは<WAIT>", "<WAIT>"))
         self.assertIn("untranslated", self.rules_hit("こんにちは", ""))
 
+    def test_the_exercise_file_matches_its_generator(self):
+        """exercises/qa_target.tsv が plant_errors.py の出力と一致すること (#86).
+
+        答えの一覧 (PLANTED) を直しても、練習データを作り直し忘れると両者がずれる。
+        ずれても落ちないので気づけない。実際、リポジトリの版は BOM 無し、生成器の
+        出力は BOM 付き (Excel 用) で、作り直すたびに差分が出る状態だった。
+        """
+        import plant_errors
+
+        src = os.path.join(REPO, "work", "SCRIPT.tsv")
+        problem = ensure_practice("work/SCRIPT.BIN", "make_sample.py")
+        if problem:
+            self.skipTest(problem)
+        if not os.path.exists(src):
+            import subprocess
+            subprocess.run([sys.executable, os.path.join(REPO, "tools", "dump_text.py"),
+                            os.path.join(REPO, "work", "SCRIPT.BIN"), "-o", src],
+                           capture_output=True, cwd=REPO, check=True)
+        rows = scrp.read_tsv(src)
+        by_id = {int(row["id"]): row for row in rows}
+        for rid, before, after, _why in plant_errors.PLANTED:
+            row = by_id[rid]
+            self.assertIn(before, row["translation"], f"id {rid}: 置換前が原文に無い")
+            row["translation"] = row["translation"].replace(before, after, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            made = os.path.join(tmp, "qa_target.tsv")
+            scrp.write_tsv(made, rows)
+            with open(made, "rb") as fh:
+                fresh = fh.read()
+        with open(os.path.join(REPO, "exercises", "qa_target.tsv"), "rb") as fh:
+            committed = fh.read()
+        self.assertEqual(fresh, committed,
+                         "exercises/qa_target.tsv が古いです "
+                         "(python3 answers/plant_errors.py で作り直してください)")
+
     def test_planted_exercise_is_all_caught(self):
         """exercises/qa_target.tsv に仕込んだ行が、すべて検出されること."""
         import plant_errors
@@ -1043,6 +1120,10 @@ class TestProofread(unittest.TestCase):
         for row in rows:
             if proofread.check_row(row, self.rules, self.glossary, self.font_chars):
                 flagged.add(int(row["id"]))
+        # 行をまたぐ検査 (訳ぶれ) はここでしか動かない。1 行ずつの検査だけで
+        # 数えていると、仕込んだ訳ぶれを「見逃している」と誤って報告する (#86)
+        for finding in proofread.check_consistency(rows, lambda rid: None):
+            flagged.add(int(finding.row_id))
         planted = {rid for rid, *_ in plant_errors.PLANTED}
         self.assertEqual(planted - flagged, set(), "見逃している行があります")
         self.assertEqual(flagged - planted, set(), "仕込んでいない行を誤検出しています")

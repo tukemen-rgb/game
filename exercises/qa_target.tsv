@@ -1,4 +1,4 @@
-id	offset	size	original	translation
+﻿id	offset	size	original	translation
 0	0xAC	59	<NAME:00>ようこそ、旅の方。<BR>ここはリィンフォルト王国の城下町だ。<WAIT>	<NAME:00>ようこそ、旅の方。<BR>ここはリンフォルト王国の城下街だ。<WAIT>
 1	0xE7	86	<NAME:00>東の街道は近ごろ魔物が増えている。<BR>用があるなら、日の高いうちに<BR>出発することだな。<WAIT>	<NAME:00>東の街道は近ごろ魔物が増えている。<BR>用があるなら、日の高いうちに<BR>出発することだな。<WAIT>
 2	0x13D	55	<NAME:01><VAR:00>！　こんなところにいたのね。<BR>ずいぶん探したのよ。<WAIT>	<NAME:01>あなた！　こんなところにいたのね。<BR>ずいぶん探したのよ。<WAIT>
@@ -23,7 +23,7 @@ id	offset	size	original	translation
 21	0x561	32	<COLOR:03>影の司祭<COLOR:00>が立ちはだかった！<WAIT>	<COLOR:03>影の司祭<COLOR:00>が立ちはだかった！<WAIT>
 22	0x581	34	<VAR:00>は<COLOR:02>２４<COLOR:00>のダメージを受けた！<WAIT>	<VAR:00>は<COLOR:02>２４<COLOR:00>のダメージを受けた！<WAIT>
 23	0x5A3	45	<VAR:00>の攻撃！<BR>影の司祭に<COLOR:02>１３６<COLOR:00>のダメージ！<WAIT>	<VAR:00>の攻撃！<BR>影の司祭に<COLOR:02>１３６<COLOR:00>のダメージ！<WAIT>
-24	0x5D0	51	影の司祭を倒した！<BR>経験値<COLOR:02>８５０<COLOR:00>を手に入れた。<WAIT>	影の司祭を倒した！<BR>経験値<COLOR:02>８５０<COLOR:00>を手に入れた。<WAIT>
+24	0x5D0	51	影の司祭を倒した！<BR>経験値<COLOR:02>８５０<COLOR:00>を手に入れた。<WAIT>	影の司祭を倒した！<BR>経験値<COLOR:02>８５<COLOR:00>を手に入れた。<WAIT>
 25	0x603	68	<NAME:01>やったね、<VAR:00>！<BR>……でも、あの人は最後に<BR>何を言おうとしたのかな。<WAIT>	<NAME:00>やったね、<VAR:00>！<BR>……でも、あの人は最後に<BR>何を言おうとしたのかな。<WAIT>
 26	0x647	69	<NAME:02>塔の主が消えても、影は残る。<BR>次は西の湖へ向かうことになるだろう。<WAIT>	<NAME:02>塔の主が消えても、影は残る。<BR>次は西の湖へ向かうことになるだろう。<WAIT>
 27	0x68C	43	宝箱を開けた。<BR><COLOR:02>銀の腕輪<COLOR:00>を手に入れた！<WAIT>	宝箱を開けた。<BR><COLOR:02>銀の腕輪<COLOR:00>を手に入れた！<WAIT>
@@ -37,4 +37,4 @@ id	offset	size	original	translation
 35	0x7CA	65	東の街道→森の祠→影の塔。<BR>順番を間違えると門が開かないみたい。<WAIT>	東の街道→森の祠→影の塔。<BR>順番を間違えると門が開かないみたい。<WAIT>
 36	0x80B	49	<NAME:00>また来てくれよ。<BR>この町はいつでも開いている。<WAIT>	<NAME:00>また来てくれよ。<BR>この町はいつでも開いている。<WAIT>
 37	0x83C	5	はい	はい
-38	0x841	7	いいえ	いいえ
+38	0x841	7	いいえ	いえ

@@ -127,6 +127,49 @@ def pages_of(text: str) -> list[list[str]]:
     return pages
 
 
+#: 全角数字を半角に寄せる (１２３ と 123 を同じ数として数えるため)
+FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def numbers_in(text: str) -> list[str]:
+    """本文に出てくる数を、現れた順に返す (タグの中の数は数えない).
+
+    `<COLOR:02>` や `<VAR:00>` の数字は書式であって本文ではないので外す。
+    全角と半角は同じ数として扱う (表記の揺れは halfwidth の担当)。
+    """
+    visible = scrp.strip_tags(text).translate(FULLWIDTH_DIGITS)
+    return re.findall(r"\d+", visible)
+
+
+def check_consistency(rows: list[dict], lineno_of) -> list[Finding]:
+    """同じ原文が違う訳になっていないかを見る (行をまたぐ検査) (#86).
+
+    「はい」「いいえ」のような短い文はあちこちに出てきて、担当者や作業日が
+    分かれると訳がぶれる。1 行ずつ見ている限り絶対に見つからない一方、
+    機械なら確実に見つかる類。実務の一致率チェックそのもの。
+    """
+    seen: dict[str, list[tuple[str, str]]] = {}
+    for row in rows:
+        original = (row.get("original") or "").strip()
+        if not original or not scrp.strip_tags(original).strip():
+            continue
+        seen.setdefault(original, []).append((row.get("id", "?"), scrp.final_text(row)))
+    out: list[Finding] = []
+    for original, uses in seen.items():
+        variants = {text for _rid, text in uses}
+        if len(variants) < 2:
+            continue
+        first = uses[0]
+        for rid, text in uses[1:]:
+            if text == first[1]:
+                continue
+            out.append(Finding(rid, "WARN", "consistency",
+                               f"同じ原文が id {first[0]} と違う訳になっています",
+                               f"id {first[0]}: {first[1]}  /  id {rid}: {text}",
+                               lineno_of(rid)))
+    return out
+
+
 def check_row(row: dict, rules: dict, glossary: list[dict],
               font_chars: set[str] | None) -> list[Finding]:
     rid = row.get("id", "?")
@@ -226,6 +269,18 @@ def check_row(row: dict, rules: dict, glossary: list[dict],
                 f"{m.start()} 文字目付近: {text[max(0, m.start() - 6):m.end() + 6]}")
             break  # 同じルールは 1 行につき 1 回だけ報告する
 
+    # --- 数字の食い違い ---------------------------------------------------
+    # 報酬 300 が 30 になっていても、字数も用語も禁則も通ってしまう。実機では
+    # 「300 ギルもらえる」と言われて 30 しか入らない、という出荷事故になる (#86)
+    if translation is not None and translation.strip():
+        before_nums = numbers_in(original)
+        after_nums = numbers_in(text)
+        if before_nums != after_nums:
+            add("ERROR", "number",
+                f"数字が原文と一致しません (原文 {'・'.join(before_nums) or 'なし'} / "
+                f"訳文 {'・'.join(after_nums) or 'なし'})",
+                "金額・ダメージ・個数の取り違えは、字面では気づけません")
+
     # --- 用語集 -----------------------------------------------------------
     for entry in glossary:
         for wrong in entry["forbidden"]:
@@ -267,6 +322,8 @@ def main() -> int:
     findings: list[Finding] = []
     for row in rows:
         findings += check_row(row, rules, glossary, font_chars)
+    lineno_of = {row.get("id", "?"): row.get("_lineno") for row in rows}
+    findings += check_consistency(rows, lambda rid: lineno_of.get(rid))
     findings.sort(key=lambda f: f.sort_key())
 
     counts = Counter(f.severity for f in findings)
