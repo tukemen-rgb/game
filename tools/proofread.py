@@ -42,6 +42,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEVERITIES = {"ERROR": 0, "WARN": 1, "INFO": 2}
 PLACEHOLDER_TAGS = {"NAME", "VAR"}
 
+#: 原文と訳文を**見比べて**初めて分かる検査。訳文の欄が原文のままなら何も見ていない
+COMPARING_RULES = ("placeholder", "control", "number", "empty", "untranslated")
+#: 訳文だけを見て分かる検査。取り出したばかりのテキストでも効く
+ABSOLUTE_RULES = ("line_width", "line_count", "kinsoku", "font", "halfwidth",
+                  "notation", "glossary", "consistency")
+
 
 class Finding:
     def __init__(self, row_id: str, severity: str, rule: str, message: str,
@@ -71,6 +77,17 @@ def load_rules(path: str, lang: str) -> dict:
     if lang not in rules:
         raise scrp.ScrpError(f"{path}: 言語 {lang!r} の設定がありません")
     return rules[lang]
+
+
+def tag_widths_of(rules: dict, override: float | None = None) -> dict[str, float]:
+    """差し込みタグの想定幅 {タグ名: 幅} を作る (課題 7).
+
+    `<VAR:00>` はプレイヤー名などが実行時に入る。既定は 0 (今までどおり) で、
+    設定か --var-width で「最長でこれだけ入る」と決めると、その分を数える。
+    0 のままだと、名前が長い人だけ枠からはみ出す不具合を見逃す。
+    """
+    width = override if override is not None else float(rules.get("var_width", 0) or 0)
+    return {"VAR": width} if width else {}
 
 
 def load_glossary(path: str) -> list[dict]:
@@ -171,7 +188,8 @@ def check_consistency(rows: list[dict], lineno_of) -> list[Finding]:
 
 
 def check_row(row: dict, rules: dict, glossary: list[dict],
-              font_chars: set[str] | None) -> list[Finding]:
+              font_chars: set[str] | None,
+              tag_widths: dict[str, float] | None = None) -> list[Finding]:
     rid = row.get("id", "?")
     lineno = row.get("_lineno")
     original = row.get("original", "")
@@ -245,11 +263,16 @@ def check_row(row: dict, rules: dict, glossary: list[dict],
                 f"{p + 1} ページ目が {len(lines)} 行あります (上限 {lines_max} 行)",
                 "<BR> を減らすか <CLEAR> でページを分けます")
         for i, line in enumerate(lines):
-            width = scrp.display_width(line)
+            width = scrp.display_width(line, tag_widths)
             if max_width and width > max_width:
+                plain = scrp.display_width(line)
+                detail = scrp.strip_tags(line)
+                if tag_widths and width != plain:
+                    detail += (f"  (文字 {plain:g} + 差し込み "
+                               f"{width - plain:g})")
                 add("ERROR", "line_width",
                     f"{p + 1} ページ {i + 1} 行目が {width:g} 文字分です (上限 {max_width:g})",
-                    scrp.strip_tags(line))
+                    detail)
             stripped = scrp.strip_tags(line)
             if not stripped:
                 continue
@@ -307,6 +330,8 @@ def main() -> int:
     ap.add_argument("--font-chars", default=os.path.join(REPO, "data", "font_chars.txt"))
     ap.add_argument("--names", default=os.path.join(REPO, "data", "names.tsv"))
     ap.add_argument("--no-font-check", action="store_true")
+    ap.add_argument("--var-width", type=float, metavar="文字数",
+                    help="<VAR:xx> に差し込まれる最大の長さ (既定は data/rules.json の var_width)")
     ap.add_argument("--only-errors", action="store_true", help="ERROR だけ表示する")
     ap.add_argument("--report", help="指摘一覧を TSV で書き出す")
     args = ap.parse_args()
@@ -320,8 +345,9 @@ def main() -> int:
 
     rows = scrp.read_tsv(args.tsv)
     findings: list[Finding] = []
+    tag_widths = tag_widths_of(rules, args.var_width)
     for row in rows:
-        findings += check_row(row, rules, glossary, font_chars)
+        findings += check_row(row, rules, glossary, font_chars, tag_widths)
     lineno_of = {row.get("id", "?"): row.get("_lineno") for row in rows}
     findings += check_consistency(rows, lambda rid: lineno_of.get(rid))
     findings.sort(key=lambda f: f.sort_key())
@@ -359,6 +385,21 @@ def main() -> int:
     orig_chars = sum(len(scrp.strip_tags(r.get("original", ""))) for r in rows)
     new_chars = sum(len(scrp.strip_tags(scrp.final_text(r))) for r in rows)
     print(f"表示文字数: 原文 {orig_chars:,} → 訳文 {new_chars:,} ({new_chars - orig_chars:+,})")
+
+    # 取り出したばかりのテキストは訳文の欄が原文のままなので、原文と訳文を
+    # 見比べる検査 (差し込みの欠落・数字の食い違いなど) は**何も見ていない**。
+    # 「問題なし」を「全部の検査を通った」と読まれないよう、はっきり言う (#88)
+    translated = [r for r in rows if scrp.final_text(r) != r.get("original", "")]
+    if not translated:
+        print(f"\n注意: {len(rows)} 行すべて訳文の欄が原文と同じです。"
+              "原文と見比べる検査は動いていません:")
+        print("  " + " / ".join(COMPARING_RULES))
+        print("  いま効いているのは、訳文だけを見て分かる検査 "
+              f"({' / '.join(ABSOLUTE_RULES)}) です。")
+        print("  訳文を入れてからもう一度かけると、残りの検査も働きます。")
+    elif len(translated) < len(rows):
+        print(f"\n注意: {len(rows) - len(translated)} 行は訳文の欄が原文のままです "
+              "(その行では、原文と見比べる検査は働きません)")
 
     if args.report:
         with open(args.report, "w", encoding="utf-8", newline="\n") as fh:

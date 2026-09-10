@@ -423,6 +423,56 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                         "TSV の作り方が入れ直しより後に書かれている")
 
 
+class TestInertChecksAreAnnounced(unittest.TestCase):
+    """訳文が原文のままなら、比べる検査が動いていないと言うこと (#88).
+
+    取り出したばかりのテキストは訳文の欄が原文のまま。原文と見比べる 5 つの検査は
+    **構造的に何も見ていない**のに、「問題なし 23 行」とだけ出る。13 個の検査を
+    全部通ったように読めてしまう。実物の text を最初にかけるのがまさにこの状態。
+    """
+
+    def run_proofread(self, rows: list[dict], *args):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.tsv")
+            scrp.write_tsv(path, rows)
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "proofread.py"),
+                                  path, *args], capture_output=True, text=True, cwd=REPO)
+        return res.stdout + res.stderr
+
+    def test_all_rows_untranslated_says_which_checks_did_nothing(self):
+        rows = [{"id": "0", "original": "こんにちは。", "translation": "こんにちは。"},
+                {"id": "1", "original": "さようなら。", "translation": "さようなら。"}]
+        out = self.run_proofread(rows)
+        self.assertIn("原文と見比べる検査は動いていません", out, out)
+        for rule in proofread.COMPARING_RULES:
+            self.assertIn(rule, out, f"{rule} が一覧に無い")
+        self.assertIn("line_width", out, "効いている検査の一覧が出ていない")
+
+    def test_a_translated_file_does_not_get_the_notice(self):
+        rows = [{"id": "0", "original": "こんにちは。", "translation": "こんばんは。"}]
+        out = self.run_proofread(rows)
+        self.assertNotIn("原文と見比べる検査は動いていません", out, out)
+
+    def test_a_partly_translated_file_says_how_many_are_untouched(self):
+        rows = [{"id": "0", "original": "こんにちは。", "translation": "こんばんは。"},
+                {"id": "1", "original": "さようなら。", "translation": "さようなら。"}]
+        out = self.run_proofread(rows)
+        self.assertIn("1 行は訳文の欄が原文のままです", out, out)
+
+    def test_the_two_rule_lists_cover_every_rule_the_tool_emits(self):
+        """一覧に載せ忘れた rule があれば気づけること (#81 と同じ形の素通し防止)."""
+        with open(os.path.join(REPO, "tools", "proofread.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        emitted = set(re.findall(r'"(?:ERROR|WARN|INFO)",\s*"([a-z_]+)"', src))
+        emitted |= set(re.findall(r'\("(?:ERROR|WARN)",\s*"([a-z_]+)"\)', src))
+        emitted |= set(re.findall(r'entry\.get\([^)]*\),\s*"([a-z_]+)"', src))
+        listed = set(proofread.COMPARING_RULES) | set(proofread.ABSOLUTE_RULES)
+        self.assertEqual(set(), emitted - listed,
+                         "どちらの一覧にも入っていない rule があります")
+
+
 class TestRoundTripIsChecked(unittest.TestCase):
     """課題 6 の「往復して確認する」が、道具で通せること (#87).
 
@@ -1109,6 +1159,55 @@ class TestProofread(unittest.TestCase):
         rows = [{"id": "5", "original": "いいえ", "translation": "いいえ", "_lineno": 2},
                 {"id": "38", "original": "いいえ", "translation": "いいえ", "_lineno": 3}]
         self.assertEqual([], proofread.check_consistency(rows, lambda rid: None))
+
+    def test_a_substituted_name_widens_the_line(self):
+        """<VAR:00> に入る名前の長さを数えられること (課題 7, #88)."""
+        line = "<NAME:01><VAR:00>！　こんなところにいたのね。"
+        self.assertEqual(14.0, scrp.display_width(line))
+        self.assertEqual(20.0, scrp.display_width(line, {"VAR": 6}),
+                         "14 文字 + 名前 6 文字 = 20 にならない")
+        # <NAME:xx> は枠の外に出るので既定では数えない (make_viewer がそう描いている)
+        self.assertEqual(20.0, scrp.display_width(line, {"VAR": 6, "NAME": 0}))
+        self.assertEqual(23.0, scrp.display_width(line, {"VAR": 6, "NAME": 3}),
+                         "枠の中に名前を出す作りなら数えられること")
+
+    def test_var_width_turns_a_passing_line_into_a_violation(self):
+        row = {"id": "2", "original": "<VAR:00>！　こんなところにいたのね。",
+               "translation": "<VAR:00>！　こんなところにいたのね。"}
+        quiet = proofread.check_row(row, self.rules, self.glossary, self.font_chars)
+        self.assertNotIn("line_width", {f.rule for f in quiet}, "幅 0 のとき指摘が出ている")
+        loud = proofread.check_row(row, self.rules, self.glossary, self.font_chars,
+                                   {"VAR": 6})
+        hit = [f for f in loud if f.rule == "line_width"]
+        self.assertEqual(1, len(hit), [f.message for f in loud])
+        self.assertIn("20 文字分", hit[0].message)
+        self.assertIn("差し込み 6", hit[0].detail, "文字と差し込みの内訳が出ていない")
+
+    def test_var_width_comes_from_the_rules_or_the_flag(self):
+        rules = dict(self.rules)
+        self.assertEqual({}, proofread.tag_widths_of(rules), "既定は数えないこと")
+        self.assertEqual({"VAR": 6.0}, proofread.tag_widths_of(rules, 6.0))
+        rules["var_width"] = 4
+        self.assertEqual({"VAR": 4.0}, proofread.tag_widths_of(rules))
+        self.assertEqual({"VAR": 6.0}, proofread.tag_widths_of(rules, 6.0),
+                         "旗が設定より優先されること")
+
+    def test_the_master_text_itself_overflows_once_names_are_counted(self):
+        """原文そのものが、名前の長さを考えずに書かれていること (#88).
+
+        docs/04 で「原文の側にも 2 行の違反が出る」と言い切っているので測る。
+        仕込んだ不具合ではなく、実際の案件でも起きる素の状態。
+        """
+        rows = scrp.read_tsv(os.path.join(REPO, "exercises", "qa_target.tsv"))
+        over = set()
+        for row in rows:
+            base = dict(row)
+            base["translation"] = row["original"]        # 原文だけを見る
+            for finding in proofread.check_row(base, self.rules, self.glossary,
+                                               self.font_chars, {"VAR": 6}):
+                if finding.rule == "line_width":
+                    over.add(row["id"])
+        self.assertEqual({"2", "22"}, over, "docs/04 の「id 2 と id 22」と食い違う")
 
     def test_findings_follow_the_order_of_the_file(self):
         """指摘は TSV に出てくる順に並ぶこと (訳す人は表を上から順に直す).

@@ -309,11 +309,22 @@ def strip_tags(text: str) -> str:
     return TAG_RE.sub(repl, text)
 
 
-def display_width(text: str) -> float:
-    """全角を 1.0、半角を 0.5 として数えた表示幅. タグは幅 0 とみなす."""
+def display_width(text: str, tag_widths: dict[str, float] | None = None) -> float:
+    """全角を 1.0、半角を 0.5 として数えた表示幅.
+
+    タグは既定で幅 0。`<VAR:00>` のように**実行時に文字が差し込まれる**タグは、
+    差し込まれる長さで数えないと本当の行幅が分からない。プレイヤー名が 6 文字なら
+    18 文字の行が 24 文字になってはみ出す。tag_widths に {"VAR": 6.0} のように
+    渡すと、そのタグを指定した幅として数える (課題 7)。
+
+    `<NAME:xx>` を既定で数えないのは、話者名が枠の外に出るため (make_viewer が
+    そう描いている)。枠の中に出す作りなら NAME も渡す。
+    """
     total = 0.0
     for ch in strip_tags(text):
         total += 1.0 if unicodedata.east_asian_width(ch) in "FWA" else 0.5
+    for name, _arg in iter_tags(text):
+        total += float((tag_widths or {}).get(name, 0.0))
     return total
 
 
