@@ -229,6 +229,62 @@ class TestRelativeSearch(unittest.TestCase):
         self.assertTrue(hits)
 
 
+class TestMissingPracticeData(unittest.TestCase):
+    """練習データが無いときに、素の例外ではなく作り方を出すこと (#79).
+
+    docs/01〜03 の**最初のコマンド**は work/ の練習データを使う。作る手順が
+    書かれておらず、無いまま打つと Python の traceback が出ていた。
+    素人はそれを「道具が壊れた」と読む。
+    """
+
+    def run_tool(self, *args):
+        import subprocess
+
+        return subprocess.run([sys.executable, os.path.join(REPO, "tools", "hexdump.py"), *args],
+                              capture_output=True, text=True, cwd=REPO)
+
+    def test_a_missing_practice_file_says_how_to_make_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self.run_tool(os.path.join(tmp, "work", "SCRIPT.BIN"))
+            out = res.stdout + res.stderr
+            self.assertNotEqual(res.returncode, 0, out)
+            self.assertNotIn("Traceback", out, "素の例外が出ている")
+            self.assertIn("ファイルがありません", out)
+            self.assertIn("make_sample.py", out, out)
+
+    def test_an_unrelated_missing_file_is_plain(self):
+        """関係ないファイルには練習データの話をしないこと."""
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self.run_tool(os.path.join(tmp, "nope.bin"))
+            out = res.stdout + res.stderr
+            self.assertNotIn("Traceback", out, out)
+            self.assertIn("ファイルがありません", out)
+            self.assertNotIn("make_sample.py", out, out)
+
+    def test_a_directory_is_named_as_such(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self.run_tool(tmp)
+            out = res.stdout + res.stderr
+            self.assertNotIn("Traceback", out, out)
+            self.assertIn("フォルダが指定されています", out)
+
+    def test_every_maker_actually_exists(self):
+        """作り方として案内するコマンドの道具が、本当にあること."""
+        for name, cmd in scrp.MAKERS.items():
+            for token in cmd.split():
+                if token.startswith("tools/") and token.endswith(".py"):
+                    self.assertTrue(os.path.exists(os.path.join(REPO, token)),
+                                    f"{name} の案内が指す {token} がありません")
+
+    def test_the_practice_docs_say_to_make_the_data_first(self):
+        """docs/01〜03 の頭に、練習データの作り方への導線があること."""
+        for name in ("01-文字テーブル.md", "02-相対検索.md", "03-ポインタテーブル.md"):
+            doc = open(os.path.join(REPO, "docs", name), encoding="utf-8").read()
+            head = doc[:1200]
+            self.assertIn("make_sample.py", head,
+                          f"docs/{name} の頭に練習データの作り方が無い")
+
+
 class TestTextCommandDeadEnds(unittest.TestCase):
     """正しい道具に正しく渡したのに何も取れないとき、黙って終わらないこと (#77).
 

@@ -501,6 +501,37 @@ def final_text(row: dict) -> str:
     return text if text.strip() else row.get("original", "")
 
 
+# 練習データの作り方。docs/01〜03 はこれらを作ってある前提で書かれているので、
+# 無いときは「どのコマンドで作るか」まで言う (#79)
+MAKERS = {
+    "SCRIPT.BIN": "python3 tools/make_sample.py",
+    "MSG_ENC.BIN": "python3 tools/make_sample.py",
+    "FONT.BIN": "python3 tools/make_sample.py",
+    "SCRIPT.tsv": "python3 tools/make_sample.py && python3 tools/dump_text.py work/SCRIPT.BIN -o work/SCRIPT.tsv",
+    "RINFOLT.iso": "python3 tools/make_iso.py",
+    "PACK.IDX": "python3 tools/make_archive.py",
+    "PACK.IMG": "python3 tools/make_archive.py",
+    "FONT.TMS": "python3 tools/make_tim2.py",
+    "BOOT.ELF": "python3 tools/make_elf.py",
+    "BOKU2.IDX": "python3 tools/make_boku2_sample.py",
+    "BOKU2.IMG": "python3 tools/make_boku2_sample.py",
+}
+
+
+def missing_file_help(path: str) -> str:
+    """無いファイルが練習データなら、それを作るコマンドを返す."""
+    import os
+
+    name = os.path.basename(path)
+    cmd = MAKERS.get(name)
+    if cmd:
+        return f"練習データはまだ作られていません。先にこれを実行してください:\n  {cmd}"
+    if os.sep + "work" + os.sep in os.sep + path or path.startswith("work" + os.sep):
+        return ("work/ の中のファイルは練習データです。docs/01 の先頭にある作成コマンド "
+                "(python3 tools/make_sample.py など) を先に実行してください")
+    return ""
+
+
 def cli_main(main) -> None:
     """各ツールの共通の入口. エラー表示とパイプ切断の処理をまとめる."""
     import sys
@@ -509,6 +540,22 @@ def cli_main(main) -> None:
         sys.exit(main())
     except ScrpError as exc:
         print(f"エラー: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError as exc:
+        # 素の例外を出すと、素人は「道具が壊れた」と読む。docs/01 の最初のコマンドで
+        # 必ず踏むので、無いファイル名と作り方まで言う (#79)
+        path = exc.filename or ""
+        print(f"エラー: ファイルがありません: {path}", file=sys.stderr)
+        hint = missing_file_help(path)
+        if hint:
+            print("  " + hint.replace("\n", "\n  "), file=sys.stderr)
+        sys.exit(1)
+    except IsADirectoryError as exc:
+        print(f"エラー: フォルダが指定されています (ファイルを指定してください): {exc.filename}",
+              file=sys.stderr)
+        sys.exit(1)
+    except PermissionError as exc:
+        print(f"エラー: 読み書きの権限がありません: {exc.filename}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
         sys.exit(130)
