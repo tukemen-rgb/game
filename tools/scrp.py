@@ -512,14 +512,23 @@ MAKERS = {
     "PACK.IDX": "python3 tools/make_archive.py",
     "PACK.IMG": "python3 tools/make_archive.py",
     "FONT.TMS": "python3 tools/make_tim2.py",
+    "FONT.TM2": "python3 tools/make_tim2.py",
     "BOOT.ELF": "python3 tools/make_elf.py",
+    "viewer.html": "python3 tools/make_viewer.py",
+    "BOKU2SAMPLE": "python3 tools/make_boku2_sample.py",
     "BOKU2.IDX": "python3 tools/make_boku2_sample.py",
     "BOKU2.IMG": "python3 tools/make_boku2_sample.py",
 }
 
 
 def missing_file_help(path: str) -> str:
-    """無いファイルが練習データなら、それを作るコマンドを返す."""
+    """無いファイルが練習データなら、それを作るコマンドを返す.
+
+    work/ の中でも、この一式が作らない名前がある (docs/06 の `work/qa_fixed.tsv` は
+    読む人が自分で用意するファイル)。そこに「make_sample.py を実行してください」と
+    出すと、実行しても何も変わらないので、**言われたとおりにして直らない**という
+    いちばん困る状態になる (#83)。作れる名前のときだけ、作り方を言う。
+    """
     import os
 
     name = os.path.basename(path)
@@ -527,8 +536,11 @@ def missing_file_help(path: str) -> str:
     if cmd:
         return f"練習データはまだ作られていません。先にこれを実行してください:\n  {cmd}"
     if os.sep + "work" + os.sep in os.sep + path or path.startswith("work" + os.sep):
-        return ("work/ の中のファイルは練習データです。docs/01 の先頭にある作成コマンド "
-                "(python3 tools/make_sample.py など) を先に実行してください")
+        made = "、".join(sorted(MAKERS))
+        return (f"work/ は生成物と自分の作業ファイルの置き場です。{name} を作る道具は"
+                "この一式にはありません。\n"
+                "  自分で用意するファイル (直した TSV など) なら、名前と場所を確かめてください。\n"
+                f"  この一式が work/ に作る名前: {made}")
     return ""
 
 

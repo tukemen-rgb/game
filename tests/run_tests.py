@@ -262,14 +262,21 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
     """
 
     DOCS = ("01-文字テーブル.md", "02-相対検索.md", "03-ポインタテーブル.md",
-            "04-校正とQA.md", "08-コードを読む.md")
+            "04-校正とQA.md", "06-画面で確かめる.md", "07-構造探査台.md",
+            "08-コードを読む.md", "../README.md")
 
     #: この引数の次に来る名前は、入力ではなくその行が作るもの
     OUT_FLAGS = ("-o", "--out", "--derive", "--report")
 
-    @staticmethod
-    def commands_at(doc: str) -> list[tuple[str, int]]:
-        """```bash ブロックの中の python3 の行と、その文字位置 (行継続はつなぐ)."""
+    #: 旗ではなく**位置**で出力先が決まるコマンド (末尾の引数が出力先)
+    OUT_TAIL = ("boku2.py unpack",)
+
+    #: 読む対象にする行の頭。cp は「題材を作業場に写してから直す」に使う (docs/06)
+    VERBS = ("python3 ", "cp ")
+
+    @classmethod
+    def commands_at(cls, doc: str) -> list[tuple[str, int]]:
+        """```bash ブロックの中の実行行と、その文字位置 (行継続はつなぐ)."""
         out, in_block, buf, start, pos = [], False, "", 0, 0
         for line in doc.split("\n"):
             here, pos = pos, pos + len(line) + 1
@@ -281,7 +288,7 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
             line = line.split("#", 1)[0].rstrip()
             if buf:
                 buf += " " + line.strip()
-            elif line.startswith("python3 "):
+            elif line.startswith(cls.VERBS):
                 buf, start = line.strip(), here
             else:
                 continue
@@ -312,6 +319,11 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
         with open(os.path.join(REPO, "docs", name), encoding="utf-8") as fh:
             return fh.read()
 
+    @staticmethod
+    def label(name: str) -> str:
+        """報告用の見出し (README は docs/ の外にあるので docs/../ にしない)."""
+        return os.path.normpath(os.path.join("docs", name)).replace(os.sep, "/")
+
     def test_every_command_block_is_marked_bash(self):
         """コマンドの入った囲みには ```bash の印が要る (#81).
 
@@ -331,7 +343,7 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                     continue
                 if any(l.startswith("python3 ") for l in buf):
                     self.assertEqual("bash", fence[1],
-                                     f"docs/{name}:{fence[0]} コマンドの囲みに ```bash "
+                                     f"{self.label(name)}:{fence[0]} コマンドの囲みに ```bash "
                                      "の印が無い (この文書の検査が素通しになる)")
                 fence = None
 
@@ -341,13 +353,22 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
             for cmd in self.commands(doc):
                 for tok in cmd.split():
                     self.assertNotIn(tok, ("FILE", "ファイル名", "PATH", "<file>"),
-                                     f"docs/{name}: 穴埋めのまま打てない行がある: {cmd}")
+                                     f"{self.label(name)}: 穴埋めのまま打てない行がある: {cmd}")
 
     def inputs_needing_a_maker(self, doc: str):
-        """(生成器を要る入力ファイル, その名前, その行, 行の文字位置) を順に返す."""
+        """(生成器を要る入力, その名前, その行, 行の文字位置) を順に返す.
+
+        道の途中で作られる物は「その行より前に作る行があるか」で見る。旗 (-o など) の
+        ほか、`cp 元 先` の先と、出力先が位置で決まるコマンド (OUT_TAIL) の末尾も
+        作る側として数える。フォルダごと作る物があるので、名前は基底名だけでなく
+        **道の各段**を見る (`work/BOKU2SAMPLE/MAP/*.BIN` は BOKU2SAMPLE が作る)。
+        """
         produced: set[str] = set()
         for cmd, at in self.commands_at(doc):
             toks = cmd.split()
+            tail_is_out = toks[0] == "cp" or any(k in cmd for k in self.OUT_TAIL)
+            if tail_is_out and len(toks) >= 3:
+                produced.add(os.path.basename(toks[-1]))
             for i, tok in enumerate(toks):
                 if tok in self.OUT_FLAGS:
                     if i + 1 < len(toks):
@@ -355,17 +376,23 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                     continue
                 if tok.startswith("-") or "/" not in tok or tok.startswith("tools/"):
                     continue
-                base = os.path.basename(tok)
-                if base in produced or self.shipped(tok):
+                parts = tok.split("/")
+                if produced.intersection(parts):
                     continue
-                yield tok, base, cmd, at
+                made = next((p for p in parts if p in scrp.MAKERS), None)
+                if made is not None:
+                    yield tok, made, cmd, at        # 作り方はある。順序は別の試験が見る
+                    continue
+                if self.shipped(tok):
+                    continue
+                yield tok, os.path.basename(tok), cmd, at
 
     def test_every_file_used_is_made_earlier_in_the_same_doc(self):
         """使うファイルは、実在するか、同じ文書の前の行が作っているか、生成器が作るもの."""
         for name in self.DOCS:
             for _tok, base, cmd, _at in self.inputs_needing_a_maker(self.doc_text(name)):
                 self.assertIn(base, scrp.MAKERS,
-                              f"docs/{name}: {base} の作り方が先に無い ({cmd})")
+                              f"{self.label(name)}: {base} の作り方が先に無い ({cmd})")
 
     def test_the_maker_is_named_before_the_line_that_needs_it(self):
         """生成器の名前は、その生成物を使う行より前に出てくること (#81).
@@ -386,7 +413,7 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                 for script in re.findall(r"tools/(\w+\.py)", scrp.MAKERS[base]):
                     where = doc.find("python3 tools/" + script)
                     self.assertTrue(0 <= where < at,
-                                    f"docs/{name}: {base} を使う行より前に "
+                                    f"{self.label(name)}: {base} を使う行より前に "
                                     f"`python3 tools/{script}` が無い ({cmd})")
 
     def test_the_insert_step_shows_how_to_get_the_tsv(self):
@@ -418,6 +445,22 @@ class TestMissingPracticeData(unittest.TestCase):
             self.assertNotIn("Traceback", out, "素の例外が出ている")
             self.assertIn("ファイルがありません", out)
             self.assertIn("make_sample.py", out, out)
+
+    def test_a_work_file_no_tool_makes_does_not_send_you_to_make_sample(self):
+        """work/ でも、この一式が作らない名前には作り方を言わないこと (#83).
+
+        docs/06 の `work/qa_fixed.tsv` は読む人が自分で用意するファイル。そこに
+        「make_sample.py を実行してください」と出すと、言われたとおりにしても
+        何も変わらない。**指示どおりにして直らない**のがいちばん困る。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self.run_tool(os.path.join(tmp, "work", "qa_fixed.tsv"))
+            out = res.stdout + res.stderr
+            self.assertNotIn("Traceback", out, out)
+            self.assertNotIn("make_sample.py を実行", out,
+                             "作れない名前に作り方を言っている")
+            self.assertIn("この一式にはありません", out, out)
+            self.assertIn("SCRIPT.BIN", out, "作れる名前の一覧が出ていない")
 
     def test_an_unrelated_missing_file_is_plain(self):
         """関係ないファイルには練習データの話をしないこと."""

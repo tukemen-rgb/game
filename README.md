@@ -41,12 +41,15 @@ python3 tools/relative_search.py work/MSG_ENC.BIN --search こんなところ
 python3 tools/proofread.py exercises/qa_target.tsv
 
 # 7. 画面でどう見えるかを確かめる (メッセージウィンドウの検査台)
-python3 tools/make_viewer.py && open work/viewer.html   # Windows は start、Linux は xdg-open
+python3 tools/make_viewer.py
+# できた work/viewer.html をブラウザで開く
+#   macOS: open work/viewer.html / Windows: start work\viewer.html / Linux: xdg-open work/viewer.html
 
 # 8. 構造が分からないファイルを推定する (構造探査台)
 python3 tools/make_iso.py       # 練習用のディスクイメージ
 python3 tools/make_archive.py   # 練習用の「索引 + 本体」の組
-open web/index.html
+# web/index.html を上と同じ要領でブラウザで開く (組み立てた 1 ファイルが要るなら
+#   python3 tools/build_web.py --embed-sample)
 
 # 9. 直したテキストをデータに入れ直す (ポインタは自動で振り直される)
 python3 tools/insert_text.py work/SCRIPT.tsv -o work/SCRIPT_new.BIN \
