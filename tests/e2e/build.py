@@ -13,8 +13,16 @@ from common import REPO, WORK, launch
 OUT = os.path.join(WORK, "構造探査台_test.html")
 
 async def main():
-    subprocess.run([sys.executable, os.path.join(REPO, "tools", "build_web.py"), "--embed-sample", "-o", OUT],
-                   cwd=REPO, check=True, capture_output=True)
+    # check=True で握りつぶすと、道具が出した「先に make_iso.py を実行してください」が
+    # 消えて、代わりに CalledProcessError の traceback だけが出る (#82)
+    built = subprocess.run([sys.executable, os.path.join(REPO, "tools", "build_web.py"),
+                            "--embed-sample", "-o", OUT],
+                           cwd=REPO, capture_output=True, text=True)
+    if built.returncode != 0:
+        print("組み立てに失敗しました: python3 tools/build_web.py --embed-sample")
+        print((built.stdout + built.stderr).strip())
+        print("RESULT NG")
+        sys.exit(1)
     async with async_playwright() as p:
         b = await launch(p)
         page = await b.new_page()

@@ -31,6 +31,27 @@ import boku2  # noqa: F401  (TestBoku2Cli で使う。読み込めることも�
 SOURCE = os.path.join(REPO, "data", "script_source.tsv")
 
 
+def ensure_practice(marker: str, *tools: str) -> str | None:
+    """練習データが無ければ作る。作れなければ理由を返す (#82).
+
+    「無いから飛ばす」で済ませると、取得したままの環境では**一度も走らない検査**に
+    なる。作る道具は同じリポジトリにあるので、飛ばす前に作る。
+    道具を順に実行するのは、材料に前後関係があるため (make_archive は make_sample の出力を使う)。
+    """
+    import subprocess
+
+    if os.path.exists(os.path.join(REPO, marker)):
+        return None
+    for tool in tools:
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tools", tool)],
+                             cwd=REPO, capture_output=True, text=True)
+        if res.returncode != 0:
+            return f"python3 tools/{tool} が落ちました: {(res.stdout + res.stderr).strip()[:300]}"
+    if not os.path.exists(os.path.join(REPO, marker)):
+        return f"{marker} を作れませんでした"
+    return None
+
+
 class Fixture:
     """マスターテキストから疑似ゲームデータを組み立てたもの."""
 
@@ -964,8 +985,9 @@ class TestArchiveFixture(unittest.TestCase):
     def setUpClass(cls):
         cls.idx = os.path.join(REPO, "work", "PACK.IDX")
         cls.img = os.path.join(REPO, "work", "PACK.IMG")
-        if not (os.path.exists(cls.idx) and os.path.exists(cls.img)):
-            raise unittest.SkipTest("work/PACK.IDX がありません (make_archive.py を実行)")
+        problem = ensure_practice("work/PACK.IDX", "make_sample.py", "make_archive.py")
+        if problem or not os.path.exists(cls.img):
+            raise unittest.SkipTest(problem or "work/PACK.IMG がありません")
 
     def test_index_matches_the_body(self):
         import struct
@@ -1001,8 +1023,9 @@ class TestIndexAnalyzer(unittest.TestCase):
         if not node:
             self.skipTest("node がありません")
         script = os.path.join(REPO, "tests", "test_index.mjs")
-        if not os.path.exists(os.path.join(REPO, "work", "PACK.IDX")):
-            self.skipTest("work/PACK.IDX がありません")
+        problem = ensure_practice("work/PACK.IDX", "make_sample.py", "make_archive.py")
+        if problem:
+            self.skipTest(problem)
         res = subprocess.run([node, script], capture_output=True, text=True, cwd=REPO)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("OK", res.stdout)
@@ -1050,8 +1073,9 @@ class TestDisassembler(unittest.TestCase):
 
     def test_reads_the_practice_boot_elf(self):
         path = os.path.join(REPO, "work", "BOOT.ELF")
-        if not os.path.exists(path):
-            self.skipTest("work/BOOT.ELF がありません (python3 tools/make_elf.py)")
+        problem = ensure_practice("work/BOOT.ELF", "make_elf.py")
+        if problem:
+            self.skipTest(problem)
         with open(path, "rb") as fh:
             elf = self.elfdump.Elf(fh.read())
         self.assertEqual(elf.machine, 8)
@@ -1074,8 +1098,9 @@ class TestDisassembler(unittest.TestCase):
 
     def test_disassembles_the_entry_point(self):
         path = os.path.join(REPO, "work", "BOOT.ELF")
-        if not os.path.exists(path):
-            self.skipTest("work/BOOT.ELF がありません")
+        problem = ensure_practice("work/BOOT.ELF", "make_elf.py")
+        if problem:
+            self.skipTest(problem)
         with open(path, "rb") as fh:
             elf = self.elfdump.Elf(fh.read())
         lines = self.elfdump.disasm(elf, elf.entry, 16)
@@ -2459,6 +2484,87 @@ class TestBrowserEndToEnd(unittest.TestCase):
                              capture_output=True, text=True, cwd=REPO, timeout=1500)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertNotIn("NG ", res.stdout)
+        self.assertNotIn("skip:", res.stdout, "playwright はあるのに skip している")
+
+
+class TestNothingIsQuietlyLeftOut(unittest.TestCase):
+    """「走らせる物の一覧」が、実際に在る物と一致していること (#82).
+
+    e2e は CHECKS の並び、node 側は run_tests.py の中の呼び出しが一覧になっている。
+    どちらも手書きなので、検査を足して一覧に入れ忘れると、**ファイルは在るのに
+    誰も走らせない**。落ちるわけではないので、緑のまま気づかない (#81 と同じ形)。
+    """
+
+    def test_every_e2e_file_is_in_checks(self):
+        e2e = os.path.join(REPO, "tests", "e2e")
+        found = {n[:-3] for n in os.listdir(e2e)
+                 if n.endswith(".py") and n not in ("common.py", "run_all.py")}
+        sys.path.insert(0, e2e)
+        try:
+            import run_all
+        finally:
+            sys.path.remove(e2e)
+        self.assertEqual(found, set(run_all.CHECKS),
+                         "tests/e2e/ にあるのに CHECKS に無い (または逆)")
+
+    def test_every_node_test_is_called_from_here(self):
+        tests_dir = os.path.join(REPO, "tests")
+        with open(os.path.join(tests_dir, "run_tests.py"), encoding="utf-8") as fh:
+            me = fh.read()
+        for name in sorted(n for n in os.listdir(tests_dir) if n.endswith(".mjs")):
+            self.assertIn(name, me, f"tests/{name} を run_tests.py から呼んでいない")
+
+
+class TestE2eFixturesFromAScratchTree(unittest.TestCase):
+    """取得したままの木 (work/ が無い) で、e2e の練習データが作れること (#82).
+
+    まっさらな取得直後は work/ が空で、make_archive.py は make_sample.py の出力を
+    材料にする。一覧の順序と依存が抜けていたため e2e は**取得直後には動かず**、
+    しかも失敗の中身 (「先に make_sample.py を実行してください」) は
+    check=True + capture_output に呑まれて traceback だけが出ていた。
+    2 度目からは前回の残りで動くので、緑に見えてしまう。
+    """
+
+    def test_fixtures_build_in_a_tree_without_work(self):
+        import shutil
+
+        e2e = os.path.join(REPO, "tests", "e2e")
+        sys.path.insert(0, e2e)
+        try:
+            import run_all
+        finally:
+            sys.path.remove(e2e)
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(os.path.join(REPO, "tools"), os.path.join(tmp, "tools"))
+            for extra in ("data", "web"):
+                src = os.path.join(REPO, extra)
+                if os.path.isdir(src):
+                    shutil.copytree(src, os.path.join(tmp, extra))
+            os.makedirs(os.path.join(tmp, "work"), exist_ok=True)
+            problem = run_all.build_fixtures(tmp)
+            self.assertIsNone(problem, problem)
+            for marker, _cmd in run_all.FIXTURES:
+                self.assertTrue(os.path.exists(os.path.join(tmp, marker)), marker)
+
+    def test_a_broken_generator_reports_its_own_words(self):
+        """道具が落ちたら、その道具が出した言葉がそのまま返ること (traceback ではなく)."""
+        import shutil
+
+        e2e = os.path.join(REPO, "tests", "e2e")
+        sys.path.insert(0, e2e)
+        try:
+            import run_all
+        finally:
+            sys.path.remove(e2e)
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "tools"))
+            first = run_all.FIXTURES[0][1][0]
+            with open(os.path.join(tmp, first), "w", encoding="utf-8") as fh:
+                fh.write("import sys\nprint('ここに理由が出る', file=sys.stderr)\nsys.exit(1)\n")
+            problem = run_all.build_fixtures(tmp)
+            self.assertIsNotNone(problem, "落ちたのに問題なしと言っている")
+            self.assertIn("ここに理由が出る", problem)
+            self.assertNotIn("Traceback", problem)
 
 
 class TestDisassemblerInBrowser(unittest.TestCase):
@@ -2472,12 +2578,29 @@ class TestDisassemblerInBrowser(unittest.TestCase):
         if not node:
             self.skipTest("node がありません")
         script = os.path.join(REPO, "tests", "test_disasm.mjs")
-        if not os.path.exists(os.path.join(REPO, "work", "BOOT.ELF")):
-            self.skipTest("work/BOOT.ELF がありません")
+        problem = ensure_practice("work/BOOT.ELF", "make_elf.py")
+        if problem:
+            self.skipTest(problem)
         res = subprocess.run([node, script], capture_output=True, text=True, cwd=REPO)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("OK", res.stdout)
 
 
+def main() -> int:
+    """飛ばした検査を最後にまとめて出す (#82).
+
+    unittest は skip を「OK」の行の括弧に小さく足すだけなので、練習データや node が
+    無い環境では**何十件も確かめないまま緑に見える**。何を確かめていないのかは、
+    結果と同じくらい大事なので、名前と理由を並べて出す。
+    """
+    result = unittest.main(verbosity=2, exit=False).result
+    if result.skipped:
+        print(f"\n飛ばした検査 {len(result.skipped)} 件 (この分は確かめていません):")
+        for case, why in result.skipped:
+            print(f"  - {case.id().rsplit('.', 2)[-2]}.{case.id().rsplit('.', 1)[-1]}: {why}")
+        print("  練習データが理由なら、先に python3 tools/make_sample.py などを実行してください")
+    return 0 if result.wasSuccessful() else 1
+
+
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    sys.exit(main())
