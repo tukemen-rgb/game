@@ -229,6 +229,58 @@ class TestRelativeSearch(unittest.TestCase):
         self.assertTrue(hits)
 
 
+class TestWrongPipelineFile(unittest.TestCase):
+    """列が同じ 2 つの TSV を取り違えたときに、症状ではなく状況を言うこと (#75).
+
+    練習用 SCRP の TSV と、僕の夏休み 2 の取り出し (boku2.py text) の TSV は
+    列がまったく同じ。以前は「id は 0 から連番で」としか言わなかったので、
+    素人は手で連番に振り直そうとしてしまう (振り直しても入れ直し先が違う)。
+    """
+
+    def test_boku2_tsv_into_insert_text_explains_the_situation(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = os.path.join(tmp, "all.tsv")
+            with open(tsv, "w", encoding="utf-8-sig", newline="\n") as fh:
+                fh.write("id\toffset\tsize\toriginal\ttranslation\n")
+                fh.write("diary#0:0\t0x20\t12\tあ\tあ\n")
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "insert_text.py"),
+                 tsv, "-o", os.path.join(tmp, "out.bin"), "--encoding", "sjis"],
+                capture_output=True, text=True)
+            out = res.stdout + res.stderr
+            self.assertNotEqual(res.returncode, 0, out)
+            self.assertIn("boku2.py text", out, out)
+            self.assertIn("読み取り専用", out, out)
+            self.assertIn("proofread.py", out, out)
+            # 文言が途中で欠けていないこと (置換で壊した実績がある)
+            self.assertIn("列は同じですが", out, out)
+            self.assertIn("練習用の SCRP 形式に入れ直すためのもの", out, out)
+            self.assertIn("diary#0:0", out, out)
+            # 症状だけを言う古い文言に戻っていないこと
+            self.assertNotIn("0 から連番で", out, out)
+            self.assertNotIn("**", out, "端末の文言に markdown の印が混ざっている")
+
+    def test_a_plain_id_mistake_still_says_what_to_fix(self):
+        """本来の相手 (連番の id) が崩れているだけなら、今までどおり直し方を言う."""
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = os.path.join(tmp, "s.tsv")
+            with open(tsv, "w", encoding="utf-8-sig", newline="\n") as fh:
+                fh.write("id\toffset\tsize\toriginal\ttranslation\n")
+                fh.write("5\t0x20\t12\tあ\tあ\n")
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "insert_text.py"),
+                 tsv, "-o", os.path.join(tmp, "out.bin"), "--encoding", "sjis"],
+                capture_output=True, text=True)
+            out = res.stdout + res.stderr
+            self.assertNotEqual(res.returncode, 0, out)
+            self.assertIn("0 から連番で", out, out)
+            self.assertNotIn("boku2.py text", out, out)
+
+
 class TestProofread(unittest.TestCase):
     def setUp(self):
         self.rules = proofread.load_rules(os.path.join(REPO, "data", "rules.json"), "ja")

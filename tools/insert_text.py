@@ -64,11 +64,24 @@ def main() -> int:
         raise scrp.ScrpError(f"{args.tsv}: 行がありません")
 
     for expected, row in enumerate(rows):
-        if row["id"].strip() != str(expected):
+        rid = row["id"].strip()
+        if rid == str(expected):
+            continue
+        # 僕の夏休み 2 の取り出し (boku2.py text) の TSV は列が同じなので取り違えやすい。
+        # id が "diary#0:2" のような形なら、それはこの道具の相手ではない。
+        # 症状 (id の形) だけを言うと、手で連番に振り直そうとしてしまう (#75)
+        if ":" in rid or "#" in rid:
             raise scrp.ScrpError(
-                f"{args.tsv}:{row['_lineno']}: id が {row['id']!r} です。"
-                f"0 から連番で、行の順序も変えないでください (期待 {expected})"
+                f"{args.tsv}: この TSV は僕の夏休み 2 の取り出し (boku2.py text) の形です "
+                f"(id が {rid!r})。列は同じですが、この道具は練習用の SCRP 形式に"
+                "入れ直すためのものです。連番に振り直しても入れ直し先が違います。\n"
+                "  実物のゲームへの書き戻しはこの一式では行いません (読み取り専用。docs/05)。\n"
+                "  校正にかけるなら: python3 tools/proofread.py " + args.tsv
             )
+        raise scrp.ScrpError(
+            f"{args.tsv}:{row['_lineno']}: id が {rid!r} です。"
+            f"0 から連番で、行の順序も変えないでください (期待 {expected})"
+        )
 
     blobs = []
     errors = []
