@@ -229,6 +229,72 @@ class TestRelativeSearch(unittest.TestCase):
         self.assertTrue(hits)
 
 
+class TestTextCommandDeadEnds(unittest.TestCase):
+    """正しい道具に正しく渡したのに何も取れないとき、黙って終わらないこと (#77).
+
+    以前は 0 行の TSV を作って rc=0 で終わっていた。素人は Excel で開くまで
+    何も起きていないことに気づけない。踏むのは「unpack / maps を先に回していない」
+    か「場所違い」なので、そこまで言う。
+    """
+
+    def run_text(self, *args):
+        import io as _io
+        import contextlib
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = boku2.main(["text", *args])
+        return rc, buf.getvalue()
+
+    def test_nothing_found_says_which_step_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = os.path.join(tmp, "empty")
+            os.makedirs(empty)
+            rc, out = self.run_text(empty, "-o", os.path.join(tmp, "a.tsv"))
+            self.assertEqual(rc, 1, out)
+            self.assertIn("1 行も見つかりませんでした", out)
+            self.assertIn("unpack", out, out)
+            self.assertIn("maps", out, out)
+            # 見出しだけの TSV は残し、そのことも言う
+            self.assertTrue(os.path.exists(os.path.join(tmp, "a.tsv")))
+            self.assertIn("見出しだけの", out)
+
+    def test_unreadable_files_point_at_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junk = os.path.join(tmp, "junk.msg")
+            with open(junk, "wb") as fh:
+                fh.write(b"not a msg at all, just plain text here")
+            rc, out = self.run_text(junk, "-o", os.path.join(tmp, "j.tsv"))
+            self.assertEqual(rc, 1, out)
+            self.assertIn("読めませんでした", out)
+            self.assertIn("boku2.py check", out, out)
+            self.assertNotIn("unpack", out, "ファイルはあるのに unpack を勧めている")
+
+    def test_an_empty_glyph_table_is_not_reported_as_missing(self):
+        """-f を渡したのに「文字表なし」と言うと、渡していないように読める."""
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            out = os.path.join(tmp, "OUT")
+            boku2.main(["unpack", os.path.join(sample, "BOKU2.IDX"),
+                        os.path.join(sample, "BOKU2.IMG"), out])
+            msg = os.path.join(out, "system", "system.msg")
+            empty = os.path.join(tmp, "empty.txt")
+            open(empty, "w", encoding="utf-8").close()
+
+            rc, said = self.run_text(msg, "-f", empty, "-o", os.path.join(tmp, "c.tsv"))
+            self.assertEqual(rc, 0, said)
+            self.assertIn("読めた字が 0", said, said)
+            self.assertIn(empty, said, said)
+            self.assertNotIn("文字表なし", said, said)
+
+            rc, said = self.run_text(msg, "-o", os.path.join(tmp, "b.tsv"))
+            self.assertEqual(rc, 0, said)
+            self.assertIn("文字表なし", said, said)
+            self.assertIn("-f font.txt", said, said)
+
+
 class TestFormatHint(unittest.TestCase):
     """SCRP でないファイルを渡されたとき、次に使う道具まで言うこと (#76).
 

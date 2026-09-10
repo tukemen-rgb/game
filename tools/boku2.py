@@ -835,11 +835,36 @@ def run(args) -> int:
         files = expand_inputs(expand_patterns(args.files))
         for f in files:
             rows += text_rows(f, glyphs, args.keep_voice)
+        if not rows:
+            # 0 行の TSV を黙って作ると、開くまで何も起きていないことに気づけない。
+            # 素人が踏むのは「unpack / maps を先に回していない」か「場所違い」(#77)
+            print(f"→ 文言が 1 行も見つかりませんでした (見たファイル {len(files)} 個)")
+            if not files:
+                print("   指定した場所に読めるファイルがありません。"
+                    "先に unpack (索引の切り分け) と maps (入れ物の切り分け) を回してください:")
+                print("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/")
+                print("     python3 tools/boku2.py maps 実物/MAP -o OUT/maps")
+                print("   そのうえで OUT を指定します: python3 tools/boku2.py text OUT -f font.txt -o all.tsv")
+            else:
+                print("   ファイルはありましたが、どれも .msg / 入れ物の部品として読めませんでした。"
+                    "python3 tools/boku2.py check 実物/ で、どの段で外れているかを診てください")
+            if args.out:
+                with open(args.out, "w", encoding="utf-8-sig", newline="\n") as fo:
+                    write_tsv(rows, fo)
+                print(f"   (見出しだけの {args.out} は作ってあります)")
+            return 1
         if args.out:
             # BOM 付き UTF-8: Excel でそのまま開いても日本語が化けない
             with open(args.out, "w", encoding="utf-8-sig", newline="\n") as fo:
                 write_tsv(rows, fo)
-            print(f"{len(rows)} 行 → {args.out}" + ("" if glyphs else " (文字表なし: 番号のまま)"))
+            if glyphs:
+                note = ""
+            elif args.font:
+                # -f を渡したのに空だった。「文字表なし」だと渡していないように読める
+                note = f" (文字表 {args.font} から読めた字が 0 なので、番号のまま)"
+            else:
+                note = " (文字表なし: 番号のまま。-f font.txt を付けると日本語になります)"
+            print(f"{len(rows)} 行 → {args.out}" + note)
         else:
             write_tsv(rows, sys.stdout)
         if glyphs:
