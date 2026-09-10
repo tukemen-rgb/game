@@ -54,11 +54,15 @@ class Finding:
         self.lineno = lineno
 
     def sort_key(self):
-        try:
-            rid = int(self.row_id)
-        except ValueError:
-            rid = 1 << 30
-        return (rid, SEVERITIES.get(self.severity, 9), self.rule)
+        """TSV に出てくる順に並べる。訳す人は表を上から順に直すので、そこに合わせる.
+
+        以前は id を整数として読もうとしていた。いまの id は "ファイル名:表-行" の形
+        (`diary#0:2` など) なので **必ず失敗**し、全件が同じ値になって、実際には
+        severity と rule 名の順に並んでいた。直す順序が原文の順とばらばらになる
+        (最初の行の指摘が一番下に出る) のに、落ちも警告もしないので気づけなかった (#74)。
+        """
+        order = self.lineno if self.lineno is not None else 1 << 30
+        return (order, SEVERITIES.get(self.severity, 9), self.rule)
 
 
 def load_rules(path: str, lang: str) -> dict:

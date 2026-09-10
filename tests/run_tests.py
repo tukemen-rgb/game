@@ -242,6 +242,34 @@ class TestProofread(unittest.TestCase):
     def rules_hit(self, original: str, translation: str) -> set[str]:
         return {f.rule for f in self.check(original, translation)}
 
+    def test_findings_follow_the_order_of_the_file(self):
+        """指摘は TSV に出てくる順に並ぶこと (訳す人は表を上から順に直す).
+
+        以前は id を整数として読もうとして必ず失敗し、severity と rule 名の順に
+        並んでいた。最初の行の指摘が一番下に出るのに、落ちも警告もしなかった (#74)。
+        """
+        rows = [
+            # 3 行目に ERROR、2 行目に WARN。並びは 2 行目が先になること
+            {"id": "a:0", "original": "あ", "translation": "あ", "_lineno": 2},
+            {"id": "a:1", "original": "い", "translation": "", "_lineno": 3},
+            {"id": "a:2", "original": "う", "translation": "ﾊﾝｶｸ", "_lineno": 4},
+            {"id": "a:3", "original": "え", "translation": "え", "_lineno": 5},
+        ]
+        findings = []
+        for row in rows:
+            findings += proofread.check_row(row, self.rules, self.glossary, self.font_chars)
+        findings.sort(key=lambda f: f.sort_key())
+        self.assertTrue(findings, "指摘が 1 件も出ていない (この検査が意味を持たない)")
+        ids = [f.row_id for f in findings]
+        self.assertEqual(ids, sorted(ids, key=lambda i: [r["id"] for r in rows].index(i)),
+                         f"ファイルの順に並んでいない: {ids}")
+        # id が整数でも壊れないこと (古い形の TSV)
+        old = proofread.Finding("12", "WARN", "x", "m", "", 7)
+        new = proofread.Finding("a:0", "ERROR", "x", "m", "", 3)
+        self.assertLess(new.sort_key(), old.sort_key(), "行番号の順になっていない")
+        # 行番号が無くても落ちないこと
+        proofread.Finding("a:0", "WARN", "x", "m").sort_key()
+
     def test_original_script_is_clean(self):
         """原文そのものは 1 件も指摘が出ないこと (基準線)."""
         for i, text in enumerate(FIX.texts):
