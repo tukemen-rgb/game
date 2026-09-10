@@ -229,6 +229,71 @@ class TestRelativeSearch(unittest.TestCase):
         self.assertTrue(hits)
 
 
+class TestFormatHint(unittest.TestCase):
+    """SCRP でないファイルを渡されたとき、次に使う道具まで言うこと (#76).
+
+    docs/01〜03 の練習は SCRP 形式で進むので、素人はその流れのまま実物のファイルを
+    渡す。「SCRP ではありません」だけでは次の手が分からない。
+    自信のあるときだけ言い、無関係なデータには何も言わないこと。
+    """
+
+    def test_it_names_the_format_and_the_tool(self):
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            idx = open(os.path.join(folder, "BOKU2.IDX"), "rb").read()
+            self.assertIn("boku2.py unpack", scrp.guess_other_format(idx))
+            self.assertIn("索引", scrp.guess_other_format(idx))
+            mapfile = open(os.path.join(folder, "MAP", "M_A01000.BIN"), "rb").read()
+            self.assertIn("boku2.py maps", scrp.guess_other_format(mapfile))
+
+    def test_it_recognises_a_msg_and_a_font(self):
+        # .msg: u32 件数 + 位置表 (8 バイト刻み) + 本文
+        entries = [[1, 2, 0x8000], [3, 0x8000]]
+        tab = 4 + len(entries) * 8
+        head, body, p = struct.pack("<I", len(entries)), b"", tab
+        for e in entries:
+            head += struct.pack("<II", p, len(e) * 2)
+            body += struct.pack(f"<{len(e)}H", *e)
+            p += len(e) * 2
+        hint = scrp.guess_other_format(head + body)
+        self.assertIn("boku2.py text", hint, hint)
+        # フォント (TMS の前置き + TIM2)
+        tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * 0x78 + b"TIM2" + b"\0" * 64
+        self.assertIn("TIM2", scrp.guess_other_format(tms))
+
+    def test_it_stays_quiet_on_unrelated_data(self):
+        """無関係なデータに当てずっぽうを言わないこと (言われると余計に迷う)."""
+        import random
+
+        random.seed(7)
+        for name, blob in [
+            ("乱数", bytes(random.randrange(256) for _ in range(4096))),
+            ("ゼロ埋め", bytes(4096)),
+            ("ASCII", b"BOOT2 = cdrom0:\\SCPS_150.26;1\nVER = 1.00\n" * 40),
+            ("短すぎる", b"\x01\x02\x03"),
+        ]:
+            self.assertEqual(scrp.guess_other_format(blob), "", name)
+
+    def test_the_error_carries_the_hint(self):
+        import subprocess
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "dump_text.py"),
+                 os.path.join(folder, "BOKU2.IDX"), "-o", os.path.join(tmp, "x.tsv")],
+                capture_output=True, text=True)
+            out = res.stdout + res.stderr
+            self.assertNotEqual(res.returncode, 0, out)
+            self.assertIn("SCRP ファイルではありません", out)
+            self.assertIn("boku2.py unpack", out, out)
+
+
 class TestWrongPipelineFile(unittest.TestCase):
     """列が同じ 2 つの TSV を取り違えたときに、症状ではなく状況を言うこと (#75).
 

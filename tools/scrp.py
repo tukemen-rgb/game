@@ -356,11 +356,71 @@ class Archive:
         return rows
 
 
+def guess_other_format(data: bytes) -> str:
+    """SCRP でないバイト列が、この一式で扱う別の形式に見えるかを言う (#76).
+
+    docs/01〜03 の練習は SCRP 形式で進むので、素人はその流れのまま実物のファイルを
+    渡してしまう。「SCRP ではありません」だけだと、**次に何をすればいいか**が分からない。
+    自信のあるときだけ、形式の名前と使うべき道具を添える。
+
+    boku2.py は scrp.py を読み込む側なので、ここから boku2 を呼ぶことはできない
+    (循環する)。判定はこの中だけで完結させる。
+    """
+    if len(data) < 16:
+        return ""
+    if data[:4] == b"DFI\0":
+        return ("僕の夏休み 2 の索引 (DFI) に見えます。"
+                "python3 tools/boku2.py unpack BOKU2.IDX BOKU2.IMG OUT/ を使ってください")
+    if data[:4] == b"TMS\0" or data[0x80:0x84] == b"TIM2" or data[:4] == b"TIM2":
+        return ("PS2 の画像 (TIM2) に見えます。構造探査台の「既知の形式」タブで開くか、"
+                "文字表を作るなら docs/10 の手順 3 へ")
+
+    def u32(p: int) -> int:
+        return struct.unpack_from("<I", data, p)[0]
+
+    # 僕の夏休み 2 の .msg: u32 件数 + 位置表 (8 または 4 バイト刻み)。
+    # 1 件目の位置が表の直後で、位置が減らずファイル内に収まっていれば、それ
+    n = u32(0)
+    if 1 <= n <= 20000:
+        for stride in (8, 4):
+            tab = 4 + n * stride
+            if tab > len(data) or tab + 2 > len(data):
+                continue
+            offs = [u32(4 + i * stride) for i in range(n)]
+            live = [o for o in offs if o]
+            if not live or live[0] != tab:
+                continue
+            if all(a <= b for a, b in zip(live, live[1:])) and live[-1] < len(data):
+                return ("僕の夏休み 2 の会話ファイル (.msg) に見えます。"
+                        "python3 tools/boku2.py text ファイル -f font.txt -o all.tsv を使ってください "
+                        "(画面なら構造探査台の「.msg として読む」)")
+    # 入れ物: u32 項目数 + (位置, 長さ) の並び
+    if 1 <= n <= 64:
+        for rec in (8, 12):
+            head = 4 + n * rec
+            if head > len(data):
+                continue
+            ok = True
+            for i in range(n):
+                off, size = u32(4 + i * rec), u32(8 + i * rec)
+                if off == 0 and size == 0:
+                    continue
+                if not (head <= off <= len(data) and off + size <= len(data)):
+                    ok = False
+                    break
+            if ok:
+                return ("部品をまとめた入れ物に見えます (MAP のファイルなど)。"
+                        "python3 tools/boku2.py maps フォルダ -o OUT/maps で切り分けてください")
+    return ""
+
+
 def read_archive(path: str) -> Archive:
     with open(path, "rb") as fh:
         data = fh.read()
     if len(data) < HEADER_SIZE or data[:4] != MAGIC:
-        raise ScrpError(f"{path}: SCRP ファイルではありません (先頭 4 バイト = {data[:4]!r})")
+        hint = guess_other_format(data)
+        raise ScrpError(f"{path}: SCRP ファイルではありません (先頭 4 バイト = {data[:4]!r})"
+                        + (f"\n  {hint}" if hint else ""))
     version, count, encoding_id = struct.unpack_from("<3I", data, 4)
     if version != VERSION:
         raise ScrpError(f"{path}: 未対応のバージョン {version}")
