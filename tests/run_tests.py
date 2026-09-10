@@ -229,6 +229,76 @@ class TestRelativeSearch(unittest.TestCase):
         self.assertTrue(hits)
 
 
+class TestPracticeDocsAreRunnable(unittest.TestCase):
+    """docs/01〜03 に書いてあるコマンドが、上から順に打って通る形であること (#80).
+
+    見るのは 2 点。**穴埋めのまま**の引数が無いこと (`FILE` をそのままコピペすると
+    落ちる) と、**使うファイルの作り方が先に書いてある**こと (docs/03 は
+    work/SCRIPT.tsv を使うのに、作る dump_text.py に触れていなかった)。
+    """
+
+    DOCS = ("01-文字テーブル.md", "02-相対検索.md", "03-ポインタテーブル.md")
+
+    @staticmethod
+    def commands(doc: str) -> list[str]:
+        """```bash ブロックの中の python3 の行 (行継続はつなぐ)."""
+        out, in_block, buf = [], False, ""
+        for line in doc.split("\n"):
+            if line.startswith("```"):
+                in_block = "bash" in line
+                continue
+            if not in_block:
+                continue
+            line = line.split("#", 1)[0].rstrip()
+            if buf:
+                buf += " " + line.strip()
+            elif line.startswith("python3 "):
+                buf = line.strip()
+            else:
+                continue
+            if buf.endswith("\\"):
+                buf = buf[:-1].strip()
+            else:
+                out.append(buf)
+                buf = ""
+        return out
+
+    def test_no_placeholder_is_left_in_a_command(self):
+        for name in self.DOCS:
+            doc = open(os.path.join(REPO, "docs", name), encoding="utf-8").read()
+            for cmd in self.commands(doc):
+                for tok in cmd.split():
+                    self.assertNotIn(tok, ("FILE", "ファイル名", "PATH", "<file>"),
+                                     f"docs/{name}: 穴埋めのまま打てない行がある: {cmd}")
+
+    def test_every_file_used_is_made_earlier_in_the_same_doc(self):
+        """使うファイルは、実在するか、同じ文書の前の行が作っているか、生成器が作るもの."""
+        made_by_maker = set(scrp.MAKERS)
+        for name in self.DOCS:
+            doc = open(os.path.join(REPO, "docs", name), encoding="utf-8").read()
+            produced: set[str] = set()
+            for cmd in self.commands(doc):
+                toks = cmd.split()
+                for i, tok in enumerate(toks):
+                    if tok in ("-o", "--derive", "--out"):
+                        if i + 1 < len(toks):
+                            produced.add(os.path.basename(toks[i + 1]))
+                        continue
+                    if tok.startswith("-") or "/" not in tok:
+                        continue
+                    base = os.path.basename(tok)
+                    ok = (os.path.exists(os.path.join(REPO, tok))
+                          or base in produced or base in made_by_maker
+                          or tok.startswith("tools/"))
+                    self.assertTrue(ok, f"docs/{name}: {base} の作り方が先に無い ({cmd})")
+
+    def test_the_insert_step_shows_how_to_get_the_tsv(self):
+        doc = open(os.path.join(REPO, "docs", "03-ポインタテーブル.md"), encoding="utf-8").read()
+        self.assertIn("dump_text.py", doc, "docs/03 に TSV の作り方が無い")
+        self.assertLess(doc.index("dump_text.py"), doc.index("insert_text.py work/SCRIPT.tsv"),
+                        "TSV の作り方が入れ直しより後に書かれている")
+
+
 class TestMissingPracticeData(unittest.TestCase):
     """練習データが無いときに、素の例外ではなく作り方を出すこと (#79).
 
