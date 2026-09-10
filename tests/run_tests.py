@@ -11,6 +11,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -230,20 +231,27 @@ class TestRelativeSearch(unittest.TestCase):
 
 
 class TestPracticeDocsAreRunnable(unittest.TestCase):
-    """docs/01〜03 に書いてあるコマンドが、上から順に打って通る形であること (#80).
+    """練習用の文書のコマンドが、上から順に打って通る形であること (#80, #81).
 
-    見るのは 2 点。**穴埋めのまま**の引数が無いこと (`FILE` をそのままコピペすると
-    落ちる) と、**使うファイルの作り方が先に書いてある**こと (docs/03 は
-    work/SCRIPT.tsv を使うのに、作る dump_text.py に触れていなかった)。
+    見るのは 3 点。**穴埋めのまま**の引数が無いこと (`FILE` をそのままコピペすると
+    落ちる)、**使うファイルの作り方がどこかに書いてある**こと (docs/03 は
+    work/SCRIPT.tsv を使うのに、作る dump_text.py に触れていなかった)、そして
+    その作り方が**使う行より前**にあること (docs/08 は work/BOOT.ELF を使う
+    4 行を並べたあとで make_elf.py に触れていた。上から順に打つと 1 行目で止まる)。
     """
 
-    DOCS = ("01-文字テーブル.md", "02-相対検索.md", "03-ポインタテーブル.md")
+    DOCS = ("01-文字テーブル.md", "02-相対検索.md", "03-ポインタテーブル.md",
+            "04-校正とQA.md", "08-コードを読む.md")
+
+    #: この引数の次に来る名前は、入力ではなくその行が作るもの
+    OUT_FLAGS = ("-o", "--out", "--derive", "--report")
 
     @staticmethod
-    def commands(doc: str) -> list[str]:
-        """```bash ブロックの中の python3 の行 (行継続はつなぐ)."""
-        out, in_block, buf = [], False, ""
+    def commands_at(doc: str) -> list[tuple[str, int]]:
+        """```bash ブロックの中の python3 の行と、その文字位置 (行継続はつなぐ)."""
+        out, in_block, buf, start, pos = [], False, "", 0, 0
         for line in doc.split("\n"):
+            here, pos = pos, pos + len(line) + 1
             if line.startswith("```"):
                 in_block = "bash" in line
                 continue
@@ -253,47 +261,115 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
             if buf:
                 buf += " " + line.strip()
             elif line.startswith("python3 "):
-                buf = line.strip()
+                buf, start = line.strip(), here
             else:
                 continue
             if buf.endswith("\\"):
                 buf = buf[:-1].strip()
             else:
-                out.append(buf)
+                out.append((buf, start))
                 buf = ""
         return out
 
+    @classmethod
+    def commands(cls, doc: str) -> list[str]:
+        return [cmd for cmd, _ in cls.commands_at(doc)]
+
+    @staticmethod
+    def shipped(tok: str) -> bool:
+        """リポジトリに同梱されているファイルか (work/ の中は練習で作るものなので違う).
+
+        os.path.exists だけで判定すると、一度でも生成器を走らせた環境では work/ が
+        埋まっていて、この一群の検査が丸ごと素通しになる (#81 で踏んだ)。
+        work/ は git に入れていない作業場なので、常に「無い」として扱う。
+        """
+        if tok.startswith("work/"):
+            return False
+        return os.path.exists(os.path.join(REPO, tok))
+
+    def doc_text(self, name: str) -> str:
+        with open(os.path.join(REPO, "docs", name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_every_command_block_is_marked_bash(self):
+        """コマンドの入った囲みには ```bash の印が要る (#81).
+
+        この試験の一群は ```bash だけを読む。印の無い囲みは**素通し**になるので、
+        中身が壊れていても全部緑のまま通る。docs/08 が実際そうだった
+        (印が無かったので、順序の誤りを誰も見ていなかった)。
+        """
+        for name in self.DOCS:
+            fence, buf = None, []
+            for lineno, line in enumerate(self.doc_text(name).split("\n"), 1):
+                if not line.startswith("```"):
+                    if fence is not None:
+                        buf.append(line)
+                    continue
+                if fence is None:
+                    fence, buf = (lineno, line[3:].strip()), []
+                    continue
+                if any(l.startswith("python3 ") for l in buf):
+                    self.assertEqual("bash", fence[1],
+                                     f"docs/{name}:{fence[0]} コマンドの囲みに ```bash "
+                                     "の印が無い (この文書の検査が素通しになる)")
+                fence = None
+
     def test_no_placeholder_is_left_in_a_command(self):
         for name in self.DOCS:
-            doc = open(os.path.join(REPO, "docs", name), encoding="utf-8").read()
+            doc = self.doc_text(name)
             for cmd in self.commands(doc):
                 for tok in cmd.split():
                     self.assertNotIn(tok, ("FILE", "ファイル名", "PATH", "<file>"),
                                      f"docs/{name}: 穴埋めのまま打てない行がある: {cmd}")
 
+    def inputs_needing_a_maker(self, doc: str):
+        """(生成器を要る入力ファイル, その名前, その行, 行の文字位置) を順に返す."""
+        produced: set[str] = set()
+        for cmd, at in self.commands_at(doc):
+            toks = cmd.split()
+            for i, tok in enumerate(toks):
+                if tok in self.OUT_FLAGS:
+                    if i + 1 < len(toks):
+                        produced.add(os.path.basename(toks[i + 1]))
+                    continue
+                if tok.startswith("-") or "/" not in tok or tok.startswith("tools/"):
+                    continue
+                base = os.path.basename(tok)
+                if base in produced or self.shipped(tok):
+                    continue
+                yield tok, base, cmd, at
+
     def test_every_file_used_is_made_earlier_in_the_same_doc(self):
         """使うファイルは、実在するか、同じ文書の前の行が作っているか、生成器が作るもの."""
-        made_by_maker = set(scrp.MAKERS)
         for name in self.DOCS:
-            doc = open(os.path.join(REPO, "docs", name), encoding="utf-8").read()
-            produced: set[str] = set()
-            for cmd in self.commands(doc):
-                toks = cmd.split()
-                for i, tok in enumerate(toks):
-                    if tok in ("-o", "--derive", "--out"):
-                        if i + 1 < len(toks):
-                            produced.add(os.path.basename(toks[i + 1]))
-                        continue
-                    if tok.startswith("-") or "/" not in tok:
-                        continue
-                    base = os.path.basename(tok)
-                    ok = (os.path.exists(os.path.join(REPO, tok))
-                          or base in produced or base in made_by_maker
-                          or tok.startswith("tools/"))
-                    self.assertTrue(ok, f"docs/{name}: {base} の作り方が先に無い ({cmd})")
+            for _tok, base, cmd, _at in self.inputs_needing_a_maker(self.doc_text(name)):
+                self.assertIn(base, scrp.MAKERS,
+                              f"docs/{name}: {base} の作り方が先に無い ({cmd})")
+
+    def test_the_maker_is_named_before_the_line_that_needs_it(self):
+        """生成器の名前は、その生成物を使う行より前に出てくること (#81).
+
+        MAKERS に載っていれば作り方はあるが、それが文書の**どこに**書いてあるかは
+        別の話。docs/08 は 4 行打たせたあとに make_elf.py を紹介していた。
+
+        探すのは `python3 tools/xxx.py` という**打てる形**。ただの
+        `tools/make_elf.py` は説明の中で名前を出しているだけのことがあり
+        (docs/08 は hi_lo() の話で触れていた)、それを作り方と数えると
+        順序が逆のままでも通ってしまう。
+        """
+        for name in self.DOCS:
+            doc = self.doc_text(name)
+            for _tok, base, cmd, at in self.inputs_needing_a_maker(doc):
+                if base not in scrp.MAKERS:
+                    continue          # 上の試験が報告する
+                for script in re.findall(r"tools/(\w+\.py)", scrp.MAKERS[base]):
+                    where = doc.find("python3 tools/" + script)
+                    self.assertTrue(0 <= where < at,
+                                    f"docs/{name}: {base} を使う行より前に "
+                                    f"`python3 tools/{script}` が無い ({cmd})")
 
     def test_the_insert_step_shows_how_to_get_the_tsv(self):
-        doc = open(os.path.join(REPO, "docs", "03-ポインタテーブル.md"), encoding="utf-8").read()
+        doc = self.doc_text("03-ポインタテーブル.md")
         self.assertIn("dump_text.py", doc, "docs/03 に TSV の作り方が無い")
         self.assertLess(doc.index("dump_text.py"), doc.index("insert_text.py work/SCRIPT.tsv"),
                         "TSV の作り方が入れ直しより後に書かれている")
