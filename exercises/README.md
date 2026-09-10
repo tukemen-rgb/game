@@ -245,7 +245,14 @@ python3 tools/boku2.py check work/BOKU2SAMPLE      # まず診断 (問題なし�
    雛形 (`12=`) に、画像の該当する番号の文字を書いて貼る (練習データの画像は模様なので、
    付属の `font.txt` を見て埋めてよい)
 4. `M_A01000.BIN` を「マップの入れ物を切り分ける」→ `1.bin` を `.msg` として読む
-5. 「校正用の TSV をコピー」→ ファイルに貼り、`python3 tools/proofread.py` にかける
+5. 「校正用の TSV をコピー」→ ファイルに貼り、校正にかける。このとき
+   **その作品の文字表を渡すこと**。既定の文字表は練習用の作品 (リィンフォルト戦記)
+   のもので、別の作品に当てると「フォントに無い文字」が総崩れになります
+
+   ```bash
+   python3 tools/proofread.py work/from_browser.tsv \
+       --font-chars work/BOKU2SAMPLE/font.txt
+   ```
 6. 一括処理でも同じ結果になることを確かめる:
 
 ```bash

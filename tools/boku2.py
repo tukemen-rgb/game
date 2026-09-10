@@ -891,7 +891,9 @@ def run(args) -> int:
         print(f"{len(mapping)} 件 → {args.out}  (例: python3 tools/hexdump.py system.msg --table {args.out})")
     elif args.cmd == "fontlist":
         glyphs = load_font(args.font) or []
-        lines = ["# フォント画像の並び (tools/boku2.py fontlist)"] + [g for g in glyphs if g and g.strip()]
+        # 全角の空白 (U+3000) を落とさないこと。フォントには入っている (僕の夏休み 2 では
+        # 0 番) ので、落とすと本文の空白が「フォントに無い文字」として誤って指摘される (#89)
+        lines = ["# フォント画像の並び (tools/boku2.py fontlist)"] + [g for g in glyphs if g]
         text = "\n".join(lines) + "\n"
         if args.out:
             with open(args.out, "w", encoding="utf-8") as fo:

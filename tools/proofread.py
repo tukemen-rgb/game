@@ -48,6 +48,10 @@ COMPARING_RULES = ("placeholder", "control", "number", "empty", "untranslated")
 ABSOLUTE_RULES = ("line_width", "line_count", "kinsoku", "font", "halfwidth",
                   "notation", "glossary", "consistency")
 
+#: 既定の設定ファイル (この練習用の作品のもの)。別の作品に当てると嘘になる
+DEFAULT_GLOSSARY = os.path.join(REPO, "data", "glossary.tsv")
+DEFAULT_FONT_CHARS = os.path.join(REPO, "data", "font_chars.txt")
+
 
 class Finding:
     def __init__(self, row_id: str, severity: str, rule: str, message: str,
@@ -110,14 +114,25 @@ def load_glossary(path: str) -> list[dict]:
 
 
 def load_font_chars(path: str) -> set[str]:
-    chars = set()
+    """フォントに入っている文字の集合を読む (2 つの書き方を受ける).
+
+    1 行 1 文字 (`data/font_chars.txt`) と、**フォント画像の並びそのまま**
+    (`boku2.py` が書き出す font.txt。1 行 23 文字) の両方。
+
+    以前は行の**先頭 1 文字だけ**を見ていた。実物の作品の文字表を渡すと
+    187 文字が 9 文字として読まれ、**残り全部が「フォントに無い文字」として
+    誤って指摘される**。しかも落ちも警告もしないので、出力を信じてしまう (#89)。
+    """
+    import boku2                                   # 文字表の解釈は 1 か所にまとめる
+
+    lines = []
     with scrp.open_text(path) as fh:
         for line in fh:
             line = line.rstrip("\n")
             if not line or line.startswith("#"):
                 continue
-            chars.add(line[0])
-    return chars
+            lines.append(line)
+    return {ch for ch in boku2.parse_glyph_table("\n".join(lines)) if ch}
 
 
 def load_names(path: str) -> dict[str, str]:
@@ -326,8 +341,8 @@ def main() -> int:
     ap.add_argument("tsv", help="チェックする TSV")
     ap.add_argument("--lang", default="ja", help="rules.json 内の言語キー (既定: ja)")
     ap.add_argument("--rules", default=os.path.join(REPO, "data", "rules.json"))
-    ap.add_argument("--glossary", default=os.path.join(REPO, "data", "glossary.tsv"))
-    ap.add_argument("--font-chars", default=os.path.join(REPO, "data", "font_chars.txt"))
+    ap.add_argument("--glossary", default=DEFAULT_GLOSSARY)
+    ap.add_argument("--font-chars", default=DEFAULT_FONT_CHARS)
     ap.add_argument("--names", default=os.path.join(REPO, "data", "names.tsv"))
     ap.add_argument("--no-font-check", action="store_true")
     ap.add_argument("--var-width", type=float, metavar="文字数",
@@ -385,6 +400,24 @@ def main() -> int:
     orig_chars = sum(len(scrp.strip_tags(r.get("original", ""))) for r in rows)
     new_chars = sum(len(scrp.strip_tags(scrp.final_text(r))) for r in rows)
     print(f"表示文字数: 原文 {orig_chars:,} → 訳文 {new_chars:,} ({new_chars - orig_chars:+,})")
+
+    # どの仕様・用語集・文字表で判定したかを出す。既定はこの練習用の作品
+    # (リィンフォルト戦記) のものなので、**別の作品にそのまま当てると嘘になる**。
+    # 文字表が違えば「フォントに無い文字」が総崩れになる (#89)
+    used = [f"仕様 {os.path.relpath(args.rules, REPO)} ({args.lang})"]
+    if glossary:
+        used.append(f"用語集 {os.path.relpath(args.glossary, REPO)} {len(glossary)} 語")
+    if font_chars is not None:
+        used.append(f"文字表 {os.path.relpath(args.font_chars, REPO)} {len(font_chars)} 字")
+    print("\n使った設定: " + " / ".join(used))
+    defaults = [name for name, value, default in
+                (("用語集", args.glossary, DEFAULT_GLOSSARY),
+                 ("文字表", args.font_chars, DEFAULT_FONT_CHARS))
+                if os.path.abspath(value) == os.path.abspath(default)]
+    if defaults:
+        print(f"  この{'と'.join(defaults)}は練習用の作品のものです。"
+              "別の作品を見るなら、その作品のものを渡してください:")
+        print("    --font-chars <その作品の文字表>  --glossary <その作品の用語集>")
 
     # 取り出したばかりのテキストは訳文の欄が原文のままなので、原文と訳文を
     # 見比べる検査 (差し込みの欠落・数字の食い違いなど) は**何も見ていない**。

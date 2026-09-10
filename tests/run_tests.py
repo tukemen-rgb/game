@@ -423,6 +423,121 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                         "TSV の作り方が入れ直しより後に書かれている")
 
 
+class TestTheRuleSetMatchesTheGame(unittest.TestCase):
+    """校正の設定が、見ている作品のものであること (#89).
+
+    既定の用語集・文字表はこの練習用の作品 (リィンフォルト戦記) のもの。実物の
+    作品の TSV にそのまま当てると、**別の作品の物差しで測った結果**が出る。
+    とくに文字表が違うと「フォントに無い文字」が総崩れになる。
+    """
+
+    def test_a_grid_shaped_glyph_table_loads_completely(self):
+        """1 行 23 文字の文字表 (実物側の形) を、全部読むこと.
+
+        以前は行の先頭 1 文字しか見ておらず、187 文字が 9 文字として読まれていた。
+        落ちも警告もしないので、出力を信じてしまう。
+        """
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        path = os.path.join(REPO, "work", "BOKU2SAMPLE", "font.txt")
+        with open(path, encoding="utf-8") as fh:
+            expected = {ch for ch in fh.read() if ch not in "\n\r"}
+        self.assertGreater(len(expected), 100, "練習データの文字表が小さすぎる")
+        self.assertEqual(expected, proofread.load_font_chars(path))
+
+    def test_the_one_char_per_line_table_still_loads(self):
+        """今までの形 (1 行 1 文字 + # のコメント) が変わっていないこと."""
+        chars = proofread.load_font_chars(os.path.join(REPO, "data", "font_chars.txt"))
+        self.assertEqual(set(FIX.glyph_order), chars)
+        self.assertNotIn("#", chars, "コメント行を文字として読んでいる")
+
+    def test_the_wrong_glyph_table_would_flag_everything(self):
+        """壊れた読み方だと全行が誤検出になることを、数で残しておく."""
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        path = os.path.join(REPO, "work", "BOKU2SAMPLE", "font.txt")
+        with open(path, encoding="utf-8") as fh:
+            broken = {line[0] for line in fh.read().split("\n") if line}   # 直す前の読み方
+        good = proofread.load_font_chars(path)
+        self.assertLess(len(broken), len(good) // 10, "この比較に意味が無い")
+        rules = proofread.load_rules(os.path.join(REPO, "data", "rules.json"), "ja")
+        sample = "はじめから"
+        row = {"id": "0", "original": sample, "translation": sample}
+        with_broken = {f.rule for f in proofread.check_row(row, rules, [], broken)}
+        with_good = {f.rule for f in proofread.check_row(row, rules, [], good)}
+        self.assertIn("font", with_broken, "壊れた表でも指摘が出ないなら例が悪い")
+        self.assertNotIn("font", with_good, "正しい表なのに指摘が出ている")
+
+    def test_fontlist_and_the_raw_table_agree(self):
+        """docs/10 の fontlist 経由と、font.txt 直渡しが同じ集合になること (#89).
+
+        fontlist は全角の空白 (U+3000) を落としていた。フォントには入っている
+        (僕の夏休み 2 では 0 番) ので、本文の空白が「フォントに無い文字」として
+        誤って指摘される。docs/10 が案内している方の道でだけ起きていた。
+        """
+        import subprocess
+
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        table = os.path.join(REPO, "work", "BOKU2SAMPLE", "font.txt")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "font_chars.txt")
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                                  "fontlist", table, "-o", out],
+                                 capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            via_fontlist = proofread.load_font_chars(out)
+        direct = proofread.load_font_chars(table)
+        self.assertEqual(direct, via_fontlist, "2 つの道で文字表が食い違う")
+        self.assertIn("　", via_fontlist, "全角の空白が落ちている")
+
+    def test_a_full_width_space_is_not_reported_as_missing(self):
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        chars = proofread.load_font_chars(
+            os.path.join(REPO, "work", "BOKU2SAMPLE", "font.txt"))
+        rules = proofread.load_rules(os.path.join(REPO, "data", "rules.json"), "ja")
+        row = {"id": "0", "original": "ぼく　なつやすみ", "translation": "ぼく　なつやすみ"}
+        hit = {f.rule for f in proofread.check_row(row, rules, [], chars)}
+        self.assertNotIn("font", hit, "フォントにある全角空白を無いと言っている")
+
+    def test_the_output_says_which_settings_were_used(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.tsv")
+            scrp.write_tsv(path, [{"id": "0", "original": "はい", "translation": "はい"}])
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "proofread.py"),
+                                  path], capture_output=True, text=True, cwd=REPO)
+        out = res.stdout + res.stderr
+        self.assertIn("使った設定", out, out)
+        self.assertIn("glossary.tsv", out)
+        self.assertIn("font_chars.txt", out)
+        self.assertIn("練習用の作品のものです", out, "既定だと分かる断りが無い")
+
+    def test_passing_the_games_own_table_drops_the_warning_for_it(self):
+        import subprocess
+
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.tsv")
+            scrp.write_tsv(path, [{"id": "0", "original": "はい", "translation": "はい"}])
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "proofread.py"), path,
+                 "--font-chars", os.path.join(REPO, "work", "BOKU2SAMPLE", "font.txt")],
+                capture_output=True, text=True, cwd=REPO)
+        out = res.stdout + res.stderr
+        self.assertIn("font.txt", out)
+        self.assertIn("この用語集は練習用の作品のものです", out,
+                      "文字表だけ差し替えたのに、用語集の断りが消えている")
+
+
 class TestInertChecksAreAnnounced(unittest.TestCase):
     """訳文が原文のままなら、比べる検査が動いていないと言うこと (#88).
 

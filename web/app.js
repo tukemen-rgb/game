@@ -5305,7 +5305,8 @@ $("msgparse").addEventListener("click", () => {
     try { await navigator.clipboard.writeText(ta.value); ok = true; }
     catch (err) { try { ta.readOnly = false; ta.select(); ok = document.execCommand("copy"); ta.readOnly = true; } catch (e2) { ok = false; } }
     stat.textContent = ok
-      ? `${filled.length} 行をコピーしました。ファイルに貼って python3 tools/proofread.py で校正できます`
+      ? `${filled.length} 行をコピーしました。ファイルに貼って校正できます: `
+        + "python3 tools/proofread.py <貼ったファイル> --font-chars <この作品の文字表>"
       : "コピーできませんでした。下の枠の中を選んで手でコピーしてください";
   });
   box.append(exp, ta);

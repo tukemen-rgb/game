@@ -77,6 +77,30 @@ async def main():
         print("glyph line:", line)
         if "文字表に無い 0 種。この範囲は全部読める" not in line:
             errors.append(f"report glyph line: {line!r}")
+        # 6.3 課題 8 の最後の一手: 「校正用の TSV をコピー」→ 実際に proofread.py にかける。
+        #     画面と一括処理の橋渡しで、ここが通らないと課題 8 は終われない (#89)
+        await page.click("#msgtsv")
+        tsv_text = await page.input_value("#msgtsvtext")
+        tsv_path = os.path.join(WORK, "from_browser.tsv")
+        with open(tsv_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(tsv_text if tsv_text.endswith("\n") else tsv_text + "\n")
+        import subprocess
+        proof = subprocess.run(
+            [sys.executable, os.path.join(REPO, "tools", "proofread.py"), tsv_path,
+             "--font-chars", os.path.join(S, "font.txt")],
+            capture_output=True, text=True, cwd=REPO)
+        print("proofread rc:", proof.returncode)
+        print("proofread out:", proof.stdout[-500:])
+        if proof.returncode != 0:
+            errors.append(f"copied TSV failed proofread: {proof.stdout[-300:]}{proof.stderr[-300:]}")
+        # その作品の文字表を渡しているので、フォントの指摘は出ないはず。
+        # 出るなら文字表の読み方が壊れている (#89: 1 行 23 文字の表を先頭 1 字しか読んでいなかった)
+        if "フォントに無い文字" in proof.stdout:
+            errors.append("font check fired even with the game's own glyph table")
+        # 訳文の欄が原文のままなので、比べる検査が動いていないことを言うはず (#88)
+        if "原文と見比べる検査は動いていません" not in proof.stdout:
+            errors.append("proofread did not say which checks were inert")
+
         # 6.5 item_info.msg (0x8002 が引数の無いページ送りになるファイル): ファイル名で見分けて {BREAK} と読む
         await select_file(page, "item_info", "item_info.msg")
         await page.click('[data-tab="format"]')
