@@ -63,10 +63,22 @@ python3 tools/hexdump.py work/MSG_ENC.BIN --table work/my_guess.tbl --message 0
 
 # 3. 読めないバイトに対応する文字を work/my_guess.tbl に手で足す
 #    (SCRIPT.BIN の同じ id と見比べると答えが分かる)
+python3 tools/hexdump.py work/SCRIPT.BIN --message 0
 
-# 4. 全文が読めたら抽出する
-python3 tools/dump_text.py work/MSG_ENC.BIN --table work/my_guess.tbl \
-    -o work/mine.tsv
+# 4. id 0 が最後まで読めたら、この課題は達成
+python3 tools/hexdump.py work/MSG_ENC.BIN --table work/my_guess.tbl --message 0
+```
+
+手順 2 の出力の下に「表に無いバイト」の一覧が出ます。**それが足すべきものの
+全部**です。点を目で数える必要はありません。
+
+`--message 0` を付けずに `dump_text.py` で全文を抽出しようとすると、まだ通りません。
+この課題が求めているのは id 0 だけで、全文には漢字を全部そろえる必要があるからです
+(何件読めていて何が足りないかは、そのとき道具が出します)。全部そろえたければ
+そのまま続けてください。
+
+```bash
+python3 tools/dump_text.py work/MSG_ENC.BIN --table work/my_guess.tbl -o work/mine.tsv
 ```
 
 追加で考えること: 漢字が 2 バイトになっているのはなぜか。

@@ -355,6 +355,41 @@ class Archive:
             rows.append((ptr, size, text))
         return rows
 
+    def survey_unreadable(self, codec: Codec) -> tuple[list[int], list[int], dict[int, int]]:
+        """表で読める id / 読めない id / 表に無いバイトの数え上げ を返す (#84).
+
+        最初の 1 バイトで止めて「0xD5: 文字テーブルにないコード 0xE0」とだけ言うと、
+        あと何が足りないのかが分からず、1 バイト直しては打ち直す、を繰り返すことに
+        なる。課題 3 の表を育てる工程は、残りの量が見えないと進め方が決められない。
+        """
+        ok: list[int] = []
+        bad: list[int] = []
+        missing: dict[int, int] = {}
+        for index in range(self.count):
+            try:
+                block = self.raw_block(index)
+            except ValueError:
+                bad.append(index)
+                continue
+            clean, i = True, 0
+            while i < len(block):
+                b = block[i]
+                if b == END:
+                    break
+                if b in CONTROL_CODES:
+                    i += 1 + CONTROL_CODES[b][1]
+                    continue
+                try:
+                    _ch, size = codec.decode_char(block, i)
+                except ScrpError:
+                    missing[b] = missing.get(b, 0) + 1
+                    clean = False
+                    i += 1
+                    continue
+                i += size
+            (ok if clean else bad).append(index)
+        return ok, bad, missing
+
 
 def guess_other_format(data: bytes) -> str:
     """SCRP でないバイト列が、この一式で扱う別の形式に見えるかを言う (#76).

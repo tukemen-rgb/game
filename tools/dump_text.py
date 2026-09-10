@@ -37,7 +37,32 @@ def main() -> int:
 
     archive = scrp.read_archive(args.binary)
     codec = scrp.make_codec(archive.encoding_id, args.table)
-    rows_raw = archive.decode_all(codec)
+    try:
+        rows_raw = archive.decode_all(codec)
+    except scrp.ScrpError as exc:
+        if not args.table:
+            raise
+        # 表を育てている途中なら、最初の 1 バイトだけ言われても進め方が決まらない。
+        # ファイル全体を見て「あと何が足りないか」を出す (#84)
+        print(f"エラー: {exc}", file=sys.stderr)
+        ok, bad, missing = archive.survey_unreadable(codec)
+        print(f"  この表ではまだ全文を読めません。{archive.count} 件のうち"
+              f"読めるのが {len(ok)} 件、読めないのが {len(bad)} 件です。", file=sys.stderr)
+        if missing:
+            total = sum(missing.values())
+            print(f"  表に無いバイト値は {len(missing)} 種類 / 計 {total} 個:", file=sys.stderr)
+            for value, count in sorted(missing.items(), key=lambda kv: (-kv[1], kv[0]))[:8]:
+                print(f"    0x{value:02X}  {count} 回", file=sys.stderr)
+            if len(missing) > 8:
+                print(f"    ほか {len(missing) - 8} 種類", file=sys.stderr)
+            print("    (数えているのはバイト値です。2 バイトで 1 文字のコードがあると、"
+                  "その後半も別の値として数に入ります)", file=sys.stderr)
+        if ok:
+            print(f"  読める id: {', '.join(str(i) for i in ok[:10])}"
+                  + (" ほか" if len(ok) > 10 else ""), file=sys.stderr)
+            print("  1 件だけ読むなら: python3 tools/hexdump.py "
+                  f"{args.binary} --table {args.table} --message {ok[0]}", file=sys.stderr)
+        return 1
 
     out_path = args.out or os.path.splitext(args.binary)[0] + ".tsv"
     rows = []

@@ -63,6 +63,36 @@ def text_pane(decoded: dict[int, str], base: int, stop: int) -> str:
     return "".join(decoded[i] for i in range(base, stop) if i in decoded)
 
 
+def unknown_report(data: bytes, decoded: dict[int, str], table_path: str) -> list[str]:
+    """表に無いバイトを数えて並べる (課題 3 の「手で足す」の材料).
+
+    文字欄では表に無いバイトが「.」になるだけなので、**どの値が足りないのか**が
+    読み取れなかった。点を目で数えて 16 進欄と突き合わせるしかない (#84)。
+
+    もう 1 つ、黙って間違える所がある。2 バイトで 1 文字のコードは、前半が表に
+    無いと**後半だけが別の 1 文字として読まれる**。「旅」(E0 3E) が「.ま」になり、
+    それらしい日本語に見えてしまう。だから「次の文字は当てにできない」と言う。
+    """
+    from collections import Counter
+
+    tally = Counter(data[i] for i, ch in decoded.items() if ch == ".")
+    if not tally:
+        return []
+    total = sum(tally.values())
+    lines = [f"\n表に無いバイトが {len(tally)} 種類 / 計 {total} 個ありました:"]
+    for value, count in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])):
+        where = [i for i, ch in decoded.items() if ch == "." and data[i] == value]
+        spots = "、".join(f"0x{i:04X}" for i in sorted(where)[:4])
+        more = " ほか" if len(where) > 4 else ""
+        lines.append(f"  0x{value:02X}  {count} 回  ({spots}{more})")
+    # ここで実在の対応 (B2=。 など) を例に出すと課題 3 の答えを漏らすので、書き方だけ言う
+    lines.append(f"  {table_path} に「16 進=文字」の行を足します。1 バイトなら 2 桁、"
+                 "2 バイトで 1 文字なら 4 桁で書きます (docs/01)")
+    lines.append("  表に無いバイトのすぐ次の文字は当てにできません。2 バイトで 1 文字なら、"
+                 "後半だけが別の字として読まれます")
+    return lines
+
+
 def show_struct(path: str) -> None:
     archive = scrp.read_archive(path)
     with open(path, "rb") as fh:
@@ -128,6 +158,9 @@ def main() -> int:
         chunk = data[base:stop]
         hex_part = " ".join(f"{b:02X}" for b in chunk).ljust(args.width * 3 - 1)
         print(f"{base:08X}  {hex_part}  {text_pane(decoded, base, stop)}")
+    if args.table:
+        for line in unknown_report(data, decoded, args.table):
+            print(line)
     return 0
 
 

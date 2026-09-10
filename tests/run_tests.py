@@ -423,6 +423,89 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                         "TSV の作り方が入れ直しより後に書かれている")
 
 
+class TestGrowingATableByHand(unittest.TestCase):
+    """課題 3 (表を手で育てる) の途中で、道具が残りの量を言うこと (#84).
+
+    実際に課題 3 を解いてみて分かったこと。表に無いバイトは文字欄で「.」に
+    なるだけなので**どの値が足りないのか読み取れず**、全文抽出は最初の 1 バイトで
+    止まって「0xD5: 文字テーブルにないコード 0xE0」としか言わなかった。
+    1 バイト直しては打ち直す、を 100 回以上繰り返すことになる。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        import subprocess
+
+        self.run = lambda *a: subprocess.run([sys.executable, *a], capture_output=True,
+                                             text=True, cwd=REPO)
+        res = self.run(os.path.join(REPO, "tools", "make_sample.py"))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.enc = os.path.join(REPO, "work", "MSG_ENC.BIN")
+        self.partial = os.path.join(self.tmp.name, "my_guess.tbl")
+        derived = self.run(os.path.join(REPO, "tools", "relative_search.py"), self.enc,
+                           "--search", "ここは", "--derive", self.partial)
+        self.assertEqual(derived.returncode, 0, derived.stdout + derived.stderr)
+
+    def test_hexdump_lists_the_bytes_that_are_missing(self):
+        res = self.run(os.path.join(REPO, "tools", "hexdump.py"), self.enc,
+                       "--table", self.partial, "--message", "0")
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 0, out)
+        self.assertIn("表に無いバイト", out)
+        self.assertIn("0xE0", out, "足りないバイト値が並んでいない")
+        self.assertIn("すぐ次の文字は当てにできません", out,
+                      "2 バイト文字の後半が別の字に読まれる件の注意が無い")
+
+    def test_hexdump_does_not_give_away_the_answer(self):
+        """答え (実在の対応) を例に出さないこと. 課題 3 の答えを漏らさない."""
+        res = self.run(os.path.join(REPO, "tools", "hexdump.py"), self.enc,
+                       "--table", self.partial, "--message", "0")
+        out = res.stdout + res.stderr
+        answers = scrp.load_table(os.path.join(REPO, "answers", "custom.tbl"))
+        for raw, ch in answers.by_bytes.items():
+            if len(raw) == 2:
+                self.assertNotIn(f"{raw.hex().upper()}={ch}", out, "答えを例に出している")
+
+    def test_a_full_dump_says_how_much_is_left(self):
+        res = self.run(os.path.join(REPO, "tools", "dump_text.py"), self.enc,
+                       "--table", self.partial, "-o",
+                       os.path.join(self.tmp.name, "mine.tsv"))
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertNotIn("Traceback", out, out)
+        self.assertIn("読めるのが", out, "読める件数が出ていない")
+        self.assertIn("表に無いバイト値は", out, "残りの量が出ていない")
+        # 案内する id は、その表で本当に読める id であること (適当な 0 番ではなく)
+        archive = scrp.read_archive(self.enc)
+        ok, _bad, _missing = archive.survey_unreadable(scrp.load_table(self.partial))
+        self.assertTrue(ok, "この表で読める id が 1 つも無い")
+        self.assertIn(f"--message {ok[0]}", out, "1 件だけ読む道が示されていない")
+        scrp.decode_message(archive.data, archive.pointers[ok[0]],
+                            scrp.load_table(self.partial))     # 本当に読めることを確かめる
+
+    def test_the_complete_table_still_dumps_cleanly(self):
+        """答えの表を渡せば、今までどおり全文が通ること."""
+        res = self.run(os.path.join(REPO, "tools", "dump_text.py"), self.enc,
+                       "--table", os.path.join(REPO, "answers", "custom.tbl"),
+                       "-o", os.path.join(self.tmp.name, "all.tsv"))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn("表に無いバイト", res.stdout + res.stderr)
+
+    def test_the_survey_agrees_with_the_real_decode(self):
+        """調査の「読める id」は、実際に読める id と一致すること."""
+        archive = scrp.read_archive(self.enc)
+        codec = scrp.load_table(self.partial)
+        ok, bad, missing = archive.survey_unreadable(codec)
+        self.assertEqual(sorted(ok + bad), list(range(archive.count)))
+        self.assertTrue(missing, "足りないバイトがあるはずなのに空")
+        for index in ok:
+            scrp.decode_message(archive.data, archive.pointers[index], codec)
+        for index in bad:
+            with self.assertRaises(scrp.ScrpError):
+                scrp.decode_message(archive.data, archive.pointers[index], codec)
+
+
 class TestMissingPracticeData(unittest.TestCase):
     """練習データが無いときに、素の例外ではなく作り方を出すこと (#79).
 
