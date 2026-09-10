@@ -54,6 +54,9 @@ python3 tools/make_archive.py   # 練習用の「索引 + 本体」の組
 # 9. 直したテキストをデータに入れ直す (ポインタは自動で振り直される)
 python3 tools/insert_text.py work/SCRIPT.tsv -o work/SCRIPT_new.BIN \
     --original work/SCRIPT.BIN
+# 入れ直したら必ず取り出し直して、往復が一致することを確かめる
+python3 tools/dump_text.py work/SCRIPT_new.BIN -o work/verify.tsv
+python3 tools/compare_tsv.py work/SCRIPT.tsv work/verify.tsv
 
 # 10. 実物と同じ形の練習データで、索引 → 会話 → 校正用 TSV まで一括で通す
 python3 tools/make_boku2_sample.py
@@ -80,6 +83,7 @@ python3 tests/run_tests.py
 | Crystal Tile 2 | `tools/font_view.py` | フォント画像からグリフの並びを読む |
 | 自作の抽出/挿入スクリプト | `tools/dump_text.py` / `tools/insert_text.py` | 抽出・再挿入とポインタ再計算 |
 | Excel の目視チェック | `tools/proofread.py` | 校正チェックの機械化 |
+| Excel で 2 つの表を並べて突き合わせ | `tools/compare_tsv.py` | 入れ直しの往復と、答え合わせの一致確認 |
 | 実機・開発ビルドでの表示確認 | `tools/make_viewer.py` | 画面での見え方を再現して照合する |
 | ImgBurn + 手作業の当たり探し | `web/` (構造探査台) | ディスクイメージを開いて構造を推定する |
 | 専用アンパッカーを探す/書く | `web/` の「索引ファイル」タブ | 索引の形を総当たりで当てて中身を取り出す |
@@ -120,7 +124,8 @@ python3 tests/run_tests.py
    「文字コード = グリフの並び順」を体感する
 5. **校正する** — `exercises/qa_target.tsv` の不具合を洗い出し、直す
 6. **画面で確かめる** — `make_viewer.py` で原文と訳文を切り替え、崩れを目で見る
-7. **入れ直す** — 直した TSV を `insert_text.py` で元の容量に収める
+7. **入れ直す** — 直した TSV を `insert_text.py` で元の容量に収め、
+   取り出し直して `compare_tsv.py` で往復が一致することを確かめる
    (自作の練習データ限定。市販ゲームの実物には入れ直さない → docs/10 の「ここで終わり」)
 8. **構造を推定する** — `make_iso.py` で作ったイメージを構造探査台に読ませ、
    形式を何も教えない状態からポインタ表とテキストを見つける

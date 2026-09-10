@@ -423,6 +423,115 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                         "TSV の作り方が入れ直しより後に書かれている")
 
 
+class TestRoundTripIsChecked(unittest.TestCase):
+    """課題 6 の「往復して確認する」が、道具で通せること (#87).
+
+    課題 6 は「入れ直したファイルから再抽出したテキストが、意図したものと一致する」
+    を条件にしているのに、**2 つの TSV を突き合わせる道具が無かった**。39 行を目で
+    見比べろ、ということになっていた (課題 8 の答え合わせも同じ)。
+    """
+
+    def setUp(self):
+        import subprocess
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = lambda *a: subprocess.run([sys.executable, *a], capture_output=True,
+                                             text=True, cwd=REPO)
+        problem = ensure_practice("work/SCRIPT.BIN", "make_sample.py")
+        if problem:
+            self.skipTest(problem)
+
+    def tool(self, name: str) -> str:
+        return os.path.join(REPO, "tools", name)
+
+    def write(self, name: str, rows: list[dict]) -> str:
+        path = os.path.join(self.tmp.name, name)
+        scrp.write_tsv(path, rows)
+        return path
+
+    def test_matching_files_report_zero(self):
+        rows = [{"id": "0", "original": "あ", "translation": "あ"},
+                {"id": "1", "original": "い", "translation": "い"}]
+        left, right = self.write("a.tsv", rows), self.write("b.tsv", rows)
+        res = self.run(self.tool("compare_tsv.py"), left, right)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("全部一致しました", res.stdout)
+
+    def test_a_difference_names_the_row_and_fails(self):
+        left = self.write("a.tsv", [{"id": "0", "original": "あ", "translation": "あ"},
+                                    {"id": "1", "original": "い", "translation": "い"}])
+        right = self.write("b.tsv", [{"id": "0", "original": "あ", "translation": "あ"},
+                                     {"id": "1", "original": "う", "translation": "う"}])
+        res = self.run(self.tool("compare_tsv.py"), left, right)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("id 1", res.stdout)
+        self.assertIn("食い違い 1 行", res.stdout)
+
+    def test_ignore_drops_rows_from_the_comparison(self):
+        """課題 8 は答えの <VOICE:…> の行を除いて比べる."""
+        left = self.write("a.tsv", [{"id": "0", "original": "あ", "translation": ""}])
+        right = self.write("b.tsv", [{"id": "0", "original": "あ", "translation": ""},
+                                     {"id": "9", "original": "<VOICE:00010001>",
+                                      "translation": ""}])
+        res = self.run(self.tool("compare_tsv.py"), left, right, "--ignore", "<VOICE:")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        without = self.run(self.tool("compare_tsv.py"), left, right)
+        self.assertEqual(without.returncode, 1, "除かなければ食い違うはずが通っている")
+
+    def test_the_whole_exercise_6_round_trip_passes(self):
+        """課題 6 を答え (原文に戻した状態) で通し、往復が一致すること."""
+        rows = scrp.read_tsv(os.path.join(REPO, "exercises", "qa_target.tsv"))
+        for row in rows:                       # 答え = 全行を原文に戻した状態
+            row["translation"] = row["original"]
+        fixed = self.write("qa_fixed.tsv", rows)
+        out = os.path.join(self.tmp.name, "SCRIPT_fixed.BIN")
+        ins = self.run(self.tool("insert_text.py"), fixed, "-o", out,
+                       "--original", os.path.join(REPO, "work", "SCRIPT.BIN"))
+        self.assertEqual(ins.returncode, 0, ins.stdout + ins.stderr)
+        self.assertIn("ぴったり", ins.stdout, "元の容量に収まっていない")
+        verify = os.path.join(self.tmp.name, "verify.tsv")
+        dump = self.run(self.tool("dump_text.py"), out, "-o", verify)
+        self.assertEqual(dump.returncode, 0, dump.stdout + dump.stderr)
+        cmp_res = self.run(self.tool("compare_tsv.py"), fixed, verify,
+                           "--left", "translation", "--right", "original")
+        self.assertEqual(cmp_res.returncode, 0, cmp_res.stdout + cmp_res.stderr)
+
+    def test_insert_text_refuses_to_write_data_it_cannot_read_back(self):
+        """組み立てた結果が読み直せないなら、書かずに止まること (#87).
+
+        道具の不具合で本文が化けたまま書き出すと、次の工程まで気づけない。
+        往復の確認を道具の中でやってしまう。
+        """
+        rows = scrp.read_tsv(os.path.join(REPO, "exercises", "qa_target.tsv"))
+        for row in rows:                       # 容量の検査で先に止まらないよう、直した状態にする
+            row["translation"] = row["original"]
+        fixed = self.write("for_break.tsv", rows)
+        argv = ["insert_text.py", fixed, "-o", os.path.join(self.tmp.name, "nope.BIN"),
+                "--original", os.path.join(REPO, "work", "SCRIPT.BIN")]
+        script = (
+            "import runpy, sys\n"
+            f"sys.path.insert(0, {os.path.join(REPO, 'tools')!r})\n"
+            "import scrp\n"
+            "real = scrp.build_archive\n"
+            "def broken(enc, blobs, pool_duplicates=False):\n"
+            "    data = bytearray(real(enc, blobs, pool_duplicates))\n"
+            "    data[scrp.HEADER_SIZE + len(blobs) * 4 + 4] ^= 0x01\n"
+            "    return bytes(data)\n"
+            "scrp.build_archive = broken\n"
+            f"sys.argv = {argv!r}\n"
+            f"runpy.run_path({self.tool('insert_text.py')!r}, run_name='__main__')\n"
+        )
+        import subprocess
+        res = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, cwd=REPO)
+        out = res.stdout + res.stderr
+        self.assertEqual(res.returncode, 1, out)
+        self.assertIn("取り出し直すと", out, out)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "nope.BIN")),
+                         "読み直せないデータを書き出している")
+
+
 class TestEveryToolUsesTheSharedEntry(unittest.TestCase):
     """道具はみな scrp.cli_main を通ること (#85).
 

@@ -107,6 +107,20 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
+    # 書いたものを読み直して、入れたはずの文が本当に取り出せるかを確かめる (#87)。
+    # 「TSV は直したがデータに反映されていない」はこの工程で最も多い事故で、
+    # 往復して初めて分かる。書く前に止めたいので、出力する前に確かめる
+    check = scrp.read_archive_bytes(data)
+    back = check.decode_all(codec)
+    mismatch = [row["id"] for row, (_off, _size, text) in zip(rows, back)
+                if scrp.final_text(row) != text]
+    if mismatch:
+        print(f"エラー: 書き出したデータから取り出し直すと {len(mismatch)} 行が違います "
+              f"(id {', '.join(mismatch[:5])}{' ほか' if len(mismatch) > 5 else ''})。"
+              "\n       道具の不具合の可能性があります。この出力ごと報告してください。",
+              file=sys.stderr)
+        return 1
+
     with open(args.out, "wb") as fh:
         fh.write(data)
 

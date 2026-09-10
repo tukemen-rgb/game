@@ -452,6 +452,15 @@ def guess_other_format(data: bytes) -> str:
 def read_archive(path: str) -> Archive:
     with open(path, "rb") as fh:
         data = fh.read()
+    return parse_archive(data, path)
+
+
+def read_archive_bytes(data: bytes) -> Archive:
+    """すでに手元にあるバイト列を SCRP として読む (書いたものの読み直しに使う)."""
+    return parse_archive(data, "組み立てたデータ")
+
+
+def parse_archive(data: bytes, path: str) -> Archive:
     if len(data) < HEADER_SIZE or data[:4] != MAGIC:
         hint = guess_other_format(data)
         raise ScrpError(f"{path}: SCRP ファイルではありません (先頭 4 バイト = {data[:4]!r})"

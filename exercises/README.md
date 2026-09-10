@@ -170,7 +170,13 @@ python3 tools/proofread.py work/qa_fixed.tsv          # ERROR 0 件にする
 python3 tools/insert_text.py work/qa_fixed.tsv -o work/SCRIPT_fixed.BIN \
     --original work/SCRIPT.BIN                        # 容量に収める
 python3 tools/dump_text.py work/SCRIPT_fixed.BIN -o work/verify.tsv
+python3 tools/compare_tsv.py work/qa_fixed.tsv work/verify.tsv \
+    --left translation --right original               # 往復して一致するか
 ```
+
+最後の 1 行が **往復の確認** です。39 行を目で見比べるのは現実的ではないので、
+機械に突き合わせさせます。全部一致すれば終了コード 0、1 行でも違えば 1 と、
+食い違った id が出ます。
 
 ```bash
 python3 tools/make_viewer.py --tsv work/qa_fixed.tsv -o work/viewer_fixed.html
@@ -239,6 +245,10 @@ python3 tools/boku2.py text work/OUT -f work/BOKU2SAMPLE/font.txt -o work/all.ts
 
 **確認:** `work/all.tsv` の `original` 列が `work/BOKU2SAMPLE/answer.tsv` と全部一致する
 (音声の番号の行は TSV に入らないので、答えの `<VOICE:…>` は除いて比べる)。
+
+```bash
+python3 tools/compare_tsv.py work/all.tsv work/BOKU2SAMPLE/answer.tsv --ignore "<VOICE:"
+```
 
 要点: ここまでの課題 1〜6 の道具 (16 進、文字テーブル、ポインタ表、フォント、校正) が、
 実物と同じ形でも **そのまま通る** こと。形式が変わっても考え方は変わらない。
