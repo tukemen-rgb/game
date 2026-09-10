@@ -1634,6 +1634,30 @@ class TestDocs(unittest.TestCase):
         for head in js_arrows:
             key = re.split(r"[。、(:]", head)[0].strip()[:14]
             self.assertIn(key, keys, f"ブラウザだけにある → の行 (CLI と docs/10 に合わせる): {head}")
+    def test_the_road_ends_at_the_tsv_and_the_docs_agree(self):
+        """docs/10 が道の終わりを言い、README がそれと食い違わないこと (#78).
+
+        手順が 3 (校正) で終わったあと何をするのかが書かれておらず、一方 README は
+        「実データへの入れ直しまで」と読める書き方だった。docs/01〜03 の自作データの
+        話なのだが、僕の夏休み 2 から来た読者には実物への入れ直しがあるように見える。
+        素人をいちばん間違った方向へ送る食い違いなので、検査で止める。
+        """
+        howto = open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8").read()
+        readme = open(os.path.join(REPO, "README.md"), encoding="utf-8").read()
+        self.assertIn("## 4. ここで終わり", howto, "docs/10 に道の終わりの節が無い")
+        self.assertIn("入れ直す手順は\n用意していません", howto.replace("\r", ""),
+                      "docs/10 が「入れ直しは無い」と言い切っていない")
+        self.assertIn("docs/05", howto.split("## 4. ここで終わり")[1].split("## ")[0],
+                      "終わりの節から権利面 (docs/05) に繋がっていない")
+        # README の「入れ直し」は、必ず自作の練習データ限定だと分かる形で書くこと
+        self.assertIn("入れ直しができるのは自作の練習データに対してだけ", readme,
+                      "README の冒頭が実物への入れ直しがあるように読める")
+        for line in readme.splitlines():
+            if "入れ直す" in line and "insert_text.py" in line:
+                nearby = readme[max(0, readme.index(line) - 200):readme.index(line) + 400]
+                self.assertTrue("練習データ" in nearby or "SCRIPT" in nearby or "work/" in nearby,
+                                f"入れ直しの行が練習データの話だと分からない: {line}")
+
     def test_every_proofread_rule_is_explained(self):
         """proofread.py が出し得る rule 名が、全部 docs/04 の「検査の一覧」にあること (#65)."""
         import re
