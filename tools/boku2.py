@@ -737,8 +737,14 @@ def check(folder: str, out=sys.stdout) -> int:
         if msgs:
             say(f"  先頭 {min(50, len(msgs))} 件のうち読めた形: {ok_msg} 件")
             if len_ok or len_ng:
-                say(f"  位置表の長さの欄: 合う {len_ok} 件 / 合わない {len_ng} 件"
-                    + ("" if not len_ng else " (合わない分は位置だけで読んでいる。この行ごと報告)"))
+                say(f"  位置表の長さの欄: 合う {len_ok} 件 / 合わない {len_ng} 件")
+                if len_ng:
+                    # 「この行ごと報告」と言いながら確認事項に数えていなかったので、
+                    # 最後の行は「問題なし」のままだった。報告してほしいなら数える (#97)
+                    problems += 1
+                    say(f"→ 位置表の長さの欄が {len_ng} 件合いません。8 バイト刻みの後ろ 4 バイトが"
+                        "その項目のバイト長だ、という読みがこの作品では違うかもしれません"
+                        " (合わない分は位置だけで読んでいます)。この行ごと報告してください")
             if first_bad:
                 problems += 1
                 e, head = first_bad
@@ -768,6 +774,7 @@ def check(folder: str, out=sys.stdout) -> int:
     if map_dir:
         files = sorted(os.listdir(map_dir))
         ok_map, ok_talk, lines, bad_examples = 0, 0, 0, []
+        no_talk_example = None          # 会話として読めなかった 1 番の部品 (名前, 先頭 16 バイト)
         for name in files:
             p = os.path.join(map_dir, name)
             if not os.path.isfile(p):
@@ -785,7 +792,20 @@ def check(folder: str, out=sys.stdout) -> int:
                 if tables:
                     ok_talk += 1
                     lines += sum(1 for t in tables if t["msg"] for it in t["msg"] if it["codes"])
+                elif no_talk_example is None:
+                    head = b[one["at"]:one["at"] + 16]
+                    no_talk_example = (name, head.hex(" ").upper())
         say(f"\n[MAP] {len(files)} 件 / 入れ物として読めた {ok_map} 件 / 1 番が会話だった {ok_talk} 件 / 会話 {lines:,} 行")
+        # 入れ物としては読めたのに会話が 1 つも取れないのは、1 番の部品の読み方
+        # (表の数 + 12 バイトの項目) が外れている合図。数字を出すだけで判定して
+        # いなかったので、会話 0 行でも「問題なし」と言っていた (#97)
+        if ok_map and not ok_talk:
+            problems += 1
+            say("→ 入れ物としては読めましたが、1 番が会話として読めたファイルが 0 件です。"
+                "会話ファイルの読み方 (表の数 + 12 バイトの項目) が外れている疑いがあります。"
+                "この行と、下の 1 件目の先頭 16 バイトを報告してください")
+            if no_talk_example:
+                say(f"   {no_talk_example[0]} の 1 番: {no_talk_example[1]}")
         if bad_examples:
             problems += 1
             say("→ 入れ物として読めないファイルの例 (名前: 先頭 16 バイト):")

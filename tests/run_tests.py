@@ -464,6 +464,46 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                         f"低い割合を指摘していない: {arrows}")
         self.assertIn("確認事項", res.stdout)
 
+    def test_a_length_field_mismatch_is_counted_as_a_problem(self):
+        """「この行ごと報告」と言うなら、確認事項に数えること (#97).
+
+        位置表の長さの欄が合わないとき、報告してほしいと書いておきながら
+        problems に数えていなかったので、最後の行は「問題なし」のままだった。
+        **報告してほしい = 問題**。言葉と判定が食い違っていた。
+        """
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        head = src.index("位置表の長さの欄")
+        tail = src[head:head + 600]
+        self.assertIn("problems += 1", tail, "合わないのに確認事項に数えていない")
+        self.assertIn("→ 位置表の長さの欄", tail, "→ の行が出ていない")
+
+    def test_no_conversation_found_is_reported(self):
+        """入れ物は読めたのに会話が 0 件なら、→ を出すこと (#97)."""
+        import shutil
+        import struct
+
+        for name in sorted(os.listdir(os.path.join(self.folder, "MAP"))):
+            path = os.path.join(self.folder, "MAP", name)
+            with open(path, "rb") as fh:
+                b = bytearray(fh.read())
+            off, _ln = struct.unpack_from("<II", b, 12)     # 1 番の部品
+            b[off:off + 4] = b"\xee\xee\xee\xee"            # 表の数を壊す
+            with open(path, "wb") as fh:
+                fh.write(bytes(b))
+        res = self.check(self.folder)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("1 番が会話だった 0 件", res.stdout)
+        self.assertIn("会話として読めたファイルが 0 件", res.stdout,
+                      "会話 0 件を指摘していない")
+        self.assertIn("確認事項", res.stdout)
+        del shutil
+
     def test_a_healthy_sample_is_still_clean(self):
         res = self.check(self.folder)
         self.assertEqual(res.returncode, 0, res.stdout)
