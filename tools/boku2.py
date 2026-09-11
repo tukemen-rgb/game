@@ -396,6 +396,11 @@ def decode(codes: list[int], glyphs: list[str] | None, tags: bool = True, alt: b
     return "".join(out)
 
 
+#: 索引が本体をどれだけ使い切っていれば「読めている」とみなすか。
+#: ブラウザ側 (analyzeIndex) が候補から外す線と同じ 2 割にそろえてある
+COVERAGE_MIN = 0.2
+
+
 def parse_glyph_table(text: str) -> list:
     """文字表の 2 つの書き方 (ブラウザ側 parseGlyphTable と同じ).
 
@@ -672,7 +677,20 @@ def check(folder: str, out=sys.stdout) -> int:
     say(f"レコード {rec_count} 件 (名前の置き場は 0x{rec_end:X} から) / ファイル {len(entries)} 件 / 名前が付いた {named} 件"
         + (f" / 同じ名前 {dupes} 件" if dupes else ""))
     say(f"最初の名前: {' / '.join(first_names)}")
-    say(f"[本体] {img_size:,} バイト / 索引が指す合計 {used:,} バイト ({100 * used / max(1, img_size):.1f}%)")
+    # 「索引が指す合計」が本体に対して何割か。読み方が合っていれば本体はだいたい
+    # 使い切られる。低いと、索引の読み方 (レコードの長さや位置の単位) が外れている
+    # 疑いが濃い。数字だけ出して判定に使っていなかったので、12% でも「問題なし」と
+    # 言っていた (#96)。基準の 2 割は、ブラウザ側が候補から外す線と同じ
+    coverage = used / max(1, img_size)
+    say(f"[本体] {img_size:,} バイト / 索引が指す合計 {used:,} バイト "
+        f"({100 * coverage:.1f}% — 索引が本体をどれだけ使い切っているか。"
+        "読み方が合っていれば普通は 5 割を超えます)")
+    if coverage < COVERAGE_MIN:
+        problems += 1
+        say(f"→ 索引が本体の {100 * coverage:.1f}% しか指していません。"
+            "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。"
+            "この行と下の先頭 64 バイトを報告してください")
+        say("   " + idx[:64].hex(" ").upper())
     if named < len(entries) * 0.9:
         problems += 1
         say("→ 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください")

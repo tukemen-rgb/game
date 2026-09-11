@@ -423,6 +423,65 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                         "TSV の作り方が入れ直しより後に書かれている")
 
 
+class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
+    """診断が出す数字は、良し悪しまで言うこと (#96).
+
+    `check` は「索引が指す合計 … (82.0%)」と出していたが、**その数字を一度も
+    判定に使っていなかった**。実物で 12% でも「問題なし」と言う。読む人は
+    82% が良いのか悪いのかも分からない。数字だけ出すのは、出さないより悪い
+    (確かめた気になる)。基準はブラウザ側が候補から外す線と同じ 2 割。
+    """
+
+    def setUp(self):
+        import subprocess
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = lambda *a: subprocess.run([sys.executable, *a], capture_output=True,
+                                             text=True, cwd=REPO)
+        made = self.run(os.path.join(REPO, "tools", "make_boku2_sample.py"),
+                        "--out", os.path.join(self.tmp.name, "S"))
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        self.folder = os.path.join(self.tmp.name, "S")
+
+    def check(self, folder):
+        return self.run(os.path.join(REPO, "tools", "boku2.py"), "check", folder)
+
+    def test_the_number_says_what_it_means(self):
+        out = self.check(self.folder).stdout
+        self.assertIn("索引が本体をどれだけ使い切っているか", out,
+                      "割合の意味が書かれていない")
+        self.assertIn("5 割を超えます", out, "どれくらいなら普通なのかが無い")
+
+    def test_a_low_coverage_is_reported_as_a_problem(self):
+        """本体だけ大きくして割合を下げると、→ の行が出て終了コードが 1 になること."""
+        with open(os.path.join(self.folder, "BOKU2.IMG"), "ab") as fh:
+            fh.write(b"\0" * 1_000_000)
+        res = self.check(self.folder)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        arrows = [l for l in res.stdout.split("\n") if l.startswith("→")]
+        self.assertTrue(any("しか指していません" in l for l in arrows),
+                        f"低い割合を指摘していない: {arrows}")
+        self.assertIn("確認事項", res.stdout)
+
+    def test_a_healthy_sample_is_still_clean(self):
+        res = self.check(self.folder)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertIn("問題なし", res.stdout)
+
+    def test_the_threshold_matches_the_browser(self):
+        """CLI の基準とブラウザ側の基準が同じ数字であること (2 か所にずれた数字を置かない)."""
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        self.assertIn(f"coverage < {boku2.COVERAGE_MIN}", app,
+                      f"ブラウザ側の線が {boku2.COVERAGE_MIN} と違う")
+
+
 class TestTheLegalNoteComesFirst(unittest.TestCase):
     """docs/05 は、吸い出しの手順より先に立ち位置と法律を書くこと (#95).
 
@@ -2790,7 +2849,7 @@ class TestDocs(unittest.TestCase):
         for head in arrows:
             key = re.split(r"[。、(:]", head)[0].strip()[:14]      # 行頭の言い回しで照合
             keys.add(key)
-            self.assertIn(key, doc, f"docs/10 に説明が無い → の行: {head}")
+            self.assertTrue(key in doc, f"docs/10 に説明が無い → の行: {head}")
         # ブラウザの要約の → も、同じ言い回しで、CLI に無いものを増やしていないこと (#64)
         with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
             app = fh.read()
