@@ -423,6 +423,81 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                         "TSV の作り方が入れ直しより後に書かれている")
 
 
+class TestTheDocMatchesTheButtons(unittest.TestCase):
+    """docs/10 が「押す」と書いているボタンが、画面に実在すること (#92).
+
+    手順書は画面のボタン名を名指しで引用している。ボタンの文言を変えても文書は
+    黙って古くなり、**書いてあるボタンが見つからない**状態になる。実物を前にした
+    人がそこで止まるので、両方向で見張る (画面から消えたら落ちる / 文書から
+    引用が消えても落ちる)。
+
+    引用の確認を**ソースの grep だけ**で済ませてはいけないことも、この回に踏んだ。
+    「候補 1 件 (DFI 形式として読みました)」は `${top.known} 形式として…` と
+    組み立てているので、リテラルを探すと見つからず、誤って「文書が間違っている」と
+    判断しかけた。組み立て式の文言は e2e で実際の出力を見る (sample が見ている)。
+    """
+
+    #: docs/10 の「1. 画面で確かめる」が名指しするボタン。画面と文書の両方に要る
+    BUTTONS = (
+        "フォルダごと読む",
+        "索引ファイル",
+        "解析する",
+        "報告用の要約を作る",
+        "既知の形式",
+        "このファイルを .msg として読む",
+        "文字の番号を重ねる",
+        "文字表の下書きを作る",
+        "マップの入れ物を切り分ける",
+        "校正用の TSV をコピー",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            cls.app = fh.read()
+        with open(os.path.join(REPO, "web", "index.html"), encoding="utf-8") as fh:
+            cls.html = fh.read()
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        cls.section = doc.split("## 1. 画面で確かめる")[1].split("## 2. ")[0]
+        # **押せるものが定義されている場所**だけを集める。2 つのファイルを繋いだ
+        # 文字列に部分一致で当てると、片方を書き換えても**もう片方の説明文が
+        # 残っているせいで通ってしまう** (実際この検査を入れた回に踏んだ)
+        cls.defined = set(re.findall(r'\.textContent\s*=\s*"([^"]{2,60})"', cls.app))
+        cls.defined |= set(re.findall(r"<button[^>]*>([^<]{2,60})</button>", cls.html))
+        cls.defined |= set(re.findall(r'data-tab="[^"]*"[^>]*>([^<]{2,60})<', cls.html))
+
+    def test_every_named_button_exists_in_the_page(self):
+        for label in self.BUTTONS:
+            self.assertTrue(label in self.defined,
+                            f"画面に「{label}」というボタンが無い (docs/10 が押せと書いている)")
+
+    def test_help_text_in_the_page_does_not_name_a_missing_button(self):
+        """画面の説明文が名指しするボタンも実在すること (#92).
+
+        index.html の説明文は「『文字表の下書きを作る』で使う」のようにボタン名を
+        引用している。app.js 側の文言を変えると、**説明文だけが古い名前を指したまま**
+        になる。押すものが見つからない案内は、無い案内より悪い。
+        """
+        for label in self.BUTTONS:
+            for quoted in re.findall(r"「([^」]{4,60})」", self.html):
+                if quoted == label:
+                    self.assertTrue(label in self.defined,
+                                    f"index.html の説明文が「{label}」を指しているが、"
+                                    "そのボタンが無い")
+
+    def test_every_named_button_is_still_quoted_in_the_doc(self):
+        for label in self.BUTTONS:
+            self.assertIn(label, self.section,
+                          f"docs/10 の「画面で確かめる」から「{label}」の案内が消えている")
+
+    def test_the_list_is_not_empty_or_trivially_passing(self):
+        """一覧が空だったり、短すぎる文言で素通しになっていないこと (#81 と同じ形)."""
+        self.assertGreaterEqual(len(self.BUTTONS), 8)
+        for label in self.BUTTONS:
+            self.assertGreaterEqual(len(label), 4, f"{label!r} は短すぎて偶然一致する")
+
+
 class TestTheRuleSetMatchesTheGame(unittest.TestCase):
     """校正の設定が、見ている作品のものであること (#89).
 
