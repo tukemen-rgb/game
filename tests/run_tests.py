@@ -504,6 +504,50 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         self.assertIn("確認事項", res.stdout)
         del shutil
 
+    def test_the_pixel_kind_is_said_in_words(self):
+        """「画素の種類 5」は TIM2 の書式番号そのまま。素人に意味がないので言い換える (#98)."""
+        out = self.check(self.folder).stdout
+        self.assertIn("1 画素 1 バイトのパレット番号", out, out)
+        self.assertNotIn("画素の種類 5", out, "番号のまま出している")
+
+    def test_a_too_narrow_font_is_reported(self):
+        """1 行 23 字 × 22 ドットが載らない幅なら → を出すこと (#98)."""
+        import struct
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+            import make_tim2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        tim2, _ = make_tim2.font_sheet(rows=72, cols=boku2.FONT_COLS - 1,
+                                       cell=boku2.FONT_CELL)
+        tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + tim2
+        img = os.path.join(self.folder, "BOKU2.IMG")
+        with open(os.path.join(self.folder, "BOKU2.IDX"), "rb") as fh:
+            idx = fh.read()
+        entry = next(e for e in boku2.read_dfi(idx, os.path.getsize(img))
+                     if e["path"].endswith("bk_font.tms"))
+        with open(img, "r+b") as fh:
+            fh.seek(entry["at"])
+            fh.write(tms[:entry["len"]])
+        res = self.check(self.folder)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("ドットに足りません", res.stdout, res.stdout)
+        self.assertIn(str(boku2.FONT_COLS * boku2.FONT_CELL), res.stdout,
+                      "必要な幅を数字で言っていない")
+
+    def test_the_font_grid_numbers_match_the_sample_maker(self):
+        """1 行の字数と刻みが、練習データを作る側と同じ数字であること."""
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+            import make_boku2_sample
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        self.assertEqual(make_boku2_sample.COLS, boku2.FONT_COLS)
+        self.assertEqual(make_boku2_sample.CELL, boku2.FONT_CELL)
+
     def test_a_healthy_sample_is_still_clean(self):
         res = self.check(self.folder)
         self.assertEqual(res.returncode, 0, res.stdout)

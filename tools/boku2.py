@@ -37,6 +37,21 @@ import scrp   # open_text (メモ帳/Excel のどの保存形式でも読む) �
 
 SECTOR = 2048
 
+#: フォント画像の並び (公開ソース reprint.py の N_COLUMNS / asm_notes.txt の刻み 0x16)。
+#: 1 行 23 字を 22 ドット刻みで描くので、画像の幅は最低 23×22 = 506 ドット要る
+FONT_COLS = 23
+FONT_CELL = 22
+
+#: TIM2 の「画素の種類」を素人向けに言い換える (make_tim2.build_tim2 の書き出しと対)。
+#: 番号のままだと意味が伝わらないので、1 画素に何が入っているかで言う
+TIM2_PIXEL_KIND = {
+    1: "1 画素 16 ビットの直接色",
+    2: "1 画素 24 ビットの直接色",
+    3: "1 画素 32 ビットの直接色",
+    4: "1 画素 4 ビットのパレット番号",
+    5: "1 画素 1 バイトのパレット番号",
+}
+
 
 # ---------- 索引 (DFI) ----------
 
@@ -764,8 +779,20 @@ def check(folder: str, out=sys.stdout) -> int:
             img.seek(e["at"])
             info = tim2_info(img.read(min(e["len"], 0x100)))
             if info:
+                kind = info.get("image_type")
                 say(f"[フォント] {e['path']}: TIM2 (位置 0x{info['at']:X}) "
-                    + (f"{info.get('width')}×{info.get('height')} 画素の種類 {info.get('image_type')} パレット {info.get('clut_colors')} 色" if "width" in info else ""))
+                    + (f"{info.get('width')}×{info.get('height')} ドット / "
+                       f"{TIM2_PIXEL_KIND.get(kind, f'画素の種類 {kind} (未知)')} / "
+                       f"パレット {info.get('clut_colors')} 色" if "width" in info else ""))
+                # 1 行 23 字を 22 ドット刻みで並べるので、幅がこれを下回ると目盛りが
+                # そもそも載らない。数字を出すだけで判定していなかった (#98)
+                need = FONT_COLS * FONT_CELL
+                if info.get("width") and info["width"] < need:
+                    problems += 1
+                    say(f"→ [フォント] 幅が {info['width']} ドットで、"
+                        f"1 行 {FONT_COLS} 字を {FONT_CELL} ドット刻みで並べるのに要る "
+                        f"{need} ドットに足りません。文字の並びの読み方 (1 行の字数・刻み) が"
+                        "この作品では違うかもしれません。この行ごと報告してください")
             else:
                 problems += 1
                 img.seek(e["at"])
