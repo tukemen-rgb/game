@@ -3766,6 +3766,91 @@ class TestDisassemblerInBrowser(unittest.TestCase):
         self.assertIn("OK", res.stdout)
 
 
+class TestWhatIsConfirmedHasOneAnswer(unittest.TestCase):
+    """「実物で何が確かめてあるか」を書く場所を 1 か所に固定する (#101).
+
+    docs/09 は「1951 個に切り分けられた (実物での確認済み)」と書き、docs/10 は
+    「この一式は実物のデータで一度も動かしていません」と書いていた。**同じ問いに
+    正反対の答えが 2 か所にあった**。どちらも部分的に正しい (切り分けだけは実物を
+    通り、その後に作った道具は通っていない) のが余計に悪く、社長は読んだ方を信じる。
+
+    直し方は「両方を正確に書き直す」ではない。2 か所にあれば、次に何かが実物で
+    確かめられた日にまた片方だけが古くなる。**docs/09 の表を唯一の置き場にして、
+    docs/10 はそこを指すだけ**にした。この検査はその形が崩れていないかを見る。
+    """
+
+    SECTION = "## 実物で確かめたこと / まだ確かめていないこと"
+
+    @classmethod
+    def setUpClass(cls):
+        def read(name):
+            with open(os.path.join(REPO, "docs", name), encoding="utf-8") as fh:
+                return fh.read()
+
+        cls.log = read("09-調査ログと引き継ぎ.md")
+        cls.steps = read("10-僕夏2の手順.md")
+        start = cls.log.find(cls.SECTION)
+        assert start != -1, f"docs/09 に「{cls.SECTION}」が無い"
+        cls.start = start
+        end = cls.log.find("\n## ", start + 1)
+        cls.table = [line for line in cls.log[start:end].splitlines()
+                     if line.startswith("|")]
+
+    def test_the_table_marks_exactly_one_thing_as_confirmed(self):
+        """確かめた行は 1 行だけ。増えたらこの検査ごと直すこと.
+
+        「ついでに」もう 1 行を確かめた扱いにする書き換えを、素通りさせない。
+        実物が届いて本当に増えたなら、ここの数を上げるのが正しい直し方。
+        """
+        rows = [r for r in self.table if not r.startswith("| ---")][1:]
+        self.assertTrue(rows, "表の中身が無い")
+        confirmed = [r for r in rows if "**確かめた**" in r]
+        self.assertEqual(
+            len(confirmed), 1,
+            "実物で確かめた行が 1 行ではない:\n" + "\n".join(confirmed))
+        self.assertIn("1951", confirmed[0], "確かめた行に根拠の個数が無い")
+        self.assertIn("#0 #1", confirmed[0],
+                      "当時は名前が付いていなかった但し書きが消えている")
+        for row in rows:
+            if row is confirmed[0]:
+                continue
+            self.assertIn("| まだ |", row, f"確かめたかどうかが書いていない行: {row}")
+
+    def test_every_tool_of_the_real_game_is_classified(self):
+        """boku2.py に下位コマンドを足したら、この表に載せ忘れない.
+
+        道具が増えるたびに「実物で確かめていない物の一覧」が静かに古くなるのが
+        いちばんありがちな腐り方なので、コマンド名は原本から取って突き合わせる。
+        """
+        import re
+
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            subcommands = set(re.findall(r'add_parser\("(\w+)"', fh.read()))
+        self.assertTrue(subcommands, "boku2.py から下位コマンドを読み取れなかった")
+        body = "\n".join(self.table)
+        missing = sorted(c for c in subcommands if f"`{c}`" not in body)
+        self.assertFalse(
+            missing,
+            "実物で確かめたかどうかの表に無い boku2.py のコマンド: "
+            + ", ".join(missing))
+
+    def test_the_steps_doc_points_here_instead_of_answering_itself(self):
+        # assertIn は落ちたとき docs/10 を丸ごと吐く (#96)。自前の文言で出す。
+        for needle, why in (("実物で確かめたこと", "docs/09 の表への導線が無い"),
+                            ("docs/09", "docs/09 への参照が無い")):
+            self.assertTrue(needle in self.steps, f"docs/10: {why}")
+        for blanket in ("実物のデータで一度も動かしていません",
+                        "実物では一度も動かしていません"):
+            self.assertNotIn(
+                blanket, self.steps,
+                f"docs/10 が独自に言い切っている: {blanket} (docs/09 の表を指すこと)")
+
+    def test_the_answer_is_not_buried_under_the_log(self):
+        """記録欄 (1900 行超) の後ろに置かれたら、誰も辿り着かない."""
+        self.assertLess(self.start, self.log.find("自走ループの記録欄"),
+                        "表が記録欄より後ろにある")
+
+
 def main() -> int:
     """飛ばした検査を最後にまとめて出す (#82).
 
