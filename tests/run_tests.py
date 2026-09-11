@@ -423,6 +423,59 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                         "TSV の作り方が入れ直しより後に書かれている")
 
 
+class TestTheLegalNoteComesFirst(unittest.TestCase):
+    """docs/05 は、吸い出しの手順より先に立ち位置と法律を書くこと (#95).
+
+    この一式で**間違えると実害が出る唯一の文書**。それなのに、ImgBurn で
+    イメージ化して展開して…という手順が 180 行続いたあと、いちばん最後に
+    「私的目的でも違法になり得ます」が来る形だった。**方法を教えてから警告する**
+    順番になっていた。順番そのものを機械で見張る。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "docs", "05-実物のディスクを扱う場合.md"),
+                  encoding="utf-8") as fh:
+            cls.doc = fh.read()
+
+    def at(self, needle: str) -> int:
+        where = self.doc.find(needle)
+        self.assertNotEqual(where, -1, f"docs/05 に「{needle}」が無い")
+        return where
+
+    def test_the_scope_and_law_come_before_the_ripping_steps(self):
+        note = self.at("先に読む")
+        law = self.at("技術的保護手段")
+        rip = self.at("イメージ化")
+        self.assertLess(note, rip, "立ち位置の説明が吸い出しの手順より後にある")
+        self.assertLess(law, rip, "法律の話が吸い出しの手順より後にある")
+
+    def test_it_says_the_practice_needs_no_real_disc(self):
+        need = self.at("実物のソフトは要りません")
+        self.assertLess(need, self.at("イメージ化"), "先に言っていない")
+
+    def test_it_does_not_decide_the_law_for_the_reader(self):
+        """断定しないこと。当てはめは事案によるので、専門家に送る."""
+        self.assertIn("専門家に確認", self.doc)
+        self.assertIn("法律の助言ではありません", self.doc)
+        for overclaim in ("違法です", "問題ありません。", "合法です"):
+            self.assertNotIn(overclaim, self.doc, f"言い切っている: {overclaim}")
+
+    def test_it_states_the_read_only_stance(self):
+        self.assertIn("読むだけ", self.doc)
+        self.assertIn("10-僕夏2の手順.md", self.doc, "書き戻さない根拠への導線が無い")
+
+    def test_the_private_copy_exception_is_stated_precisely(self):
+        """「私的目的でも違法」で終わらせず、例外から外れる話として書くこと.
+
+        私的目的の回避そのものに刑事罰は無い。そこを曖昧にすると、
+        読む人は「刑務所に入る」と読むか「お咎めなし」と読むかのどちらかに振れる。
+        """
+        self.assertIn("30 条 1 項 2 号", self.doc, "根拠の条文が無い")
+        self.assertIn("例外から外れ", self.doc)
+        self.assertIn("刑事罰", self.doc, "刑事と民事の別が書かれていない")
+
+
 class TestWindowsCanFollowTheDocs(unittest.TestCase):
     """文書のコマンドのうち Windows で素直に打てないものが、全部説明してあること (#94).
 
