@@ -562,8 +562,63 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
             sys.path.remove(os.path.join(REPO, "tools"))
         with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
             app = fh.read()
-        self.assertIn(f"coverage < {boku2.COVERAGE_MIN}", app,
-                      f"ブラウザ側の線が {boku2.COVERAGE_MIN} と違う")
+        self.assertTrue(f"const COVERAGE_MIN = {boku2.COVERAGE_MIN}" in app,
+                        f"ブラウザ側の線が {boku2.COVERAGE_MIN} と違う")
+
+
+class TestBothSidesDiagnoseTheSame(unittest.TestCase):
+    """画面の「報告用の要約」と `boku2.py check` が、同じ判定をすること (#99).
+
+    画面はその場で「一括処理なら boku2.py check が同じものを出します」と言い、
+    docs/10 も同じ約束をしている。ところが #96〜#98 で **CLI にだけ**判定を 5 つ
+    足していたので、**画面の側は数字を出すだけ**に戻っていた。
+    どちらか片方に足すと、もう片方が黙って古くなる。両方に要ることを見張る。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            cls.cli = fh.read()
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            cls.ui = fh.read()
+
+    #: 両方に無いといけない判定の言葉 (#96〜#98 で足したもの)
+    SHARED = (
+        "しか指していません",
+        "位置表の長さの欄が",
+        "会話として読めたファイルが 0 件",
+        "ドットに足りません",
+        "1 画素 1 バイトのパレット番号",
+        "索引が本体をどれだけ使い切っているか",
+    )
+
+    def test_every_judgement_exists_on_both_sides(self):
+        for word in self.SHARED:
+            self.assertTrue(word in self.cli, f"tools/boku2.py に無い: {word}")
+            self.assertTrue(word in self.ui, f"web/app.js に無い: {word}")
+
+    def test_the_thresholds_are_the_same_number(self):
+        """基準の数字が 2 か所でずれていないこと."""
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        for name, value in (("COVERAGE_MIN", boku2.COVERAGE_MIN),
+                            ("FONT_COLS", boku2.FONT_COLS),
+                            ("FONT_CELL", boku2.FONT_CELL)):
+            self.assertTrue(f"const {name} = {value}" in self.ui,
+                            f"web/app.js の {name} が {value} と違う")
+
+    def test_the_pixel_kind_table_agrees(self):
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        for code, word in boku2.TIM2_PIXEL_KIND.items():
+            self.assertTrue(f'{code}: "{word}"' in self.ui,
+                            f"web/app.js の画素の種類 {code} が「{word}」と違う")
 
 
 class TestTheLegalNoteComesFirst(unittest.TestCase):

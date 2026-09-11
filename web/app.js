@@ -20,6 +20,19 @@
 /* ======================= 1. 小道具 ======================= */
 
 const SECTOR = 2048;
+
+/* 診断の基準。tools/boku2.py と同じ数字にそろえる (ずれると画面と一括処理で答えが変わる)。
+   COVERAGE_MIN は index-analyzer の塊の中で定義する (node のテストが塊だけを取り出して
+   動かすので、外に置くと抽出したコードで未定義になる #99) */
+const FONT_COLS = 23;       /* フォント画像の 1 行の文字数 */
+const FONT_CELL = 22;       /* 文字の刻み (ドット) */
+const TIM2_PIXEL_KIND = {
+  1: "1 画素 16 ビットの直接色",
+  2: "1 画素 24 ビットの直接色",
+  3: "1 画素 32 ビットの直接色",
+  4: "1 画素 4 ビットのパレット番号",
+  5: "1 画素 1 バイトのパレット番号",
+};
 /** 深い解析をかける上限。これを超えるファイルは先頭だけを見る */
 const ANALYZE_CAP = 24 * 1024 * 1024;
 const MAP_CELLS = 1800;
@@ -1078,6 +1091,8 @@ async function fullScan(entry, patterns, onProgress) {
  */
 
 /* @extract-start index-analyzer */
+/** 索引が本体をどれだけ使い切っていれば「読めている」とみなすか (tools/boku2.py と同じ) */
+const COVERAGE_MIN = 0.2;
 const IDX_SKIPS = [0, 4, 8, 12, 16, 32];
 const IDX_RECS = [4, 8, 12, 16, 20, 24, 32];
 const IDX_MULTS = [1, 2048];
@@ -1102,7 +1117,7 @@ function analyzeIndex(idx, dataSize) {
           const lastVal = u32le(idx, skip + (count - 1) * rec + field) * mult;
           if (lastVal > dataSize || lastVal <= 0) continue;
           const coverage = lastVal / dataSize;
-          if (coverage < 0.2) continue;
+          if (coverage < COVERAGE_MIN) continue;
           cands.push({ skip, rec, field, mult, count, coverage });
         }
       }
@@ -3281,7 +3296,15 @@ async function buildIdxReport() {
     + (c.dupes ? ` / 同じ名前 ${c.dupes} 件` : ""));
   lines.push(`最初の名前: ${items.slice(0, 5).map((it) => it.name).join(" / ")}`);
   const used = items.reduce((s, it) => s + it.len, 0);
-  lines.push(`[本体] ${dataEntry.size.toLocaleString()} バイト / 索引が指す合計 ${used.toLocaleString()} バイト (${(100 * used / Math.max(1, dataEntry.size)).toFixed(1)}%)`);
+  const coverage = used / Math.max(1, dataEntry.size);
+  lines.push(`[本体] ${dataEntry.size.toLocaleString()} バイト / 索引が指す合計 ${used.toLocaleString()} バイト`
+    + ` (${(100 * coverage).toFixed(1)}% — 索引が本体をどれだけ使い切っているか。読み方が合っていれば普通は 5 割を超えます)`);
+  if (coverage < COVERAGE_MIN) {
+    problems++;
+    lines.push(`→ 索引が本体の ${(100 * coverage).toFixed(1)}% しか指していません。`
+      + "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。この行と下の先頭 64 バイトを報告してください");
+    lines.push("   " + [...b.subarray(0, 64)].map((v) => hex(v, 2)).join(" "));
+  }
   if ((c.named_ok || 0) < items.length * 0.9) {
     problems++;
     lines.push("→ 名前が付かないファイルが多い。名前の置き場の付近:");
@@ -3324,8 +3347,13 @@ async function buildIdxReport() {
     lines.push(`  先頭 ${Math.min(50, msgs.length)} 件のうち読めた形: ${okMsg} 件`);
     if (lenOk || lenNg) {
       /* 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が実物でも本当に長さかを見る行 */
-      lines.push(`  位置表の長さの欄: 合う ${lenOk} 件 / 合わない ${lenNg} 件`
-        + (lenNg ? " (合わない分は位置だけで読んでいる。この行ごと報告)" : ""));
+      lines.push(`  位置表の長さの欄: 合う ${lenOk} 件 / 合わない ${lenNg} 件`);
+      if (lenNg) {
+        problems++;
+        lines.push(`→ 位置表の長さの欄が ${lenNg} 件合いません。8 バイト刻みの後ろ 4 バイトが`
+          + "その項目のバイト長だ、という読みがこの作品では違うかもしれません"
+          + " (合わない分は位置だけで読んでいます)。この行ごと報告してください");
+      }
     }
     if (badMsg) { problems++; lines.push(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト ${[...badMsg.head].map((v) => hex(v, 2)).join(" ")}`); }
     /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
@@ -3346,7 +3374,15 @@ async function buildIdxReport() {
     const t = at >= 0 ? parseTim2(bytes, at) : null;
     if (t) {
       const p = t.pictures[0];
-      lines.push(`[フォント] ${it.name}: TIM2 (位置 ${hx(at)}) ${p.width}×${p.height} 画素の種類 ${p.imageType} パレット ${p.clutColors} 色`);
+      const kind = TIM2_PIXEL_KIND[p.imageType] || `画素の種類 ${p.imageType} (未知)`;
+      lines.push(`[フォント] ${it.name}: TIM2 (位置 ${hx(at)}) ${p.width}×${p.height} ドット / ${kind} / パレット ${p.clutColors} 色`);
+      const need = FONT_COLS * FONT_CELL;
+      if (p.width && p.width < need) {
+        problems++;
+        lines.push(`→ [フォント] 幅が ${p.width} ドットで、1 行 ${FONT_COLS} 字を ${FONT_CELL} ドット刻みで`
+          + `並べるのに要る ${need} ドットに足りません。文字の並びの読み方 (1 行の字数・刻み) が`
+          + "この作品では違うかもしれません。この行ごと報告してください");
+      }
     } else {
       problems++;
       lines.push(`→ [フォント] ${it.name} は TIM2 として読めません。先頭 16 バイト ${[...bytes.subarray(0, 16)].map((v) => hex(v, 2)).join(" ")}`);
@@ -3358,7 +3394,7 @@ async function buildIdxReport() {
     && !/\.(idx|img|cnf|crc)$/i.test(e.name) && e.size > 16 && e.size < 8 * 1024 * 1024
     && (/\/map\//i.test("/" + e.path) || /^m_[a-z]\d/i.test(e.name)));
   if (maps.length) {
-    let okMap = 0, okTalk = 0, talkLines = 0;
+    let okMap = 0, okTalk = 0, talkLines = 0, noTalkExample = null;
     const bad = [];
     for (const e of maps.slice(0, 200)) {
       const bytes = await readRange(e.file, e.offset, e.size);
@@ -3369,9 +3405,20 @@ async function buildIdxReport() {
       if (one) {
         const mt = parseBokuMsgTables(bytes.subarray(one.at, one.at + one.len));
         if (mt) { okTalk++; for (const tb of mt.tables) if (tb.msg) talkLines += tb.msg.items.filter((x) => x.codes.length).length; }
+        else if (!noTalkExample) {
+          noTalkExample = { name: e.name,
+            head: [...bytes.subarray(one.at, one.at + 16)].map((v) => hex(v, 2)).join(" ") };
+        }
       }
     }
     lines.push(`[MAP] ${maps.length} 件 / 入れ物として読めた ${okMap} 件 / 1 番が会話だった ${okTalk} 件 / 会話 ${talkLines.toLocaleString()} 行`);
+    if (okMap && !okTalk) {
+      problems++;
+      lines.push("→ 入れ物としては読めましたが、1 番が会話として読めたファイルが 0 件です。"
+        + "会話ファイルの読み方 (表の数 + 12 バイトの項目) が外れている疑いがあります。"
+        + "この行と、下の 1 件目の先頭 16 バイトを報告してください");
+      if (noTalkExample) lines.push(`   ${noTalkExample.name} の 1 番: ${noTalkExample.head}`);
+    }
     if (bad.length) { problems++; lines.push("→ 入れ物として読めないファイルの例 (名前: 先頭 16 バイト):"); for (const x of bad.slice(0, 5)) lines.push("   " + x); }
   } else {
     lines.push("[MAP] 読み込んでいません (MAP フォルダのファイルも一緒に読むと診られます)");
