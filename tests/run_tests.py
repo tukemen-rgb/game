@@ -2695,13 +2695,55 @@ class TestDocs(unittest.TestCase):
                 continue                                   # 見出しの行
             self.assertIn(name, rules, f"表にあるが道具が出さない rule: {name}")
 
+    @staticmethod
+    def code_only(js: str) -> str:
+        """コメントを取り除いた JavaScript を返す (#93).
+
+        「画面にこの文言があるか」をファイル全体への部分一致で見ていたので、
+        **同じ文言がコメントにも書いてある所**では、実際に出る側だけを書き換えても
+        検査が通った (`文字表に無い番号` は説明のコメントと本物の両方にあった)。
+        コメントは画面に出ない。出る側だけを見る。
+
+        取りこぼすと検査が落ちる向きに倒れるので、多少荒くても安全側。
+        """
+        out, i, n = [], 0, len(js)
+        while i < n:
+            two = js[i:i + 2]
+            if two == "/*":
+                end = js.find("*/", i + 2)
+                i = n if end < 0 else end + 2
+            elif two == "//":
+                end = js.find("\n", i)
+                i = n if end < 0 else end
+            else:
+                out.append(js[i])
+                i += 1
+        return "".join(out)
+
+    def test_the_comment_stripper_works(self):
+        """コメントを外す処理そのものを確かめる (これが壊れると上の検査が素通しになる)."""
+        js = 'a = "見える";\n/* 隠れる */ b = `出る`; // 行コメントも隠れる\n'
+        code = self.code_only(js)
+        self.assertIn("見える", code)
+        self.assertIn("出る", code)
+        self.assertNotIn("隠れる", code)
+
     def test_manual_mentions_the_screen_features(self):
         """画面にある主要な物 (要約の行、目盛りの色、ページ送り、入れ物の入れ子…) が、
-        説明書 docs/07 にも書いてあること。画面だけ増えて説明書が古くなるのを防ぐ (#61)."""
+        説明書 docs/07 にも書いてあること。画面だけ増えて説明書が古くなるのを防ぐ (#61).
+
+        画面側はコメントを外してから探す。コメントに同じ文言が残っていると、
+        実際に出る文言を変えても気づけない (#93 で踏んだ)。
+        """
         with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
             manual = fh.read()
+        # 画面に出る文言は app.js と index.html のどちらにもあり得る。両方から
+        # コメントを外して繋ぐ (「報告用の要約」は index.html のボタンで、app.js には
+        # コメントとしてしか無かった。app.js だけ見ていて素通ししていた #93)
         with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
-            app = fh.read()
+            app = self.code_only(fh.read())
+        with open(os.path.join(REPO, "web", "index.html"), encoding="utf-8") as fh:
+            app += re.sub(r"<!--.*?-->", "", fh.read(), flags=re.S)
         pairs = [   # (画面の文言 (app.js にあること), 説明書の言い回し)
             ("文字表に無い番号", "文字表に無い番号"),
             ("橙の枠", "橙の枠"),
@@ -2713,8 +2755,10 @@ class TestDocs(unittest.TestCase):
             ("文字の番号を重ねる", "文字の番号を重ねる"),
         ]
         for on_screen, in_manual in pairs:
-            self.assertIn(on_screen, app, f"画面側の文言が変わった: {on_screen}")
-            self.assertIn(in_manual, manual, f"docs/07 に無い: {in_manual}")
+            # assertIn は失敗すると app.js 全体を出してしまうので assertTrue で見る
+            self.assertTrue(on_screen in app,
+                            f"画面側の文言が変わった (コメントではなく実際に出る所): {on_screen}")
+            self.assertTrue(in_manual in manual, f"docs/07 に無い: {in_manual}")
 
     def test_every_tab_is_documented(self):
         import re
