@@ -3307,7 +3307,8 @@ async function buildIdxReport() {
   }
   if ((c.named_ok || 0) < items.length * 0.9) {
     problems++;
-    lines.push("→ 名前が付かないファイルが多い。名前の置き場の付近:");
+    /* 文言は tools/boku2.py の check と 1 字そろえる。docs/10 の → の一覧もこの形 (#100) */
+    lines.push("→ 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください");
     lines.push("   " + [...b.subarray(recEnd, recEnd + 64)].map((v) => hex(v, 2)).join(" "));
   }
   if (c.dupes) { problems++; lines.push("→ 同じ名前があります。フォルダの入れ子の規則が実物と違うかもしれません (docs/09 #18)"); }

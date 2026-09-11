@@ -4,7 +4,7 @@ make_boku2_sample.damage() で 5 通りに壊した練習データを読ませ�
 「報告用の要約」に、tests/run_tests.py の TestDamageDrill と同じ行が出ること。
 `idx` (索引の先頭を壊す) だけは索引として読めないので、「DFI: 期待どおり」が出ないことを見る。
 """
-import asyncio, os, sys
+import asyncio, os, subprocess, sys
 from playwright.async_api import async_playwright
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tools"))
@@ -17,6 +17,28 @@ EXPECT = {
     "font": "TIM2 として読めません",
     "map": "入れ物として読めないファイルの例",
 }
+
+def arrow_parity(kind, report, errors):
+    """画面の → の行が、`boku2.py check` の → の行と 1 字まで同じであること (#100).
+
+    画面はその場で「一括処理なら boku2.py check が同じものを出します」と言い、
+    docs/10 の → の一覧も CLI の文言で書いてある。片方だけ言い回しを変えると、
+    **表を引いても載っていない**という状態になる。実際 name の行が
+    「名前の置き場の付近:」と短くなっていて、何をすればよいかが消えていた。
+    """
+    folder = os.path.join(WORK, f"BROKEN_{kind}")
+    res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), "check", folder],
+                         capture_output=True, text=True, cwd=REPO)
+    cli = [l.strip() for l in res.stdout.split("\n") if l.strip().startswith("→")]
+    ui = [l.strip() for l in report.split("\n") if l.strip().startswith("→")]
+    if cli != ui:
+        for line in cli:
+            if line not in ui:
+                errors.append(f"{kind}: CLI にしかない → : {line[:80]}")
+        for line in ui:
+            if line not in cli:
+                errors.append(f"{kind}: 画面にしかない → : {line[:80]}")
+
 
 async def run_kind(b, kind, errors):
     folder = os.path.join(WORK, f"BROKEN_{kind}")
@@ -63,6 +85,7 @@ async def run_kind(b, kind, errors):
     want = EXPECT[kind]
     if want not in report or "問題なし" in report or "確認事項" not in report:
         errors.append(f"{kind}: 要約に「{want}」と「確認事項 N 件」が無い (または 問題なし になっている)")
+    arrow_parity(kind, report, errors)
 
 async def main():
     async with async_playwright() as p:
