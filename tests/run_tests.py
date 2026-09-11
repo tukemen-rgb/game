@@ -423,6 +423,101 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
                         "TSV の作り方が入れ直しより後に書かれている")
 
 
+class TestWindowsCanFollowTheDocs(unittest.TestCase):
+    """文書のコマンドのうち Windows で素直に打てないものが、全部説明してあること (#94).
+
+    社長の環境は Windows。README の「3 分で一周する」の 1 行目が `python3 …` で、
+    読み替えの案内は docs/10 の中、しかも README からの導線は 100 行以上下にあった。
+    **最初の 1 行で詰まる**のに、詰まったときの案内が遠い。
+
+    加えて `| head -20`、行末の `\\` での継続、`cp`、`cmp … && echo` は
+    コマンドプロンプトに無い / 別物なので、そのまま打つと止まる。
+    新しくそういう書き方を足したときに気づけるよう、**使っている構文の集合**が
+    README の読み替え表に載っている集合を超えないことを見る。
+    """
+
+    #: (名前, 見つける正規表現). README の読み替え表がこの名前で説明していること
+    CONSTRUCTS = (
+        ("head", re.compile(r"\|\s*head\b")),
+        ("grep", re.compile(r"\|\s*grep\b")),
+        ("行継続", re.compile(r"\\\s*$")),
+        ("cp", re.compile(r"^cp\s")),
+        ("cmp", re.compile(r"^cmp\s")),
+    )
+
+    #: README の読み替え表に、その構文の説明があると認める手がかり
+    EXPLAINED = {
+        "head": "head -20",
+        "grep": "grep 同じ",
+        "行継続": "1 行につなげて",
+        "cp": "`cp A B`",
+        "cmp": "`cmp A B && echo 一致`",
+    }
+
+    DOCS = ("README.md", "docs/01-文字テーブル.md", "docs/02-相対検索.md",
+            "docs/03-ポインタテーブル.md", "docs/04-校正とQA.md",
+            "docs/06-画面で確かめる.md", "docs/07-構造探査台.md",
+            "docs/08-コードを読む.md", "docs/10-僕夏2の手順.md",
+            "exercises/README.md")
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "README.md"), encoding="utf-8") as fh:
+            cls.readme = fh.read()
+        # **読み替え表の中だけ**を見る。README 全体を見ると、目印の文字列が
+        # コマンドの側 (`| head -20`) にも出るので、表の行を消しても通ってしまう。
+        # 実際この検査を入れた回に、表の行を消しても緑のままだった (#94)
+        cls.table = "\n".join(line for line in cls.readme.split("\n")
+                              if line.startswith("> |"))
+
+    def bash_lines(self, path: str) -> list[str]:
+        with open(os.path.join(REPO, path), encoding="utf-8") as fh:
+            doc = fh.read()
+        out, in_block = [], False
+        for line in doc.split("\n"):
+            if line.startswith("```"):
+                in_block = "bash" in line
+                continue
+            if in_block and line.strip():
+                out.append(line.rstrip())
+        return out
+
+    def test_every_unportable_construct_is_explained(self):
+        used = {}
+        for path in self.DOCS:
+            for line in self.bash_lines(path):
+                for name, rx in self.CONSTRUCTS:
+                    if rx.search(line):
+                        used.setdefault(name, []).append(f"{path}: {line.strip()[:60]}")
+        for name, where in sorted(used.items()):
+            self.assertTrue(self.EXPLAINED[name] in self.table,
+                            f"{name} を使っているのに README の読み替え表に無い "
+                            f"(例: {where[0]})")
+
+    def test_the_note_comes_before_the_first_command(self):
+        """読み替えの案内が、最初のコマンドより前にあること."""
+        note = self.readme.find("Windows の方は先にここだけ")
+        first = self.readme.find("python3 tools/make_sample.py")
+        self.assertNotEqual(note, -1, "README に Windows の案内が無い")
+        self.assertNotEqual(first, -1)
+        self.assertLess(note, first, "案内が最初のコマンドより後にある")
+
+    def test_the_python_launcher_is_named(self):
+        self.assertTrue("py -3" in self.table, "python3 の読み替え先が表に無い")
+
+    def test_the_table_is_really_there(self):
+        """表そのものを取り出せていること (取り出せないと上が全部素通しになる)."""
+        self.assertGreaterEqual(len(self.table.split("\n")), 6, self.table)
+        self.assertIn("Windows では", self.table)
+
+    def test_the_scan_actually_finds_something(self):
+        """この検査が 0 件を見て通っていないこと (#81 と同じ形の素通し防止)."""
+        found = [name for name, rx in self.CONSTRUCTS
+                 for path in self.DOCS for line in self.bash_lines(path)
+                 if rx.search(line)]
+        self.assertGreaterEqual(len(found), 5, "走査が当たっていない")
+
+
 class TestTheDocMatchesTheButtons(unittest.TestCase):
     """docs/10 が「押す」と書いているボタンが、画面に実在すること (#92).
 
