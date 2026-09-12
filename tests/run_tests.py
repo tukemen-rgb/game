@@ -3766,6 +3766,96 @@ class TestDisassemblerInBrowser(unittest.TestCase):
         self.assertIn("OK", res.stdout)
 
 
+class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
+    """遅延スロットの印が、画面と CLI の両方に出ること (#103).
+
+    docs/08 は「分岐の次の 1 命令は必ず実行される」を MIPS でいちばん引っかかる
+    癖として教え、**知らないと混乱します**とまで書いている。画面はその行に
+    「← 遅延スロット」と出していたが、**CLI は何も出していなかった**。
+    docs/08 が教える `elfdump.py --disasm` を叩いた人は、自分で目で探すことになる。
+
+    #99 と同じ「片側にだけある判定」で、そのときは画面が遅れていた。今度は逆。
+    どちらが遅れても分かるように、**両方に同じ ELF を読ませて印の付く番地を
+    突き合わせる**。
+    """
+
+    def slots_from_cli(self, count: int) -> list[str]:
+        import re
+        import subprocess
+
+        res = subprocess.run(
+            [sys.executable, os.path.join(REPO, "tools", "elfdump.py"),
+             os.path.join(REPO, "work", "BOOT.ELF"), "--disasm", "--count", str(count)],
+            capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        return [m for m in re.findall(r"^([0-9A-F]{8}) .*← 遅延スロット", res.stdout, re.M)]
+
+    def test_the_cli_marks_the_instruction_after_a_branch(self):
+        problem = ensure_practice("work/BOOT.ELF", "make_elf.py")
+        if problem:
+            self.skipTest(problem)
+        got = self.slots_from_cli(64)
+        # 練習用 ELF は jal 2 つと jr 1 つを踏む。印が 1 つも出ないのが最悪の壊れ方
+        self.assertTrue(got, "CLI が遅延スロットに印を付けていない")
+        self.assertIn("00100040", got,
+                      f"jr $ra の次の行に印が無い (付いたのは {got})")
+
+    def test_the_lines_quoted_in_the_doc_really_come_out(self):
+        """docs/08 が例に出している逆アセンブルの行を、実際に出して突き合わせる.
+
+        #102 の宿題 (文書が載せている出力例を測り直す) をこの文書で行う。
+        docs/08 は `0010003C jr $ra` のような番地入りの行を 4 行載せていて、
+        練習用 ELF の中身が変われば全部ずれる。番地・命令・オペランドだけ見て、
+        右側に付けてある日本語の説明は見ない (説明の書き方は自由でよい)。
+        """
+        import re
+
+        problem = ensure_practice("work/BOOT.ELF", "make_elf.py")
+        if problem:
+            self.skipTest(problem)
+        import subprocess
+
+        res = subprocess.run(
+            [sys.executable, os.path.join(REPO, "tools", "elfdump.py"),
+             os.path.join(REPO, "work", "BOOT.ELF"), "--disasm", "--count", "64"],
+            capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        real = {}
+        for at, mn, ops in re.findall(r"^([0-9A-F]{8})  [0-9A-F]{8}  (\S+)\s*(.*)$",
+                                      res.stdout, re.M):
+            real[at] = (mn, re.split(r"\s{2,}|←", ops)[0].strip())
+
+        with open(os.path.join(REPO, "docs", "08-コードを読む.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        quoted = re.findall(r"^([0-9A-F]{8})  (\S+)\s+(.*)$", doc, re.M)
+        self.assertTrue(quoted, "docs/08 に逆アセンブルの例が無い")
+        for at, mn, ops in quoted:
+            want = (mn, re.split(r"\s{2,}|←", ops)[0].strip())
+            self.assertIn(at, real, f"docs/08 の {at} が出力に無い")
+            self.assertEqual(real[at], want,
+                             f"docs/08 の {at} は「{want[0]} {want[1]}」と書いてあるが、"
+                             f"実際は「{real[at][0]} {real[at][1]}」")
+
+    def test_the_two_sides_mark_the_same_addresses(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        problem = ensure_practice("work/BOOT.ELF", "make_elf.py")
+        if problem:
+            self.skipTest(problem)
+        res = subprocess.run(
+            [node, os.path.join(REPO, "tests", "test_disasm.mjs"), "--slots", "64"],
+            capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        ui = res.stdout.split()
+        self.assertTrue(ui, "画面側が遅延スロットを 1 つも出していない")
+        self.assertEqual(self.slots_from_cli(64), ui,
+                         "遅延スロットの印が画面と CLI で食い違う")
+
+
 class TestTheNumbersInTheDocAreMeasured(unittest.TestCase):
     """docs/10 が書いている数字を、道具の側から測り直す (#102).
 

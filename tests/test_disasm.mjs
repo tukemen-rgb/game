@@ -34,7 +34,7 @@ const ascii = (bytes) => {
 
 const mips = new Function("hex", "u32le", "SJIS_LEAD", "SJIS_TRAIL", "DECODERS", "ascii",
   src.slice(start, end) +
-  "\nreturn { decodeMips, readElf, vaddrToOffset, stringAt, disassemble };")(
+  "\nreturn { decodeMips, readElf, vaddrToOffset, stringAt, disassemble, DELAYED };")(
   hex, u32le, SJIS_LEAD, SJIS_TRAIL, DECODERS, ascii);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
@@ -113,6 +113,23 @@ if (!fs.existsSync(elfPath)) {
 const buf = new Uint8Array(fs.readFileSync(elfPath));
 const elf = mips.readElf(buf);
 if (!elf) fail("BOOT.ELF を ELF として読めない");
+
+/* --slots N: 画面が「← 遅延スロット」を出す番地だけを並べる (#103).
+ *
+ * CLI (tools/elfdump.py) が同じ番地に印を付けるかを Python 側から突き合わせる
+ * ために置いてある出口。判定は画面の DELAYED そのものを使うので、片方だけ
+ * 直せば必ず食い違う。 */
+const slotArg = process.argv.indexOf("--slots");
+if (slotArg >= 0) {
+  const count = Number(process.argv[slotArg + 1] || 64);
+  const lines = mips.disassemble(buf, elf, elf.entry, count);
+  for (let i = 1; i < lines.length; i++) {
+    /* 判定は app.js の DELAYED そのもの。ここに書き写すと、画面側だけ変えた
+       ときに気づかない (最初そう書いていて、壊して試したら素通りした) */
+    if (mips.DELAYED.has(lines[i - 1].kind)) console.log(hex(lines[i].vaddr, 8));
+  }
+  process.exit(0);
+}
 if (elf.machine !== 8) fail(`e_machine が ${elf.machine} (期待 8 = MIPS)`);
 if (elf.entry !== 0x00100000) fail(`入口が 0x${hex(elf.entry, 8)} (期待 0x00100000)`);
 const loads = elf.segments.filter((s) => s.type === 1);

@@ -126,6 +126,23 @@ def _show(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + '"'
 
 
+#: 次の 1 命令が「必ず」実行される命令 (遅延スロットを作る側)。
+#:
+#: docs/08 が MIPS でいちばん引っかかる癖として教えているのがこれで、画面
+#: (web/app.js の DELAYED) は次の行に「← 遅延スロット」と出していた。CLI だけが
+#: 出していなかったので、docs/08 を読んでから CLI を叩いた人は目で探すことになる (#103)。
+#:
+#: ニーモニックで見分けるのは、内蔵デコーダと capstone のどちらで読んでも
+#: 同じ判定にするため。`break` のように b で始まるだけの命令を巻き込まないよう、
+#: 名前を並べて持つ。
+DELAY_SLOT = frozenset("""
+    b bal beq beql bne bnel blez blezl bgtz bgtzl bltz bltzl bgez bgezl
+    bltzal bltzall bgezal bgezall beqz beqzl bnez bnezl
+    bc0f bc0t bc0fl bc0tl bc1f bc1t bc1fl bc1tl bc2f bc2t bc2fl bc2tl
+    j jal jr jalr
+""".split())
+
+
 def decode(word: int, addr: int) -> tuple[str, str]:
     """1 命令を (ニーモニック, オペランド) に戻す.
 
@@ -480,9 +497,16 @@ def main() -> int:
         addr = elf.entry if args.addr is None else int(args.addr, 0)
         engine = "capstone" if _capstone() else "内蔵デコーダ"
         print(f"; 0x{addr:08X} から {args.count} 命令  ({engine})")
+        prev = ""
         for at, word, mn, ops, note in disasm(elf, addr, args.count):
             line = f"{at:08X}  {word:08X}  {mn:<9}{ops}"
-            print(line + (f"   {note}" if note else ""))
+            if note:
+                line += f"   {note}"
+            elif prev in DELAY_SLOT:
+                # 分岐の直後。分岐が成立してもここは実行される (docs/08)
+                line += "   ← 遅延スロット"
+            prev = mn
+            print(line)
         if args.xref:
             print()
 

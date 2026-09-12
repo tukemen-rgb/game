@@ -1509,6 +1509,14 @@ function countControlRange(b) {
  */
 
 /* @extract-start mips */
+
+/** 分岐や呼び出しの直後の 1 命令。MIPS では分岐が成立してもここは必ず実行される。
+ *
+ * 取り出せる区画の中に置いてある。外に置いていたときは、テストが自分で同じ
+ * 集合を書き写していて、**画面側だけ変えても気づかなかった** (#103。#99 で
+ * COVERAGE_MIN に同じことをしている)。 */
+const DELAYED = new Set(["branch", "jump", "call", "jr"]);
+
 const MIPS_REGS = [
   "$zero", "$at", "$v0", "$v1", "$a0", "$a1", "$a2", "$a3",
   "$t0", "$t1", "$t2", "$t3", "$t4", "$t5", "$t6", "$t7",
@@ -4294,9 +4302,6 @@ function disTable(title, head, body, hint) {
   }
   return wrap;
 }
-
-/** 分岐や呼び出しの直後の 1 命令。MIPS では分岐が成立してもここは必ず実行される */
-const DELAYED = new Set(["branch", "jump", "call", "jr"]);
 
 function drawDisasm() {
   const elf = state.elf;
