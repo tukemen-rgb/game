@@ -98,6 +98,26 @@ KANJI = """(chars => {
 })"""
 
 
+def doc_says_the_same(shape_only: int, right: int, total: int) -> list[str]:
+    """docs/10 の「形だけで 46/57、並び順の補正を入れて 53/57」を測り直す (#102).
+
+    率そのものは書体しだいで動くので、**動いたら文書を書き換える**のが正しい。
+    落ちたときにどう直せばよいかまで言う。
+    """
+    import re
+
+    with open(REPO + "/docs/10-僕夏2の手順.md", encoding="utf-8") as fh:
+        doc = fh.read()
+    said = re.findall(r"形だけで (\d+)/(\d+)、並び順の補正を入れて (\d+)/(\d+)", doc)
+    if len(said) != 1:
+        return [f"docs/10 の実測の書き方が見つからない ({len(said)} 件)"]
+    a, at, b, bt = (int(x) for x in said[0])
+    now = f"形だけで {shape_only}/{total}、並び順の補正を入れて {right}/{total}"
+    if (a, at, b, bt) != (shape_only, total, right, total):
+        return [f"docs/10 の実測が今と違う。docs/10 をこう書き換える → 「{now}」"]
+    return []
+
+
 async def main():
     async with async_playwright() as p:
         b = await launch(p)
@@ -118,6 +138,10 @@ async def main():
         # (#70 の実測は 53/57 = 0.93。形だけの #69 は 46/57 = 0.81 だった)
         if rate < 0.7:
             bad.append(f"正解率が低い: {rate:.2f}")
+        # docs/10 はこの率を「実測」として数字で書いている。緩い下限だけ見ていると、
+        # 率が動いた日に**文書の数字だけがもっともらしく古くなる** (#102)。
+        # 社長はその数字を目印に「合っているか」を判断するので、ここで突き合わせる。
+        bad += doc_says_the_same(r["shapeOnly"], r["right"], r["total"])
         # 並び順で直す規則が、形だけより悪くしていないこと
         if r["right"] < r["shapeOnly"]:
             bad.append(f"並び順で直して悪くなった: {r['shapeOnly']} -> {r['right']}")

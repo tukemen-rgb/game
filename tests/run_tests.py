@@ -3766,6 +3766,105 @@ class TestDisassemblerInBrowser(unittest.TestCase):
         self.assertIn("OK", res.stdout)
 
 
+class TestTheNumbersInTheDocAreMeasured(unittest.TestCase):
+    """docs/10 が書いている数字を、道具の側から測り直す (#102).
+
+    #101 と同じ型の欠陥を別の面で探した。あちらは**同じ事実が 2 つの文書にある**
+    食い違いだったが、こちらは**文書にだけある数字**。docs/10 には
+    「練習データなら 18」「形だけで 46/57」「まず疑うマス 12 個」「最低 506 ドット」
+    のような、いかにも実測らしい数字が並んでいる。実際どれも当時測った本物だが、
+    **測り直す仕掛けがどこにも無い**。定数や生成器を変えた日に、この数字だけが
+    もっともらしい顔で残る。社長はそれを目印に「合っているか」を判断するので、
+    嘘の目印は道具の不具合より質が悪い。
+
+    ここでは道具から出る値と文書の数字を突き合わせる。ブラウザで測る 46/57 と
+    53/57 は tests/e2e/fontdraft.py 側で同じことをする。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            cls.doc = fh.read()
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            cls.ui = fh.read()
+
+    def only(self, pattern: str, where: str = None) -> int:
+        """その言い回しがちょうど 1 か所にあることまで確かめてから数字を返す.
+
+        「1 か所だけ」を確かめないと、同じ数字が別の場所にも書いてあるときに
+        片方しか直らない (#101 で踏んだのがまさにそれ)。
+        """
+        import re
+
+        hits = re.findall(pattern, self.doc if where is None else where)
+        self.assertEqual(len(hits), 1,
+                         f"「{pattern}」に当たる箇所が {len(hits)} 件 (1 件であること)")
+        return int(hits[0])
+
+    def test_the_font_width_is_the_two_constants_multiplied(self):
+        """最低 506 ドットは 23×22 の答え。列数か刻みを変えたら文書も変わる."""
+        need = boku2.FONT_COLS * boku2.FONT_CELL
+        import re
+
+        said = re.findall(r"(\d+) ドット(?:要る|に足りません)", self.doc)
+        self.assertTrue(said, "docs/10 に最低の幅が書いていない")
+        for n in said:
+            self.assertEqual(int(n), need,
+                             f"docs/10 の最低の幅 {n} が {boku2.FONT_COLS}×{boku2.FONT_CELL}"
+                             f" = {need} と違う")
+
+    def test_the_number_of_cells_follows_the_column_count(self):
+        """1656 字は 72 行 × 23 列。列数を変えたら書き換える.
+
+        docs/09 の「現在地」にも同じ式が書いてある (こちらは判明した形式の記述で、
+        記録欄の履歴ではない)。両方見る。
+        """
+        want = 72 * boku2.FONT_COLS
+        cells = self.only(r"(\d+) 個のマスに")
+        self.assertEqual(cells, want,
+                         f"docs/10 の {cells} 字が 72 行 × {boku2.FONT_COLS} 列と違う")
+        with open(os.path.join(REPO, "docs", "09-調査ログと引き継ぎ.md"),
+                  encoding="utf-8") as fh:
+            here = fh.read().split("## 最大の発見")[0]   # 現在地だけ。記録欄の履歴は見ない
+        self.assertEqual(self.only(r"文字は 72 行 × (\d+) = \d+ 字", here),
+                         boku2.FONT_COLS, "docs/09 の現在地の列数が FONT_COLS と違う")
+        self.assertEqual(self.only(r"文字は 72 行 × \d+ = (\d+) 字", here),
+                         want, f"docs/09 の現在地の字数が {want} と違う")
+
+    def test_the_practice_split_count_is_what_unpack_prints(self):
+        """「練習データなら 18」を、実際に切り分けて数え直す."""
+        import re
+        import subprocess
+        import tempfile
+
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        said = self.only(r"練習データなら (\d+)")
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        with tempfile.TemporaryDirectory() as out:
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "boku2.py"), "unpack",
+                 os.path.join(sample, "BOKU2.IDX"), os.path.join(sample, "BOKU2.IMG"), out],
+                capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        got = re.search(r"(\d+) 個に切り分けました", res.stdout)
+        self.assertTrue(got, "unpack が件数を出さなかった:\n" + res.stdout)
+        self.assertEqual(int(got.group(1)), said,
+                         f"docs/10 は練習データを {said} 個と書いているが、"
+                         f"unpack は {got.group(1)} 個と言う")
+
+    def test_the_shaky_cell_count_matches_the_screen(self):
+        """「まず疑うマス 12 個」は画面の slice(0, 12) のこと."""
+        import re
+
+        said = self.only(r"」が (\d+) 個出ます")
+        cut = re.findall(r"\.sort\(\(a, b\) => a\.margin - b\.margin\)\.slice\(0, (\d+)\)", self.ui)
+        self.assertEqual(len(cut), 1, f"web/app.js の紛らわしい順の切り出しが {len(cut)} 件")
+        self.assertEqual(int(cut[0]), said,
+                         f"docs/10 は {said} 個と書いているが、画面が出すのは {cut[0]} 個")
+
+
 class TestWhatIsConfirmedHasOneAnswer(unittest.TestCase):
     """「実物で何が確かめてあるか」を書く場所を 1 か所に固定する (#101).
 
