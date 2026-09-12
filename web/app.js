@@ -5185,14 +5185,25 @@ function bokuMsgUsed(items, alt) {
  * 読めた行を校正ツール向けの TSV にする (docs/04 の exercises/qa_target.tsv と同じ列)。
  * translation の列は original の写し。ここを直したものが校正の対象になる
  */
-function bokuMsgTsv(items, glyphs, alt) {
+/** 校正用 TSV の id を作る。`ファイル名:行` で、boku2.py text と同じ住所にする。
+ *
+ * 以前は行番号だけだったので、2 つのファイルから写して 1 枚にまとめると
+ * `0` どうしがぶつかった。id を鍵にして突き合わせる道具 (compare_tsv.py) は
+ * 別のファイルの行を同じ行として並べてしまう。docs/10 も「id は実機でどのセリフか
+ * 伝えるときの住所」と書いている (#105)。 */
+function bokuMsgId(stem, i) {
+  return stem ? `${stem}:${i}` : `${i}`;
+}
+
+function bokuMsgTsv(items, glyphs, alt, stem) {
   const esc = (t) => t.replace(/\t/g, " ").replace(/\r?\n/g, "<BR>");
   const lines = ["id\toffset\tsize\toriginal\ttranslation"];
   for (const it of items) {
     if (!it.codes.length) continue;
     if (bokuMsgVoice(it.codes)) continue;                     /* 音声の番号は文章ではない */
     const text = esc(bokuMsgText(it.codes, glyphs, true, alt));
-    lines.push(`${it.i}\t0x${it.at.toString(16).toUpperCase()}\t${it.codes.length * 2}\t${text}\t${text}`);
+    lines.push(`${bokuMsgId(stem, it.i)}\t0x${it.at.toString(16).toUpperCase()}`
+      + `\t${it.codes.length * 2}\t${text}\t${text}`);
   }
   return lines.join("\n") + "\n";
 }
@@ -5350,7 +5361,10 @@ $("msgparse").addEventListener("click", () => {
   ta.spellcheck = false;
   ta.readOnly = true;
   ta.style.minHeight = "120px";
-  ta.value = bokuMsgTsv(filled, glyphs, alt);
+  /* 拡張子を落とした名前を住所の頭にする (boku2.py text と同じ形) */
+  const stem = String((state.current && (state.current.base || state.current.name)) || "")
+    .split("/").pop().replace(/\.[^.]*$/, "");
+  ta.value = bokuMsgTsv(filled, glyphs, alt, stem);
   ta.hidden = true;
   btn.addEventListener("click", async () => {
     ta.hidden = false;

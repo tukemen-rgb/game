@@ -64,7 +64,10 @@ async def main():
         await page.wait_for_selector("#msgglyphs", state="attached")
         kept = await page.input_value("#msgglyphs")
         print("kept glyphs:", repr(kept))
-        if not tsv.startswith("id\toffset\tsize\toriginal\ttranslation\n0\t0x1C\t10\tかき<BR>く\tかき<BR>く") or kept != "あいうえお\nかきくけこ":
+        # id は `ファイル名:行`。boku2.py text と同じ住所で、ファイルをまたいで
+        # まとめても行がぶつからない (#105)
+        if not tsv.startswith("id\toffset\tsize\toriginal\ttranslation\n"
+                              "system:0\t0x1C\t10\tかき<BR>く\tかき<BR>く") or kept != "あいうえお\nかきくけこ":
             errors.append("tsv or glyph persistence failed")
         print("note1:", note1); print("rows1:", rows1)
         print("note2:", note2); print("rows2:", rows2)

@@ -1,5 +1,5 @@
 """docs/10 の「画面で確かめる」を練習データで通す."""
-import asyncio, os, sys
+import asyncio, os, shutil, sys
 from playwright.async_api import async_playwright
 
 from common import REPO, WORK, launch, select_file
@@ -111,6 +111,52 @@ async def main():
         print("item note:", note_item); print("item:", item)
         if "0x8002 はページ送り" not in note_item or item != ["あみ{BREAK}\nむしをつかまえる{END}", "つりざお{BREAK}\nさかなをつる{END}"]:
             errors.append("alt-break file failed")
+        # 6.6 画面の TSV と `boku2.py text` の行が同じであること (#105).
+        #
+        #     #104 で要約の全行をそろえたので、同じやり方を .msg の本文に広げる。
+        #     ここを比べていなかった間に 2 つずれていた: id が画面では行番号だけで
+        #     (ファイルをまたぐと 0 どうしがぶつかる)、`<BREAK>` を校正側が
+        #     知らずに 2 行を 1 行と数えていた。
+        import subprocess
+        out = os.path.join(WORK, "cli_unpack_105")
+        shutil.rmtree(out, ignore_errors=True)
+        for args in (["unpack", os.path.join(S, "BOKU2.IDX"), os.path.join(S, "BOKU2.IMG"), out],
+                     ["text", out, "-f", os.path.join(S, "font.txt"),
+                      "-o", os.path.join(WORK, "cli_105.tsv")]):
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py")] + args,
+                               capture_output=True, text=True, cwd=REPO)
+            if r.returncode != 0:
+                errors.append(f"boku2 {args[0]} failed: {r.stdout[-200:]}{r.stderr[-200:]}")
+        cli_rows = {}
+        with open(os.path.join(WORK, "cli_105.tsv"), encoding="utf-8-sig") as fh:
+            for line in fh.read().split("\n")[1:]:
+                if line.strip():
+                    cli_rows[line.split("\t")[0]] = line
+        if len(cli_rows) < 10:
+            errors.append(f"CLI の TSV が {len(cli_rows)} 行しかない (比べる材料が無い)")
+        compared = 0
+        for target in ["system.msg", "item_info.msg", "namemsg.msg", "config.msg"]:
+            await select_file(page, target, target)
+            await page.click('[data-tab="format"]')
+            await page.fill("#msgglyphs", font)
+            await page.click("#msgparse")
+            await page.wait_for_timeout(200)
+            await page.click("#msgtsv")
+            rows = [l for l in (await page.input_value("#msgtsvtext")).split("\n")[1:] if l.strip()]
+            if not rows:
+                errors.append(f"{target}: 画面の TSV が空 (比べていない)")
+                continue
+            for row in rows:
+                key = row.split("\t")[0]
+                if key not in cli_rows:
+                    errors.append(f"{target}: CLI に無い id: {key}")
+                elif cli_rows[key] != row:
+                    errors.append(f"{target}: 行が違う\n    画面: {row}\n    CLI : {cli_rows[key]}")
+                else:
+                    compared += 1
+        print(f"TSV 突き合わせ: {compared} 行が画面と CLI で一致")
+        if compared < 12:
+            errors.append(f"突き合わせた行が {compared} 行しかない (素通りの疑い)")
         # 6.7 入れ物の中の入れ物 (fish_on_mem.bin → 1.bin がまた入れ物 → その 2.bin が魚の説明)。
         #     画面では「切り分ける」を 2 回。CLI (#53) の再帰と同じ答えになること
         await select_file(page, "fish_on_mem", "fish_on_mem.bin")

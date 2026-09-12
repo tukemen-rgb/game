@@ -152,7 +152,12 @@ def load_names(path: str) -> dict[str, str]:
 def pages_of(text: str) -> list[list[str]]:
     """ページ (ボタン待ち・クリアで区切る) ごとの行リストに割る."""
     pages = []
-    for page in re.split(r"<WAIT>|<CLEAR>", text):
+    # <BREAK> も引数の無いページ送り (boku2.py が ALT_BREAK_FILES に付ける書き方)。
+    # 知らないでいると、メニュー 7 ファイルの行数と幅を間違って測る (#105)
+    # <WAIT> には引数の付く形もある。練習用の SCRP は引数なし `<WAIT>`、
+    # 僕の夏休み 2 の取り出しは `<WAIT:0A>` (待ちフレーム数)。引数なしだけを見て
+    # いたので、実物の TSV では **WAIT でページが割れていなかった** (#105)
+    for page in re.split(r"<WAIT(?::[0-9A-Fa-f]+)?>|<CLEAR>|<BREAK>", text):
         if not scrp.strip_tags(page).strip():
             continue
         pages.append(page.split("<BR>"))

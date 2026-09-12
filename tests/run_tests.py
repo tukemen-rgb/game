@@ -3771,6 +3771,68 @@ class TestDisassemblerInBrowser(unittest.TestCase):
         self.assertIn("OK", res.stdout)
 
 
+class TestEveryTagTheExtractorWritesIsUnderstood(unittest.TestCase):
+    """取り出す側が書く記号を、測る側が全部知っていること (#105).
+
+    `boku2.py` はメニュー 7 ファイル (ALT_BREAK_FILES: item_info.msg など) の
+    0x8002 を **`<BREAK>`** (引数の無いページ送り) と書き出す。ところが
+    `proofread.py` は `<WAIT>` と `<CLEAR>` でしかページを割らず、
+    `scrp.split_lines` は `<BR>` でしか行を割っていなかった。
+
+    結果、`あみ<BREAK>むしをつかまえる` は **1 行 (幅 10)** として測られていた。
+    本当は 2 行 (幅 2 と 8)。道具の中でいちばん本業に近い所 —— 行数と幅の検査 ——
+    が、実物のメニュー文で黙って外れる状態だった。しかも `proofread` は
+    ERROR 0 件で通るので、**通ったことが安心の根拠にならない**。
+
+    取り出し側の記号の一覧を原本から取って、測る側が全部割れることを見る。
+    """
+
+    def test_the_break_tag_splits_lines_and_pages(self):
+        self.assertEqual(scrp.split_lines("あみ<BREAK>むしをつかまえる"),
+                         ["あみ", "むしをつかまえる"], "<BREAK> で行が割れていない")
+        self.assertEqual(proofread.pages_of("あみ<BREAK>むしをつかまえる"),
+                         [["あみ"], ["むしをつかまえる"]], "<BREAK> でページが割れていない")
+
+    def test_the_widths_are_measured_per_line(self):
+        """1 行にまとめて数えると、幅の検査がすり抜ける."""
+        wide = [scrp.display_width(scrp.strip_tags(l))
+                for l in scrp.split_lines("あみ<BREAK>むしをつかまえる")]
+        self.assertEqual(wide, [2.0, 8.0], f"行ごとの幅が {wide}")
+
+    def test_no_tag_is_left_unknown(self):
+        """boku2.py が書ける記号を原本から数え上げ、割る側が知っているか見る.
+
+        新しい記号を足したときに、この検査ごと考え直させるのが狙い。
+        """
+        import re
+
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        # decode_text が tags=True のときに出す記号だけを拾う
+        block = src[src.index("def decode("):src.index("def parse_glyph_table")]
+        names = {t for t in re.findall(r'"<([A-Z]+)[:>]', block)}
+        self.assertEqual(names, {"BR", "BREAK", "WAIT", "VOICE"},
+                         f"boku2.py の記号が変わっている: {sorted(names)}。"
+                         "増えたなら、行・ページ・幅のどれとして扱うかを決めてここに書く")
+        # 引数の形も原本に合わせる (<WAIT:0A> は 2 桁、<VOICE:01234567> は 8 桁)
+        samples = {"BR": "<BR>", "BREAK": "<BREAK>",
+                   "WAIT": "<WAIT:0A>", "VOICE": "<VOICE:01234567>"}
+        # (1) どの記号も、幅には数えない。1 つでも素通りすると幅の検査がずれる
+        for name, tag in samples.items():
+            self.assertEqual(scrp.strip_tags(f"あ{tag}い"), "あい",
+                             f"{tag} がタグとして扱われず、幅に数えられている")
+        # (2) 行を割るのは <BR> と <BREAK>。<WAIT> は行の途中、<VOICE> は目印
+        for name, tag in samples.items():
+            want = ["あ", "い"] if name in ("BR", "BREAK") else [f"あ{tag}い"]
+            self.assertEqual(scrp.split_lines(f"あ{tag}い"), want,
+                             f"{tag} の行の割り方が違う")
+        # (3) ページを割るのは <WAIT> と <BREAK>
+        for name, tag in samples.items():
+            pages = proofread.pages_of(f"あ{tag}い")
+            want = 2 if name in ("WAIT", "BREAK") else 1
+            self.assertEqual(len(pages), want, f"{tag} のページの割り方が違う ({pages})")
+
+
 class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
     """遅延スロットの印が、画面と CLI の両方に出ること (#103).
 

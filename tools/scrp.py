@@ -85,7 +85,11 @@ TAG_ARGC = {name: argc for _, (name, argc) in CONTROL_CODES.items()}
 #: TSV 上では '<' がタグの開始文字なので、文字としての '<' はこのタグで書く
 LITERAL_TAGS = {"LT": "<"}
 
-TAG_RE = re.compile(r"<([A-Z]+)(?::([0-9A-Fa-f]{2}))?>")
+#: 引数は 2〜8 桁の 16 進。2 桁しか認めていなかったので、僕の夏休み 2 側が書く
+#: `<VOICE:01234567>` (音声の 8 桁) が**タグとして見えず**、表示幅を数えるときに
+#: 生の 16 文字として数えられていた (#105)。SCRP の書き出し側は 2 桁しか受け付け
+#: ないので、そちらは encode_text が桁数を見て断る。
+TAG_RE = re.compile(r"<([A-Z]+)(?::([0-9A-Fa-f]{2,8}))?>")
 
 
 class ScrpError(Exception):
@@ -277,6 +281,9 @@ def encode_message(text: str, codec: Codec) -> bytes:
                 argc = TAG_ARGC[tag]
                 if argc and arg is None:
                     raise ScrpError(f"<{tag}> には 2 桁の 16 進引数が必要です")
+                if argc and len(arg) != 2:
+                    # SCRP の引数は 1 バイト。長い引数は僕の夏休み 2 側の書き方 (#105)
+                    raise ScrpError(f"<{tag}> の引数は 2 桁です (もらったのは {len(arg)} 桁: {arg})")
                 if not argc and arg is not None:
                     raise ScrpError(f"<{tag}> は引数を取りません")
                 out.append(TAG_BYTES[tag])
@@ -329,8 +336,14 @@ def display_width(text: str, tag_widths: dict[str, float] | None = None) -> floa
 
 
 def split_lines(text: str) -> list[str]:
-    """<BR> / <CLEAR> でメッセージを行に割る (<CLEAR> はページ送り扱い)."""
-    normalized = text.replace("<CLEAR>", "<BR>")
+    """<BR> / <CLEAR> / <BREAK> でメッセージを行に割る (後ろ 2 つはページ送り扱い).
+
+    <BREAK> は僕の夏休み 2 の取り出し側 (boku2.py) が、引数の無いページ送り
+    (0x8002 を ALT_BREAK_FILES で読んだもの) に付ける書き方。ここが知らないと、
+    item_info.msg のような**メニュー 7 ファイル**では 2 行が 1 行として数えられ、
+    行数も幅も間違って測る。取り出す側が書く記号を、測る側が知らなかった (#105)。
+    """
+    normalized = text.replace("<CLEAR>", "<BR>").replace("<BREAK>", "<BR>")
     return normalized.split("<BR>")
 
 
