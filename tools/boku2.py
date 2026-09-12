@@ -566,7 +566,9 @@ def expand_inputs(paths: list[str]) -> list[str]:
 
 # 本体の中で、会話以外の文言 (日記の雛形・保存画面・出来事の文・釣りの文言) が入っている
 # 入れ物。公開ソースの IMG_MAP_FILES / IMG_MAP_FILES_TYPE_0 / RAW_MSG_FILES から
-TEXT_CONTAINERS = {"diary.bin", "saveload.bin", "on_mem_event.bin", "fish_on_mem.bin"}
+#: 並び順のまま出す。集合にして sorted すると、画面 (web/app.js の CONTAINERS) と
+#: 「見つからない」の並びが違ってしまう。同じ報告のはずのものが違って見える (#104)
+TEXT_CONTAINERS = ("diary.bin", "saveload.bin", "on_mem_event.bin", "fish_on_mem.bin")
 
 
 def used_codes(paths: list[str]) -> list[int]:
@@ -681,17 +683,14 @@ def check(folder: str, out=sys.stdout) -> int:
     named = sum(1 for e in entries if not os.path.basename(e["path"]).startswith("#"))
     dupes = sum(1 for e in entries if "~" in os.path.basename(e["path"]))
     used = sum(e["len"] for e in entries)
-    first_names = []
-    q = rec_end
-    while len(first_names) < 6 and q < len(idx):
-        e = idx.find(b"\0", q)
-        if e < 0:
-            break
-        first_names.append(idx[q:e].decode("ascii", "replace"))
-        q = e + 1
     say(f"レコード {rec_count} 件 (名前の置き場は 0x{rec_end:X} から) / ファイル {len(entries)} 件 / 名前が付いた {named} 件"
         + (f" / 同じ名前 {dupes} 件" if dupes else ""))
-    say(f"最初の名前: {' / '.join(first_names)}")
+    # フォルダを解決した後の名前を出す。以前は名前の置き場から生の文字列を順に
+    # 読んでいたので、根の "/" やフォルダ名そのもの (`00diary`) が混ざり、
+    # ファイルはフォルダ抜きで並んでいた (`nik000.tm2`)。docs/10 が 20 分の所で
+    # 見るよう言っているのは**フォルダ付きの名前が並ぶか**なので、解決できて
+    # いるのに「付いていない」に見える。unpack が実際に書くのはこちらの名前 (#104)
+    say(f"最初の名前: {' / '.join(e['path'] for e in entries[:5])}")
     # 「索引が指す合計」が本体に対して何割か。読み方が合っていれば本体はだいたい
     # 使い切られる。低いと、索引の読み方 (レコードの長さや位置の単位) が外れている
     # 疑いが濃い。数字だけ出して判定に使っていなかったので、12% でも「問題なし」と
@@ -725,8 +724,9 @@ def check(folder: str, out=sys.stdout) -> int:
     msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
     fonts = [e for e in entries if "font" in os.path.basename(e["path"]).lower()]
     say(f".msg: {len(msgs)} 件 (例: {', '.join(os.path.basename(e['path']) for e in msgs[:4])})")
-    found = sorted({os.path.basename(e["path"]).lower() for e in entries} & TEXT_CONTAINERS)
-    missing = sorted(TEXT_CONTAINERS - set(found))
+    bases = {os.path.basename(e["path"]).lower() for e in entries}
+    found = [n for n in TEXT_CONTAINERS if n in bases]
+    missing = [n for n in TEXT_CONTAINERS if n not in bases]
     say(f"[入れ物] 文言の入れ物: あり {', '.join(found) or 'なし'}"
         + (f" / 見つからない {', '.join(missing)}" if missing else ""))
 

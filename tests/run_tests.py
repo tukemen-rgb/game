@@ -2888,7 +2888,12 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertIn("問題なし", res.stdout)
             self.assertIn("[フォント] system/bk_font.tms: TIM2 (位置 0x80)", res.stdout)
             self.assertIn("[入れ物] 文言の入れ物: あり diary.bin, fish_on_mem.bin", res.stdout)
-            self.assertIn("見つからない on_mem_event.bin, saveload.bin", res.stdout)
+            # 並びは TEXT_CONTAINERS のとおり (画面の CONTAINERS と同じ順。#104)
+            self.assertIn("見つからない saveload.bin, on_mem_event.bin", res.stdout)
+            # フォルダ付きの名前が出ること。docs/10 が 20 分の所で見ろと言っている
+            # のはこれで、以前は生の名前を並べていてフォルダが付かなかった (#104)
+            self.assertIn("最初の名前: diary.bin / fish_on_mem.bin / 00diary/nik000.tm2",
+                          res.stdout)
             self.assertIn("1 番が会話だった 2 件", res.stdout)
             self.assertNotIn("はじめから", res.stdout)          # 本文は出さない
             broken = os.path.join(tmp, "BROKEN")
