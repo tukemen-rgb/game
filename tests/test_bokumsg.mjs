@@ -11,7 +11,7 @@ if (s < 0 || e < 0) { console.error("app.js に bokumsg マーカーが無い");
 const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
-  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable, glyphsToHexTable, parseBokuMsgRaw, parseSjisList, bokuGlyphVerdict };")(u32le, u16le);
+  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable, glyphsToHexTable, parseBokuMsgRaw, parseSjisList, bokuGlyphVerdict, bokuMapDerivedCount };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -143,6 +143,41 @@ if (!mp12 || mp12.rec !== 12) fail("12 バイト刻みの入れ物を読めな�
 /* 後ろの項目が空でも、12 バイト刻みを 8 バイト刻みと誤認しない (部品が多く取れる方を採る) */
 const mp12b = m.parseBokuMap(buildMap([partA, null, partText], 12));
 if (!mp12b || mp12b.rec !== 12 || mp12b.items.filter((it) => it.len).length !== 2) fail(`空の項目を挟んだ 12 バイト刻みが ${mp12b && mp12b.rec}`);
+
+/* 先頭の u32 が「項目数」ではなく「種別 ID」だった場合でも読めること (#126)。
+   公開ソースの unpackMap はそこを header_ID (たいてい 0xE) として読み捨て、
+   項目は +4 から最初の位置まで並んでいるものとして回している。
+   こちらの数え方 (先頭 = 項目数) が 1〜64 の外に出ると、前は「入れ物ではない」と
+   言っていた。控えの数え方が効くことを、本物の parseBokuMap で確かめる */
+{
+  const parts = [new Uint8Array(32).fill(0x41), new Uint8Array(48).fill(0x42),
+                 new Uint8Array(16).fill(0x43)];
+  const mkIdent = (ident) => {
+    const head = 0x80;
+    let total = head;
+    for (const p of parts) total += Math.ceil(p.length / 16) * 16;
+    const out = new Uint8Array(total);
+    const dv = new DataView(out.buffer);
+    dv.setUint32(0, ident, true);
+    let off = head;
+    parts.forEach((p, i) => {
+      dv.setUint32(4 + i * 8, off, true);
+      dv.setUint32(8 + i * 8, p.length, true);
+      out.set(p, off);
+      off += Math.ceil(p.length / 16) * 16;
+    });
+    return out;
+  };
+  for (const ident of [0xE, 3, 100, 0, 0xFFFF]) {
+    const got = m.parseBokuMap(mkIdent(ident));
+    const filled = got ? got.items.filter((it) => it.len).length : 0;
+    if (filled !== 3) fail(`先頭 u32 が ${ident} の入れ物を読めない (部品 ${filled} 個)`);
+  }
+  /* 控えが先に効いてしまうと 12 バイト刻みを取り違えるので、順番も固定する */
+  if (m.bokuMapDerivedCount(mkIdent(0xE), 8) !== 15) {
+    fail(`控えの数え方が (0x80-4)/8 になっていない: ${m.bokuMapDerivedCount(mkIdent(0xE), 8)}`);
+  }
+}
 if (m.parseBokuMap(msg8)) fail(".msg を入れ物と誤認した");
 if (m.parseBokuMap(sjis)) fail("テキストを入れ物と誤認した");
 

@@ -4213,6 +4213,98 @@ class TestAgainstThePublicSource(unittest.TestCase):
                 total += 1
         self.assertGreaterEqual(total, 4, f"比べた項目が {total} 件しかない")
 
+    def their_unpack_map(self):
+        """公開ソースの `unpackMap` を切り出して返す (入れ物の切り分け側)."""
+        import re
+        import types
+
+        path = os.path.join(PUBLIC_SRC, "UNPACK.py")
+        if not os.path.isfile(path):
+            self.skipTest("公開ソースに UNPACK.py が無い")
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+        m = re.search(r"^def unpackMap\(.*?(?=^def |\Z)", src, re.S | re.M)
+        if not m:
+            self.skipTest("公開ソースに unpackMap が見つからない (作りが変わった)")
+        ns = {"os": os, "resource": self.ns["resource"], "log": lambda *a, **k: None}
+        exec(m.group(0), ns)
+        return ns["unpackMap"]
+
+    def parts_theirs(self, unpack_map, data: bytes, type_: int) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "m.bin")
+            with open(src, "wb") as fh:
+                fh.write(data)
+            out = os.path.join(tmp, "out")
+            unpack_map(src, out, type_)
+            got = {}
+            if os.path.isdir(out):
+                for name in os.listdir(out):
+                    with open(os.path.join(out, name), "rb") as fh:
+                        got[int(name.split(".")[0])] = fh.read()
+            return got
+
+    def parts_ours(self, data: bytes) -> tuple[int | None, dict]:
+        r = boku2.parse_map_rec(data)
+        if not r:
+            return None, {}
+        rec, items = r
+        return rec, {it["i"]: data[it["at"]:it["at"] + it["len"]] for it in items if it["len"]}
+
+    def test_the_container_reading_matches_their_unpacker(self):
+        """入れ物の切り分けが、公開ソースの `unpackMap` と同じ部品を出すこと (#126).
+
+        docs/09 の表で「MAP の入れ物」は**合成データのみ**が根拠だった行。
+        向こうの `unpackMap` は実物で動いているので、突き合わせれば根拠が 1 段上がる。
+        """
+        unpack_map = self.their_unpack_map()
+        targets = [os.path.join(self.sample, "MAP", n)
+                   for n in sorted(os.listdir(os.path.join(self.sample, "MAP")))]
+        targets += [os.path.join(self.unpacked, n) for n in
+                    ("diary.bin", "saveload.bin", "on_mem_event.bin", "fish_on_mem.bin")]
+        compared = 0
+        for path in targets:
+            if not os.path.isfile(path):
+                continue
+            with open(path, "rb") as fh:
+                data = fh.read()
+            rec, ours = self.parts_ours(data)
+            self.assertTrue(ours, f"{os.path.basename(path)} を入れ物として読めない")
+            theirs = self.parts_theirs(unpack_map, data, 0 if rec == 12 else 1)
+            self.assertEqual(ours, theirs,
+                             f"{os.path.basename(path)}: 部品が公開ソースと違う "
+                             f"(こちら {sorted(ours)} / 向こう {sorted(theirs)})")
+            compared += 1
+        self.assertGreaterEqual(compared, 5, f"比べた入れ物が {compared} 個しかない")
+
+    def test_a_container_whose_first_u32_is_a_type_id_still_reads(self):
+        """先頭の u32 が項目数でなく種別 ID でも読めること (#126).
+
+        向こうの `unpackMap` はそこを `header_ID` (「たいてい (いつも?) 0xE」) として
+        読み捨て、項目は +4 から**最初の位置まで**並んでいるものとして回す。
+        数はどこにも書いていない。こちらは項目数として読んでいたので、
+        値が 1〜64 の外に出ると「入れ物ではない」と言っていた。
+        向こうの道具は実物で動いているほうなので、こちらが折れる。
+        """
+        unpack_map = self.their_unpack_map()
+        parts = [b"A" * 32, b"B" * 48, b"C" * 16]
+
+        def build(ident: int, head: int = 0x80) -> bytes:
+            out, off = struct.pack("<I", ident), head
+            for p in parts:
+                out += struct.pack("<II", off, len(p))
+                off += (len(p) + 15) // 16 * 16
+            out += b"\0" * (head - len(out))
+            return out + b"".join(p + b"\0" * ((16 - len(p) % 16) % 16) for p in parts)
+
+        for ident in (0xE, 3, 100, 0, 0xFFFF):
+            data = build(ident)
+            theirs = self.parts_theirs(unpack_map, data, 1)
+            self.assertEqual(len(theirs), 3,
+                             f"前提が崩れた: 公開ソースが 先頭 {ident} を {len(theirs)} 個と読む")
+            _, ours = self.parts_ours(data)
+            self.assertEqual(ours, theirs, f"先頭 u32 が {ident} の入れ物で食い違う")
+
 
 class TestEveryTagTheExtractorWritesIsUnderstood(unittest.TestCase):
     """取り出す側が書く記号を、測る側が全部知っていること (#105).

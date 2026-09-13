@@ -4812,12 +4812,38 @@ function parseBokuMsgTables(b) {
  *   N 個の項目 (8 バイト: u32 位置 / u32 長さ。まれに 12 バイト)。位置 0 は空
  *   最初の項目の位置が見出しの長さ (だいたい 0x80)。各部品は 16 バイト揃え
  */
+/** 項目数を「最初の 0 でない位置まで」から割り出す (#126)。
+ *
+ *  こちらは先頭の u32 を項目数として読んでいる。公開ソースの `unpackMap` はそこを
+ *  `header_ID` (「たいてい (いつも?) 0xE」) として読み捨て、項目は +4 から
+ *  **最初の位置まで**並んでいるものとして回す。数はどこにも書いていない。
+ *  先頭が本当に種別 ID なら、1〜64 の外に出た瞬間にこちらは「入れ物ではない」と
+ *  言ってしまうので、**こちらの数え方で読めなかったときの控え**に使う。
+ *  先に候補へ混ぜると、12 バイト刻みを 8 バイト刻みと読み違えるので順番が要る。
+ */
+function bokuMapDerivedCount(b, rec) {
+  for (let i = 0; i < (b.length - 4) / rec; i++) {
+    const off = u32le(b, 4 + i * rec);
+    if (!off) continue;
+    const derived = Math.floor((off - 4) / rec);
+    return derived >= 1 && derived <= 64 ? derived : null;
+  }
+  return null;
+}
+
 function parseBokuMap(b) {
   if (b.length < 16) return null;
-  const n = u32le(b, 0);
-  if (n < 1 || n > 64) return null;
+  const declared = u32le(b, 0);
+  const best = bestBokuMap(b, declared >= 1 && declared <= 64 ? [[8, declared], [12, declared]] : []);
+  if (best) return best;
+  /* こちらの数え方では読めなかった。公開ソースの数え方で読み直す */
+  return bestBokuMap(b, [8, 12]
+    .map((r) => [r, bokuMapDerivedCount(b, r)]).filter(([, c]) => c !== null));
+}
+
+function bestBokuMap(b, tries) {
   let best = null;
-  for (const rec of [8, 12]) {
+  for (const [rec, n] of tries) {
     const head = 4 + n * rec;
     if (head > b.length) continue;
     const items = [];

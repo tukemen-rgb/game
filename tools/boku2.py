@@ -190,15 +190,47 @@ def parse_map(b: bytes) -> list[dict] | None:
     return got[1] if got else None
 
 
+def map_rec_derived_count(b: bytes, rec: int) -> int | None:
+    """項目数を「最初の 0 でない位置まで」から割り出す (#126).
+
+    こちらは先頭の u32 を**項目数**として読んでいる。公開ソースの `unpackMap` は
+    そこを `header_ID` (「たいてい (いつも?) 0xE」) として読み捨て、項目は +4 から
+    **最初の位置まで**並んでいるものとして回す。数はどこにも書いていない。
+
+    どちらで読んでも部品は同じになる (余りは 0 埋めなので空として飛ばされる)。
+    ただし先頭が本当に種別 ID なら、値が 1〜64 の外に出た瞬間にこちらは
+    「入れ物ではない」と言ってしまう。向こうの道具は実物で動いているので、
+    **こちらの数え方でどうしても読めなかったときの控え**として使う。
+    先に候補へ混ぜると、12 バイト刻みの入れ物を 8 バイト刻みと読み違える
+    (数が増えるぶん空の項目をまたいで辻褄が合ってしまう) ので、順番が要る。
+    """
+    for i in range((len(b) - 4) // rec):
+        off = struct.unpack_from("<I", b, 4 + i * rec)[0]
+        if not off:
+            continue
+        derived = (off - 4) // rec
+        return derived if 1 <= derived <= 64 else None
+    return None
+
+
 def parse_map_rec(b: bytes) -> tuple[int, list[dict]] | None:
     """入れ物を読み、(項目の刻み, 部品の一覧) を返す。刻み 8 が普通、12 は日記・保存画面など."""
     if len(b) < 16:
         return None
-    n = struct.unpack_from("<I", b, 0)[0]
-    if not 1 <= n <= 64:
-        return None
+    declared = struct.unpack_from("<I", b, 0)[0]
+    tries = [(rec, declared) for rec in (8, 12) if 1 <= declared <= 64]
+    best = _best_map_rec(b, tries)
+    if best is None:
+        # こちらの数え方では読めなかった。公開ソースの数え方で読み直す
+        tries = [(rec, c) for rec in (8, 12)
+                 if (c := map_rec_derived_count(b, rec)) is not None]
+        best = _best_map_rec(b, tries)
+    return (best[1], best[2]) if best else None
+
+
+def _best_map_rec(b: bytes, tries: list[tuple[int, int]]):
     best = None
-    for rec in (8, 12):
+    for rec, n in tries:
         head = 4 + n * rec
         if head > len(b):
             continue
@@ -220,7 +252,7 @@ def parse_map_rec(b: bytes) -> tuple[int, list[dict]] | None:
             filled = sum(1 for it in items if it["len"])
             if best is None or filled > best[0]:
                 best = (filled, rec, items)
-    return (best[1], best[2]) if best else None
+    return best
 
 
 def split_map(path: str, out_dir: str) -> int:
