@@ -4458,6 +4458,123 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestTheHeaderIsNotText(unittest.TestCase):
+    """見出しとポインタ表のバイトを「文字表に足せ」と言わないこと (#129).
+
+    課題 3 は「表に無いバイト」の一覧を見て、その値を文字表に足していく課題。
+    ところが一覧は**窓の中の全部**を数えていた。`work/MSG_ENC.BIN` の本文は
+    0xAC から始まり、既定の窓 (先頭 256 バイト) はほとんどが見出しとポインタ表。
+    そのため **完成した答えの表 `answers/custom.tbl` を渡しても**
+    「9 種類 / 98 個 足りない」と出て、言われたとおりに足すと
+    文字でない値が 8 つ表に混ざる。
+
+    ここでは「答えの表なら本文の中で 0 個」と「外の分は足せと言わない」を見る。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/MSG_ENC.BIN", "make_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        cls.enc = os.path.join(REPO, "work", "MSG_ENC.BIN")
+        cls.tbl = os.path.join(REPO, "answers", "custom.tbl")
+
+    def run_dump(self, *args) -> str:
+        import subprocess
+
+        r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "hexdump.py"),
+                            self.enc, "--table", self.tbl, *args],
+                           capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout + r.stderr
+
+    def test_the_answer_table_leaves_nothing_to_add(self):
+        """答えの表なら、既定の窓でも「足すもの」は 0 件であること."""
+        out = self.run_dump()
+        self.assertIn("本文の中には 0 個", out, out[-500:])
+        self.assertNotIn("に「16 進=文字」の行を足します", out,
+                         "答えの表なのに、まだ足せと言っている")
+
+    def test_the_header_bytes_are_named_but_not_counted_as_missing(self):
+        """見出し側の分は、数だけ報せて「足すもの」には数えないこと."""
+        out = self.run_dump()
+        self.assertIn("そこは文字ではないので", out, out[-500:])
+        # 本文の外にある値 (ポインタの 0x00 など) を「足す値」として挙げていないこと
+        self.assertNotIn("  0x00  ", out, "ポインタ表の 0x00 を足す値として挙げている")
+
+    def test_the_body_range_really_starts_after_the_pointer_table(self):
+        """前提の確認: 本文は見出し + ポインタ表のあとから始まる.
+
+        ここが崩れると上の 2 件は空振りする (既定の窓が本文だけになる)。
+        """
+        import hexdump
+
+        bodies = hexdump.body_ranges(self.enc)
+        self.assertTrue(bodies, "SCRP として本文の範囲が取れない")
+        archive = scrp.read_archive(self.enc)
+        head_end = 0x10 + archive.count * 4
+        # 本文はポインタ表の**直後**から始まる (0x10 + 39×4 = 0xAC。課題 1 の 4 つ目の問い)
+        self.assertGreaterEqual(min(a for a, _ in bodies), head_end,
+                                "本文がポインタ表と重なっている (前提が崩れた)")
+        self.assertLess(head_end, 256, "既定の窓に見出しが入らない (この検査が空振りする)")
+
+    def test_a_missing_byte_inside_the_body_is_still_reported(self):
+        """本文の中の不足は今までどおり出ること (消しすぎていないこと)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(self.tbl, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+            part = os.path.join(tmp, "part.tbl")
+            with open(part, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(l for i, l in enumerate(lines) if i % 3))
+            import subprocess
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "hexdump.py"),
+                                self.enc, "--table", part, "--message", "0"],
+                               capture_output=True, text=True, cwd=REPO)
+        out = r.stdout + r.stderr
+        self.assertIn("表に無いバイトが", out, out[-400:])
+        self.assertIn("行を足します", out, "本文の中の不足なのに足せと言わない")
+
+    def test_the_answer_table_can_really_be_regenerated(self):
+        """`answers/README.md` の「消しても復元できます」を確かめる (#129).
+
+        消さずに、別の場所へ書き出して committed のものと突き合わせる。
+        """
+        import subprocess
+
+        with open(os.path.join(REPO, "answers", "README.md"), encoding="utf-8") as fh:
+            self.assertTrue("消しても復元できます" in fh.read(),
+                            "README がこの約束をしていない (検査の前提)")
+        with tempfile.TemporaryDirectory() as tmp:
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "make_sample.py"),
+                                "--out", os.path.join(tmp, "work"),
+                                "--answers", os.path.join(tmp, "answers")],
+                               capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            made = os.path.join(tmp, "answers", "custom.tbl")
+            self.assertTrue(os.path.isfile(made), "make_sample.py が custom.tbl を書かない")
+            with open(made, encoding="utf-8") as fh:
+                fresh = fh.read()
+        with open(self.tbl, encoding="utf-8") as fh:
+            committed = fh.read()
+        self.assertEqual(fresh, committed,
+                         "作り直した custom.tbl が、置いてあるものと違う")
+
+    def test_a_file_that_is_not_scrp_keeps_the_old_report(self):
+        """SCRP でないファイルでは、範囲が分からないので今までどおり全部数える."""
+        import subprocess
+
+        problem = ensure_practice("work/FONT.BIN", "make_sample.py")
+        if problem:
+            self.skipTest(problem)
+        r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "hexdump.py"),
+                            os.path.join(REPO, "work", "FONT.BIN"),
+                            "--table", self.tbl, "--length", "64"],
+                           capture_output=True, text=True, cwd=REPO)
+        out = r.stdout + r.stderr
+        self.assertIn("表に無いバイトが", out, out[-400:])
+        self.assertNotIn("本文の中に", out, "SCRP でないのに本文の範囲を語っている")
+
+
 class TestTheQaAnswerKeyIsTrue(unittest.TestCase):
     """課題 5・6 の答え (`answers/qa_answers.md`) を、道具に通して確かめる (#128).
 

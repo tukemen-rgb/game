@@ -63,7 +63,21 @@ def text_pane(decoded: dict[int, str], base: int, stop: int) -> str:
     return "".join(decoded[i] for i in range(base, stop) if i in decoded)
 
 
-def unknown_report(data: bytes, decoded: dict[int, str], table_path: str) -> list[str]:
+def body_ranges(path: str) -> list[tuple[int, int]] | None:
+    """SCRP なら本文 (メッセージ) の範囲を返す。そうでなければ None (#129).
+
+    見出しとポインタ表は**文字ではない**ので、そこに出た「表に無いバイト」を
+    文字表に足してはいけない。範囲が分かるときだけ分けて数える。
+    """
+    try:
+        archive = scrp.read_archive(path)
+    except Exception:
+        return None
+    return [(p, p + len(archive.raw_block(i))) for i, p in enumerate(archive.pointers)]
+
+
+def unknown_report(data: bytes, decoded: dict[int, str], table_path: str,
+                   bodies: list[tuple[int, int]] | None = None) -> list[str]:
     """表に無いバイトを数えて並べる (課題 3 の「手で足す」の材料).
 
     文字欄では表に無いバイトが「.」になるだけなので、**どの値が足りないのか**が
@@ -72,14 +86,31 @@ def unknown_report(data: bytes, decoded: dict[int, str], table_path: str) -> lis
     もう 1 つ、黙って間違える所がある。2 バイトで 1 文字のコードは、前半が表に
     無いと**後半だけが別の 1 文字として読まれる**。「旅」(E0 3E) が「.ま」になり、
     それらしい日本語に見えてしまう。だから「次の文字は当てにできない」と言う。
+
+    そして 3 つ目 (#129)。**見出しとポインタ表は文字ではない**。既定の窓
+    (先頭から 256 バイト) は `work/MSG_ENC.BIN` ではほぼ全部がそこなので、
+    **完成した答えの表を渡しても「9 種類 / 98 個 足りない」と出て**、
+    そのとおりに足すと文字でない値が 8 つ表に混ざる。`bodies` が分かるときは
+    本文の中だけを「足すもの」として数え、外は数だけ報せる。
     """
     from collections import Counter
 
-    tally = Counter(data[i] for i, ch in decoded.items() if ch == ".")
+    def in_body(i: int) -> bool:
+        return bodies is None or any(a <= i < b for a, b in bodies)
+
+    dots = [i for i, ch in decoded.items() if ch == "."]
+    outside = [i for i in dots if not in_body(i)]
+    decoded = {i: ch for i, ch in decoded.items() if ch != "." or in_body(i)}
+    tally = Counter(data[i] for i in dots if in_body(i))
     if not tally:
+        if outside:
+            return ["", f"表に無いバイトは本文の中には 0 個です "
+                        f"(見出しとポインタ表に {len(outside)} 個ありますが、"
+                        f"そこは文字ではないので足しません)"]
         return []
     total = sum(tally.values())
-    lines = [f"\n表に無いバイトが {len(tally)} 種類 / 計 {total} 個ありました:"]
+    where_note = "本文の中に " if bodies is not None else ""
+    lines = [f"\n表に無いバイトが {where_note}{len(tally)} 種類 / 計 {total} 個ありました:"]
     leads = []
     for value, count in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])):
         where = [i for i, ch in decoded.items() if ch == "." and data[i] == value]
@@ -106,6 +137,9 @@ def unknown_report(data: bytes, decoded: dict[int, str], table_path: str) -> lis
         shown = " ".join(f"{value:02X}{p:02X}" for p in pairs)
         lines.append(f"  0x{value:02X} が 2 バイトの前半なら、足すのは 1 行ではなく "
                      f"**{len(pairs)} 行** です (4 桁で: {shown})")
+    if outside:
+        lines.append(f"  見出しとポインタ表にも {len(outside)} 個ありますが、"
+                     "そこは文字ではないので**上には数えていません** (足すと表が汚れます)")
     return lines
 
 
@@ -175,7 +209,7 @@ def main() -> int:
         hex_part = " ".join(f"{b:02X}" for b in chunk).ljust(args.width * 3 - 1)
         print(f"{base:08X}  {hex_part}  {text_pane(decoded, base, stop)}")
     if args.table:
-        for line in unknown_report(data, decoded, args.table):
+        for line in unknown_report(data, decoded, args.table, body_ranges(args.binary)):
             print(line)
     return 0
 

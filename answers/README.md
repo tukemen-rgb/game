@@ -5,7 +5,7 @@
 | ファイル | 対応する課題 | 中身 |
 | --- | --- | --- |
 | `custom.tbl` | 課題 3 | `work/MSG_ENC.BIN` の文字テーブル |
-| `qa_answers.md` | 課題 5 | 仕込んだ不具合の一覧と直し方 |
+| `qa_answers.md` | 課題 5・6 | 仕込んだ不具合の一覧と直し方、入れ直したときの容量 |
 | `plant_errors.py` | 課題 5 | `exercises/qa_target.tsv` を作るスクリプト |
 
 `custom.tbl` は `tools/make_sample.py` が毎回書き出すので、消しても復元できます。
