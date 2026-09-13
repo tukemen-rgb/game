@@ -4363,6 +4363,104 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestTheCorrelationNumbersAreMeasured(unittest.TestCase):
+    """docs/07 の「縦の相関」の表を、実際に測り直す (#111).
+
+    docs/07 は練習データの縦の相関を表にしている (フォント 0.59 / 独自コードの
+    文章 0.99)。**しきい値 0.82 をまたぐかどうか**の根拠なので、数字がずれると
+    「はっきり分かれます」という説明の足場が無くなる。
+
+    #102 と同じ型の穴だが、こちらは**もっと悪い形**で見つかった。同じ測定値が
+    `web/app.js` の説明文にも書いてあり、そちらは **0.56 / 0.97** と
+    docs/07 (**0.59** / 0.97) と食い違っていた。実際に測ると 0.59 / 0.99 で、
+    **両方とも古かった** (docs/07 は片方だけ合っていた)。書き写した数字は必ず腐る。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/FONT.BIN", "make_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        for name in ("FONT.BIN", "MSG_ENC.BIN"):
+            if not os.path.exists(os.path.join(REPO, "work", name)):
+                raise unittest.SkipTest(f"work/{name} がありません")
+
+    @staticmethod
+    def measure(name: str) -> float:
+        """web/app.js の lagRatio を**そのまま**動かし、全窓での最小を返す.
+
+        道具が使う関数を動かす (書き写さない。#103・#109 で 3 度踏んだ穴)。
+        """
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('function meanGapDiff'),b=s.indexOf('function tileScore');"
+            "if(a<0||b<0){console.error('no tile funcs');process.exit(2);}"
+            "const m=new Function(s.slice(a,b)+'\\nreturn {lagRatio};')();"
+            "const LAGS=[8,16,24,32,64,128],W=4096;"
+            f"const buf=new Uint8Array(fs.readFileSync('work/{name}'));"
+            "let best=9;"
+            "for(let o=0;o+1024<=buf.length;o+=W){const w=buf.subarray(o,Math.min(o+W,buf.length));"
+            "for(const l of LAGS){const r=m.lagRatio(w,l);if(r<best)best=r;}}"
+            "console.log(JSON.stringify(best));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("lagRatio を動かせない: " + res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    def doc_row(self, needle: str) -> float:
+        import re
+
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        rows = [ln for ln in doc.split("\n") if ln.startswith("|") and needle in ln]
+        self.assertEqual(len(rows), 1, f"docs/07 に「{needle}」の行が {len(rows)} 本")
+        got = re.findall(r"\*?\*?(\d\.\d\d)\*?\*?", rows[0])
+        self.assertEqual(len(got), 1, f"行から相関を 1 つ読めない: {rows[0]}")
+        return float(got[0])
+
+    def test_the_font_correlation_matches_the_doc(self):
+        got = round(self.measure("FONT.BIN"), 2)
+        self.assertEqual(got, self.doc_row("`FONT.BIN` (1bpp"),
+                         f"docs/07 の表と実測が違う (実測 {got})")
+
+    def test_the_text_correlation_matches_the_doc(self):
+        got = round(self.measure("MSG_ENC.BIN"), 2)
+        self.assertEqual(got, self.doc_row("`MSG_ENC.BIN` (独自"),
+                         f"docs/07 の表と実測が違う (実測 {got})")
+
+    def test_the_two_sit_on_opposite_sides_of_the_threshold(self):
+        """表の言う「はっきり分かれます」が本当であること (しきい値 0.82 をまたぐ)."""
+        import re
+
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            m = re.search(r"const TILE_RATIO_MAX = ([\d.]+);", fh.read())
+        self.assertTrue(m, "しきい値が読み取れない")
+        cut = float(m.group(1))
+        self.assertLess(self.measure("FONT.BIN"), cut, "フォントが絵として拾われない")
+        self.assertGreater(self.measure("MSG_ENC.BIN"), cut, "文章が絵として拾われてしまう")
+
+    def test_the_same_numbers_in_app_js_agree_with_the_doc(self):
+        """画面の説明文にも同じ 2 つが書いてある。2 か所あるので必ず突き合わせる."""
+        import re
+
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        m = re.search(r"フォントは\s*\*?\s*(\d\.\d\d)、独自文字コードのテキストは (\d\.\d\d)", js)
+        self.assertTrue(m, "web/app.js の説明文から 2 つの数字を読めない")
+        self.assertEqual(float(m.group(1)), self.doc_row("`FONT.BIN` (1bpp"),
+                         "app.js の説明文のフォントの相関が docs/07 と違う")
+        self.assertEqual(float(m.group(2)), self.doc_row("`MSG_ENC.BIN` (独自"),
+                         "app.js の説明文の文章の相関が docs/07 と違う")
+
+
 class TestTheNumbersInTheDocAreMeasured(unittest.TestCase):
     """docs/10 が書いている数字を、道具の側から測り直す (#102).
 
