@@ -4363,6 +4363,65 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestShortFilesAreNotCalledZeroFill(unittest.TestCase):
+    """ゼロが 1 バイトも無いものを「ほとんどがゼロ埋め」と言わないこと (#113).
+
+    `blockStats` は、末尾のゼロを除いた長さが 16 バイト未満のとき **`zeroRatio` を
+    1 と決め打ち**していた。区画のほとんどが詰め物なら実際 1 に近いので気づき
+    にくいが、**ファイルそのものが短いとき**は嘘になる。`01 02 03 04` の 4 バイトを
+    「ほとんどがゼロ埋め」と言い切っていた。
+
+    #112 で「判定には必ず根拠を出す」ようにしたので、この嘘は
+    **「内訳: ゼロ埋め 100%」という証拠つき**で出るようになっていた。
+    前の直しが、別の不具合の見た目を強めていた形。
+    """
+
+    @staticmethod
+    def classify(byte_list) -> tuple:
+        """web/app.js の blockStats / classifyStats をそのまま動かす."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('const SJIS_TRAIL'),b=s.indexOf('function guessPeriods');"
+            "if(a<0||b<0){console.error('no stats funcs');process.exit(2);}"
+            "const m=new Function(s.slice(a,b)+'\\nreturn {blockStats,classifyStats};')();"
+            f"const v=new Uint8Array({json.dumps(byte_list)});"
+            "const st=m.blockStats(v);"
+            "console.log(JSON.stringify([st.zeroRatio, m.classifyStats(st)]));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("blockStats を動かせない: " + res.stdout + res.stderr)
+        return tuple(json.loads(res.stdout))
+
+    def test_a_tiny_file_with_no_zeros_is_not_zero_fill(self):
+        ratio, cls = self.classify([1, 2, 3, 4])
+        self.assertEqual(ratio, 0.0, "ゼロが無いのに zeroRatio が 0 でない")
+        self.assertNotEqual(cls, "zero", "4 バイトの非ゼロを「ゼロ埋め」と分類している")
+
+    def test_a_short_ascii_file_is_not_zero_fill(self):
+        ratio, cls = self.classify(list(b"CONFIG=1"))
+        self.assertEqual(ratio, 0.0)
+        self.assertNotEqual(cls, "zero")
+
+    def test_a_padding_block_is_still_zero_fill(self):
+        """詰め物の区画 (中身が少しで末尾がゼロだらけ) は今までどおり「ゼロ埋め」."""
+        ratio, cls = self.classify(list(range(1, 11)) + [0] * 2038)
+        self.assertGreater(ratio, 0.9, f"詰め物のゼロ率が {ratio}")
+        self.assertEqual(cls, "zero", "詰め物がゼロ埋めと判定されなくなった")
+
+    def test_all_zeros_is_still_zero_fill(self):
+        ratio, cls = self.classify([0] * 64)
+        self.assertEqual(ratio, 1.0)
+        self.assertEqual(cls, "zero")
+
+
 class TestTheCorrelationNumbersAreMeasured(unittest.TestCase):
     """docs/07 の「縦の相関」の表を、実際に測り直す (#111).
 

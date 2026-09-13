@@ -152,7 +152,16 @@ function blockStats(whole) {
   let end = whole.length;
   while (end > 0 && whole[end - 1] === 0) end--;
   const padRatio = (whole.length - end) / whole.length;
-  if (end < 16) return { n: whole.length, entropy: 0, zeroRatio: 1, printRatio: 0, pairRatio: 0, meanDiff: 0, padRatio };
+  if (end < 16) {
+    /* 統計を取るには短すぎる。ゼロの割合だけは**実際に数える** (#113)。
+       ここを 1 と決め打ちしていたので、`01 02 03 04` のような 4 バイトの
+       ファイルまで「ほとんどがゼロ埋め」と言い切っていた。詰め物の区画
+       (末尾がゼロだらけ) なら数えても 1 に近くなるので、そちらの判定は変わらない */
+    let z = 0;
+    for (let i = 0; i < whole.length; i++) if (whole[i] === 0) z++;
+    return { n: whole.length, entropy: 0, zeroRatio: z / whole.length,
+             printRatio: 0, pairRatio: 0, meanDiff: 0, padRatio, scant: true };
+  }
   const b = whole.subarray(0, end);
   const n = b.length;
   const hist = new Uint32Array(256);
