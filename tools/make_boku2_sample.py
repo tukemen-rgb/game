@@ -156,6 +156,9 @@ ITEM_INFO = ["あみ<BREAK>むしをつかまえる", "つりざお<BREAK>さか
 # (公開ソース UNPACK.py の IMG_MAP_FILES)。入れ物の入れ子の確認用
 FISH = ["フナ<BR>ぬまにいる", "コイ<BR>かわにいる"]
 DIARY = ["きょうは、", "をした。", "たのしかった。"]     # 日記の雛形: 見出しの無い並び (diary.bin の 0 番)
+# 保存画面の文言: **Shift-JIS そのまま** (公開ソースの SJIS_FILES = system\~saveload\2.bin)。
+# ここだけ文字表が要らない。5 種類ある文言の置き場のうち、練習データに無かった最後の 1 つ (#116)
+SAVELOAD = ["セーブしますか？", "はい", "いいえ"]
 MAPS = {
     "M_A01000": [
         ["<VOICE:00010001>", "きょうはうみにいくんだ。<BR>いっしょにいこうよ。<WAIT:0A>",
@@ -193,6 +196,10 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
     inner = build_map([b"\x22" * 32, b"\x33" * 48, fish_msg])
     fish_on_mem = build_map([b"\x11" * 40, inner, None])
     answer["fish_on_mem"] = [(f"fish_on_mem#1#2:{i}", t) for i, t in enumerate(FISH)]
+    # 保存画面の入れ物: 2 番が Shift-JIS の並び (0x00 区切り)。文字表なしで読める
+    sjis = "\0".join(SAVELOAD).encode("cp932") + b"\0"
+    saveload = build_map([b"\x44" * 24, b"\x55" * 16, sjis])
+    answer["saveload"] = [(f"saveload#2:{i}", t) for i, t in enumerate(SAVELOAD)]
 
     font_tim2, _ = make_tim2.font_sheet(rows=(len(glyphs) + COLS - 1) // COLS, cols=COLS, cell=CELL)
     tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + font_tim2
@@ -203,6 +210,7 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
         (True, 1, "/", None),
         (False, 1, "diary.bin", diary),
         (False, 1, "fish_on_mem.bin", fish_on_mem),
+        (False, 1, "saveload.bin", saveload),
         (True, 1, "00diary", None),
     ] + [(False, 0 if i == 7 else 1, f"nik{i:03d}.tm2", photo[i]) for i in range(8)] + [
         (True, 1, "system", None),

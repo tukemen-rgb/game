@@ -2887,12 +2887,13 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertIn("DFI: 期待どおり", res.stdout)
             self.assertIn("問題なし", res.stdout)
             self.assertIn("[フォント] system/bk_font.tms: TIM2 (位置 0x80)", res.stdout)
-            self.assertIn("[入れ物] 文言の入れ物: あり diary.bin, fish_on_mem.bin", res.stdout)
+            self.assertIn("[入れ物] 文言の入れ物: あり diary.bin, saveload.bin, fish_on_mem.bin",
+                          res.stdout)
             # 並びは TEXT_CONTAINERS のとおり (画面の CONTAINERS と同じ順。#104)
-            self.assertIn("見つからない saveload.bin, on_mem_event.bin", res.stdout)
+            self.assertIn("見つからない on_mem_event.bin", res.stdout)
             # フォルダ付きの名前が出ること。docs/10 が 20 分の所で見ろと言っている
             # のはこれで、以前は生の名前を並べていてフォルダが付かなかった (#104)
-            self.assertIn("最初の名前: diary.bin / fish_on_mem.bin / 00diary/nik000.tm2",
+            self.assertIn("最初の名前: diary.bin / fish_on_mem.bin / saveload.bin / 00diary/nik000.tm2",
                           res.stdout)
             self.assertIn("1 番が会話だった 2 件", res.stdout)
             self.assertNotIn("はじめから", res.stdout)          # 本文は出さない
@@ -4361,6 +4362,74 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
         self.assertTrue(ui, "画面側が遅延スロットを 1 つも出していない")
         self.assertEqual(self.slots_from_cli(64), ui,
                          "遅延スロットの印が画面と CLI で食い違う")
+
+
+class TestAllFiveTextPlacesAreInThePractice(unittest.TestCase):
+    """docs/09 が挙げる 5 種類の文言の置き場が、練習データに全部あること (#116).
+
+    docs/09 の「現在地」は文言の置き場を 5 種類挙げている: MAP の会話 /
+    `.msg` 8 バイト刻み / 出来事 4 バイト刻み / 見出しの無い並び / **Shift-JIS**。
+    ところが練習データには **Shift-JIS のファイルが無かった**。`parse_sjis_list`
+    そのものには単体の検査があるが、**通し (切り分け → text → TSV) では
+    一度も通っていなかった**。素人が docs/10 をなぞっても、この形には出会えない。
+
+    読み方の自動判定は「前の段が成功したら後ろは試さない」ので、**どの段が
+    実際に使われるか**は題材しだい。題材に無い段は、順番の正しさも確かめられない。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        import subprocess
+        import tempfile
+
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        cls.tmp = tempfile.TemporaryDirectory()
+        out = os.path.join(cls.tmp.name, "OUT")
+        tsv = os.path.join(cls.tmp.name, "all.tsv")
+        for args in (["unpack", os.path.join(sample, "BOKU2.IDX"),
+                      os.path.join(sample, "BOKU2.IMG"), out],
+                     ["text", out, "-f", os.path.join(sample, "font.txt"), "-o", tsv]):
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py")] + args,
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                raise unittest.SkipTest(f"練習データを通せない: {r.stdout[-200:]}")
+        cls.rows = scrp.read_tsv(tsv)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_shift_jis_screen_text_comes_out(self):
+        """保存画面の Shift-JIS が、文字表なしでそのまま TSV に出ること."""
+        got = [r for r in self.rows if r["id"].startswith("saveload#")]
+        self.assertTrue(got, "Shift-JIS の行が 1 つも出ていない "
+                             f"(出た id: {sorted({r['id'].split(':')[0] for r in self.rows})})")
+        self.assertEqual([r["original"] for r in got],
+                         ["セーブしますか？", "はい", "いいえ"],
+                         "Shift-JIS の本文が違う")
+
+    def test_every_kind_of_place_is_represented(self):
+        """5 種類が揃っていること。1 つでも欠けたら、その読み方は通しで無検査になる."""
+        kinds = {r["id"].split(":")[0] for r in self.rows}
+        want = {
+            ".msg (8 バイト刻み)": "system",
+            "メニュー (ページ送り)": "item_info",
+            "出来事 (4 バイト刻み)": "fish_on_mem#1#2",
+            "見出しの無い並び": "diary#0",
+            "Shift-JIS": "saveload#2",
+        }
+        missing = [k for k, stem in want.items() if stem not in kinds]
+        self.assertFalse(missing, f"練習データに無い置き場: {missing} (出た id: {sorted(kinds)})")
+
+    def test_the_sample_builder_says_the_same(self):
+        """答えの一覧にも Shift-JIS が入っていること (答え合わせが片手落ちにならない)."""
+        import make_boku2_sample
+
+        self.assertIn("SAVELOAD", dir(make_boku2_sample), "練習データの作り手に文言が無い")
+        self.assertEqual(make_boku2_sample.SAVELOAD, ["セーブしますか？", "はい", "いいえ"])
 
 
 class TestTheStrideIsChosenByContent(unittest.TestCase):
