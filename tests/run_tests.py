@@ -3820,7 +3820,9 @@ class TestAgainstThePublicSource(unittest.TestCase):
         with open(res_py, encoding="utf-8") as fh:
             rsrc = fh.read()
         res = types.ModuleType("resource")
-        exec(take(rsrc, "readInt"), res.__dict__)
+        # resource.py 全体は PIL / numpy を要求するので、要る読み取り関数だけ取り出す
+        for helper in ("readInt", "readShort", "ReadString"):
+            exec(take(rsrc, helper), res.__dict__)
         cls.ns = {"resource": res, "MSG_MODE": 0, "MAP_MODE": 1,
                   "OFFSET_ONLY_MODE": 2, "EXTRACTION": 0}
         for name in ("readMSG", "convertRawToText", "readFont"):
@@ -3897,6 +3899,114 @@ class TestAgainstThePublicSource(unittest.TestCase):
                              f"{os.path.basename(path)}[{i}] の本文が公開ソースと違う")
             n += 1
         return n
+
+    def their_paths(self, idx_bytes: bytes, rec_count: int, names_at: int) -> list[str]:
+        """公開ソースの unpackIMG を、書き出しだけ差し替えて走らせ、作られる道筋を返す.
+
+        道筋を決める所 (フォルダの積み方) はそのまま向こうのコードが動く。
+        """
+        import io
+        import re
+        import types
+
+        with open(os.path.join(PUBLIC_SRC, "UNPACK.py"), encoding="utf-8") as fh:
+            up = fh.read()
+
+        def take(src, name):
+            m = re.search(rf"^def {name}\(.*?(?=^def |\Z)", src, re.S | re.M)
+            if not m:
+                raise unittest.SkipTest(f"公開ソースに {name} が無い")
+            return m.group(0)
+
+        written: list[str] = []
+
+        class FakeOut:
+            def write(self, b):
+                pass
+
+            def close(self):
+                pass
+
+        def fake_open(path, mode="r", *a, **k):
+            if "w" in mode:
+                written.append(path)
+                return FakeOut()
+            return io.BytesIO(idx_bytes if "idx" in os.path.basename(path).lower()
+                              else b"\0" * (1 << 16))
+
+        ns = {"resource": self.ns["resource"], "open": fake_open, "log": lambda m: None,
+              "os": types.SimpleNamespace(path=os.path, makedirs=lambda *a, **k: None),
+              "INDEX_PATH": "boku2.idx", "IMG_PATH": "boku2.img", "IMG_RIP_DIR": "R",
+              "DIR_START": 0x10, "IDX_ENTRY_SIZE": 0x10,
+              "NUM_IDX_ENTRIES": rec_count, "FILENAMES_START": names_at}
+        for name in ("getFileNames", "getIDX", "createDirPath", "unpackIMG"):
+            exec(take(up, name), ns)
+        ns["unpackIMG"]()
+        return [p[2:] if p.startswith("R/") else p for p in written]
+
+    @staticmethod
+    def build_index(shape):
+        """[(is_dir, more, name)] から DFI の索引バイト列を作る."""
+        import struct
+
+        recs = b"DFI\0" + b"\0" * 12
+        for i, (is_dir, more, _n) in enumerate(shape):
+            recs += struct.pack("<HHIII", 1 if is_dir else 0, more, 0, 1 + i, 16)
+        names = b"".join(n.encode("ascii") + b"\0" for _, _, n in shape)
+        return recs + names, len(shape), len(recs)
+
+    def test_the_folder_rule_matches_the_public_source(self):
+        """フォルダの閉じ方 (stack / flag) の決着 (#108).
+
+        docs/09 の「未解決」に長く残っていた唯一の形式の疑問。**実物でしか
+        決まらない**と書いてきたが、公開ソースの `unpackIMG` を合成索引に対して
+        走らせれば、少なくとも**向こうがどちらの規則で動いているか**は決まる。
+
+        小さな形を総当たりし、2 つの規則が食い違う形では毎回 flag と一致すること、
+        そして**食い違う形が実際に見つかっていること** (0 件なら何も確かめていない)
+        を見る。
+        """
+        import itertools
+
+        total = diff = rejected = 0
+        for combo in itertools.product([(1, 0), (1, 1), (0, 0), (0, 1)], repeat=5):
+            shape = [(1, 1, "/")] + [(d, m, f"{'d' if d else 'f'}{i}")
+                                     for i, (d, m) in enumerate(combo)]
+            if not any(not d for d, _, _ in shape[1:]):
+                continue
+            idx, n, at = self.build_index(shape)
+            ours_stack = [e["path"] for e in boku2.read_dfi(idx, 1 << 30, "stack")]
+            ours_flag = [e["path"] for e in boku2.read_dfi(idx, 1 << 30, "flag")]
+            try:
+                theirs = self.their_paths(idx, n, at)
+            except (AssertionError, IndexError):
+                # 向こうが「索引が壊れている」と断る形 (フォルダの積みが途中で
+                # 底を突く)。そもそも成り立たない索引なので比べる相手にならない
+                rejected += 1
+                continue
+            total += 1
+            self.assertEqual(theirs, ours_flag,
+                             f"公開ソースと flag が違う: {combo}\n"
+                             f"  彼ら {theirs}\n  flag {ours_flag}")
+            if ours_stack != ours_flag:
+                diff += 1
+        print(f"\n    フォルダ規則: 比べた形 {total} 通り "
+              f"(うち stack と flag が食い違う {diff} 通り) / 向こうが断った形 {rejected} 通り")
+        self.assertGreater(total, 100, f"試した形が {total} 通りしかない")
+        self.assertGreater(diff, 0,
+                           "stack と flag が食い違う形が 1 つも出ていない。"
+                           "それでは「flag と一致」に意味が無い (形の作り方を見直す)")
+
+    def test_the_default_rule_is_the_one_with_evidence(self):
+        """既定は flag。実物で動いている実装と同じ側にしておく (#108)."""
+        import inspect
+
+        sig = inspect.signature(boku2.read_dfi)
+        self.assertEqual(sig.parameters["rule"].default, "flag",
+                         "CLI の既定が flag でない")
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            self.assertIn('rule = rule || "flag"', fh.read(),
+                          "画面の既定が flag でない")
 
     def test_the_glyph_table_is_the_same_size_as_theirs(self):
         """向こうの font.txt は 1656 字。docs が言う 72 行 × 23 列の外からの裏付け."""
