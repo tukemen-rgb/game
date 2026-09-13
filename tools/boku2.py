@@ -1014,8 +1014,15 @@ def run(args) -> int:
                 print(f"文字表で全部読めました (使われている番号 {len(used_codes(files))} 種)", file=sys.stderr)
     elif args.cmd == "used":
         used = used_codes(expand_patterns(args.files))
+        if not used:
+            # 0 種を「この番号だけ書き出せばよい」と言うと、**書き出す番号が無い**のに
+            # 手順が進んだように読める。読めるファイルが無かっただけなので、そう言う (#123)
+            print("→ 使われている文字番号が 1 つも見つかりませんでした", file=sys.stderr)
+            print("   指定したファイルが .msg として読めていません。"
+                  "先に unpack / maps を回すか、boku2.py check で診てください", file=sys.stderr)
+            return 1
         print(" ".join(str(u) for u in used))
-        print(f"# {len(used)} 種 (最大 {used[-1] if used else 0})。フォント画像のこの番号だけ書き出せば本文は読める", file=sys.stderr)
+        print(f"# {len(used)} 種 (最大 {used[-1]})。フォント画像のこの番号だけ書き出せば本文は読める", file=sys.stderr)
     elif args.cmd == "table":
         glyphs = load_font(args.font) or []
         mapping = glyph_table_mapping(glyphs)

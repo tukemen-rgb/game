@@ -96,6 +96,16 @@ def main() -> int:
     if differ or only_left or only_right:
         print("\n== 結果: 一致しませんでした。入れ直しと取り出し直しの手順を見直してください")
         return 1
+    if not both:
+        # 突き合わせた行が 0 でも「全部一致しました」と言えてしまう。両方が空 (書き出し失敗) や
+        # --ignore で全部除いた場合がこれで、**何も確かめていないのに合格**になる。
+        # 課題 6・課題 8 の確認手順がこのコマンドの終了コードなので、黙って通すと痛い (#123)
+        print("\n→ 突き合わせた行が 1 行もありません。何も確かめていません")
+        if len(left) or len(right):
+            print(f"   --ignore で全部除かれています (左 {len(left)} 行 / 右 {len(right)} 行)")
+        else:
+            print("   どちらの TSV も見出しだけです。書き出しからやり直してください")
+        return 1
     print("\n== 結果: 全部一致しました")
     return 0
 

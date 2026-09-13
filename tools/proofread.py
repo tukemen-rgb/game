@@ -361,9 +361,29 @@ def main() -> int:
     font_chars = None
     if not args.no_font_check and os.path.exists(args.font_chars):
         font_chars = load_font_chars(args.font_chars)
+        if not font_chars:
+            # 空の文字表は、フォント検査を**黙って止める**。
+            # 「フォントに無い文字」は実機で □ になる字を当てる検査で、
+            # 実物では文字表を作りかけの段階で渡すことになる (docs/10 の 40 分の行)。
+            # 0 字のまま通すと「ERROR 0 件」が出て、□ が 1 つも無いと読めてしまう。
+            # 止めたいときは --no-font-check があるので、そちらを使ってもらう (#123)
+            print(f"→ 文字表 {args.font_chars} が 0 字です。フォント検査ができません")
+            print("   文字表を作ってから渡してください "
+                  "(構造探査台の「文字表の下書きを作る」/ boku2.py fontlist)")
+            print("   フォント検査だけ外して他を見たいなら --no-font-check を付けてください")
+            return 1
     names = load_names(args.names) if os.path.exists(args.names) else {}
 
     rows = scrp.read_tsv(args.tsv)
+    if not rows:
+        # 0 行を「ERROR 0 件」と言うと、**何も検査していないのに合格**になる。
+        # 課題 6 と docs/10 の合格条件がまさに「ERROR 0 件」なので、
+        # 見出しだけの TSV (貼り付け損ね・書き出し失敗) が黙って通ってしまう。
+        # `boku2.py text` が「文言が 1 行も見つかりませんでした」で 1 を返すのと揃える (#123)
+        print(f"→ 検査する行が 1 行もありません ({args.tsv} は見出しだけです)")
+        print("   よくある原因: 画面の「校正用の TSV をコピー」を貼り忘れた / 書き出しが空だった")
+        print("   中身があるのにこう出るなら、列の名前 (id / original / translation) を確かめてください")
+        return 1
     findings: list[Finding] = []
     tag_widths = tag_widths_of(rules, args.var_width)
     for row in rows:

@@ -284,12 +284,19 @@ python3 tools/boku2.py maps work/BOKU2SAMPLE/MAP/*.BIN -o work/OUT/maps
 python3 tools/boku2.py text work/OUT -f work/BOKU2SAMPLE/font.txt -o work/all.tsv
 ```
 
-**確認:** `work/all.tsv` の `original` 列が `work/BOKU2SAMPLE/answer.tsv` と全部一致する
-(音声の番号の行は TSV に入らないので、答えの `<VOICE:…>` は除いて比べる)。
+**確認:** `work/all.tsv` の `original` 列が `work/BOKU2SAMPLE/answer.tsv` と全部一致する。
 
 ```bash
-python3 tools/compare_tsv.py work/all.tsv work/BOKU2SAMPLE/answer.tsv --ignore "<VOICE:"
+python3 tools/compare_tsv.py work/all.tsv work/BOKU2SAMPLE/answer.tsv
 ```
+
+音声の番号の行 (`<VOICE:…>`) は既定では `text` が落とすので、どちらにも入りません。
+`text --keep-voice` で残したときだけ左に 2 行余るので、そのときは
+`--ignore "<VOICE:"` を足します。
+
+なお、**このコマンドが「全部一致しました」と言うのは、1 行以上比べたときだけ**です。
+両方が空だったり `--ignore` で全部除いたりすると、
+「突き合わせた行が 1 行もありません」と言って止まります (何も確かめていないので)。
 
 要点: ここまでの課題 1〜6 の道具 (16 進、文字テーブル、ポインタ表、フォント、校正) が、
 実物と同じ形でも **そのまま通る** こと。形式が変わっても考え方は変わらない。

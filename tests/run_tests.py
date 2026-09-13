@@ -4366,6 +4366,134 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestNothingIsNotAPass(unittest.TestCase):
+    """「0 件だから合格」を言わせない (#123).
+
+    課題 6 と docs/10 の「やり切ったかどうか」は、どちらも
+    **`proofread.py` が ERROR 0 件**・**往復の突き合わせが一致**を合格条件にしている。
+    ところがどちらも、**何も検査していないとき**にその条件を満たしてしまった:
+
+    * 見出しだけの TSV → 「0 行をチェック: ERROR 0 件」で終了コード 0
+    * 両方が空の突き合わせ → 「全部一致しました」で終了コード 0
+    * **0 字の文字表を渡すと、フォント検査が黙って止まる**。実機で □ になる字を
+      当てる検査で、実物では文字表を作りかけの段階で渡すことになるので、
+      いちばん踏みやすい。他の検査は普通に動くので出力も普通に見える
+    * `boku2.py used` が 0 種でも「この番号だけ書き出せば読める」と言う
+
+    `boku2.py text` は同じ形 (0 行) を「文言が 1 行も見つかりませんでした」+
+    終了コード 1 で断っていた。そちらに揃えた。ここでは 4 つとも、
+    **終了コードが 0 でないこと**と、合格の言葉を出さないことを見る。
+    """
+
+    def cli(self, tool, *args):
+        import subprocess
+
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tools", tool), *args],
+                             capture_output=True, text=True, cwd=REPO)
+        return res.returncode, res.stdout + res.stderr
+
+    def header_only(self, tmp, name="empty.tsv"):
+        path = os.path.join(tmp, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("id\toriginal\ttranslation\n")
+        return path
+
+    def test_proofread_refuses_a_tsv_with_no_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self.cli("proofread.py", self.header_only(tmp))
+        self.assertEqual(rc, 1, f"0 行の TSV が合格になった:\n{out}")
+        self.assertNotIn("ERROR 0 件", out, "0 行なのに「ERROR 0 件」と言っている")
+        self.assertIn("1 行もありません", out, out)
+
+    def test_compare_refuses_when_nothing_was_compared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.header_only(tmp, "a.tsv")
+            b = self.header_only(tmp, "b.tsv")
+            rc, out = self.cli("compare_tsv.py", a, b)
+        self.assertEqual(rc, 1, f"0 行同士の突き合わせが合格になった:\n{out}")
+        self.assertNotIn("全部一致しました", out, "何も比べていないのに「全部一致」")
+
+    def test_compare_refuses_when_ignore_removed_everything(self):
+        """--ignore で全部除いたときも、比べた行は 0 になる."""
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [{"id": "0", "original": "はい", "translation": "はい"}]
+            a, b = os.path.join(tmp, "a.tsv"), os.path.join(tmp, "b.tsv")
+            scrp.write_tsv(a, rows)
+            scrp.write_tsv(b, rows)
+            rc, out = self.cli("compare_tsv.py", a, b, "--ignore", "はい")
+        self.assertEqual(rc, 1, f"全部除いたのに合格になった:\n{out}")
+        self.assertNotIn("全部一致しました", out, "全部除いたのに「全部一致」")
+
+    def test_an_empty_font_table_does_not_silently_turn_the_check_off(self):
+        """0 字の文字表で、フォント検査が黙って止まらないこと.
+
+        止まっていることに気づけるかどうかが要点なので、
+        **同じ TSV を空でない文字表にかけると指摘が出る**ことも一緒に見る。
+        そうでないと「元から指摘が無い題材」を見て通ってしまう。
+        """
+        bad = "扉には薔薇の紋章が刻まれている。<WAIT>"          # 薔薇紋章刻 が data/font_chars.txt に無い
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.tsv")
+            scrp.write_tsv(path, [{"id": "0", "original": bad, "translation": bad}])
+            blank = os.path.join(tmp, "blank.txt")
+            open(blank, "w", encoding="utf-8").close()
+
+            rc_ok, out_ok = self.cli("proofread.py", path)                       # 既定の文字表
+            self.assertIn("ERROR font", out_ok,
+                          "題材にフォント外の字が無い。この検査が空振りしている")
+
+            rc, out = self.cli("proofread.py", path, "--font-chars", blank)
+            self.assertEqual(rc, 1, f"0 字の文字表が合格になった:\n{out}")
+            self.assertNotIn("ERROR 0 件", out, "フォント検査が止まったまま「ERROR 0 件」")
+            self.assertIn("0 字", out, out)
+
+            # 外したいときの道 (--no-font-check) は残っていること
+            rc_off, out_off = self.cli("proofread.py", path, "--font-chars", blank,
+                                       "--no-font-check")
+            self.assertEqual(rc_off, 0, f"--no-font-check で通らない:\n{out_off}")
+
+    def test_used_refuses_when_it_found_no_glyph_numbers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self.cli("boku2.py", "used", tmp)
+        self.assertEqual(rc, 1, f"0 種なのに合格になった:\n{out}")
+        self.assertNotIn("この番号だけ書き出せば", out,
+                         "書き出す番号が無いのに「この番号だけ書き出せば読める」")
+
+    def test_the_docs_quote_the_refusals_word_for_word(self):
+        """docs/10 の「困ったとき」が挙げる断り文句が、道具の出力に本当にあること.
+
+        #120〜#122 は 3 回続けて「文書が書いた実行結果が実際と違う」だった。
+        書いたその場で突き合わせる。
+        """
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        with tempfile.TemporaryDirectory() as tmp:
+            blank = os.path.join(tmp, "blank.txt")
+            open(blank, "w", encoding="utf-8").close()
+            rows = [{"id": "0", "original": "はい", "translation": "はい"}]
+            real = os.path.join(tmp, "t.tsv")
+            scrp.write_tsv(real, rows)
+            outs = [
+                self.cli("proofread.py", self.header_only(tmp))[1],
+                self.cli("proofread.py", real, "--font-chars", blank)[1],
+                self.cli("compare_tsv.py", self.header_only(tmp, "a.tsv"),
+                         self.header_only(tmp, "b.tsv"))[1],
+            ]
+        for phrase in ("検査する行が 1 行もありません", "が 0 字です",
+                       "突き合わせた行が 1 行もありません"):
+            # assertIn だと docs/10 を丸ごと吐く (#96・#115 で 2 度踏んだ)
+            self.assertTrue(phrase in doc, f"docs/10 の「困ったとき」に「{phrase}」の行が無い")
+            self.assertTrue(any(phrase in o for o in outs),
+                            f"docs/10 が書いている「{phrase}」を道具が出さない")
+
+    def test_the_tool_that_already_got_this_right_still_does(self):
+        """`boku2.py text` の断り方が手本。これが緩むと揃える先が消える."""
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self.cli("boku2.py", "text", tmp, "-o", os.path.join(tmp, "o.tsv"))
+        self.assertEqual(rc, 1, f"0 行なのに合格になった:\n{out}")
+        self.assertIn("1 行も見つかりませんでした", out, out)
+
+
 class TestExerciseSevenIsDoable(unittest.TestCase):
     """課題 7 の前提が本当かを確かめる (#122).
 
