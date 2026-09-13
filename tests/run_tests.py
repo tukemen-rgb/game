@@ -4427,6 +4427,59 @@ class TestAllFiveTextPlacesAreInThePractice(unittest.TestCase):
         missing = [k for k, stem in want.items() if stem not in kinds]
         self.assertFalse(missing, f"練習データに無い置き場: {missing} (出た id: {sorted(kinds)})")
 
+    def test_the_answer_key_matches_what_the_steps_produce(self):
+        """docs/10 の「answer.tsv と一致すれば手順が正しく通っている」が本当であること (#118).
+
+        文書はこう約束している ——「`work/BOKU2SAMPLE/answer.tsv` に取り出せるはずの
+        全文があります。`all.tsv` の `original` と一致すれば、手順が正しく通っています」。
+        ところが答えには**音声の番号 (`<VOICE:…>`) の行**まで入っていて、`text` は
+        それを既定で落とすので、**どうやっても一致しなかった** (答え 33 行 /
+        取り出し 31 行)。本文はすべて合っていたので、外れていたのは答えの側。
+
+        素人がここで詰まると「自分の手順が悪い」と思って戻ってしまう。
+        答え合わせは**合うときに合う**のでなければ意味が無い。
+        """
+        import subprocess
+        import tempfile
+
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        with tempfile.TemporaryDirectory() as tmp:
+            out, maps = os.path.join(tmp, "OUT"), os.path.join(tmp, "maps")
+            tsv = os.path.join(tmp, "all.tsv")
+            # docs/10 の「2. 一括で取り出す」に書いてある 3 つのコマンドそのまま
+            for args in (["unpack", os.path.join(sample, "BOKU2.IDX"),
+                          os.path.join(sample, "BOKU2.IMG"), out],
+                         ["maps", os.path.join(sample, "MAP"), "-o", maps],
+                         ["text", out, maps, "-f", os.path.join(sample, "font.txt"), "-o", tsv]):
+                r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py")] + args,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            got = {row["id"]: row["original"] for row in scrp.read_tsv(tsv)}
+        want = {row["id"]: row["original"]
+                for row in scrp.read_tsv(os.path.join(sample, "answer.tsv"))}
+        self.assertTrue(want, "answer.tsv が空")
+        missing = sorted(set(want) - set(got))
+        extra = sorted(set(got) - set(want))
+        self.assertFalse(missing, f"答えにあって取り出しに無い: {missing}")
+        self.assertFalse(extra, f"取り出しにあって答えに無い: {extra}")
+        wrong = [k for k in want if want[k] != got[k]]
+        self.assertFalse(wrong, "本文が違う: "
+                         + "; ".join(f"{k}: {want[k]!r} ≠ {got[k]!r}" for k in wrong[:3]))
+
+    def test_the_answer_key_leaves_out_the_voice_rows(self):
+        """答えに音声の行が混ざっていないこと (混ざると上の一致が壊れる)."""
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        rows = scrp.read_tsv(os.path.join(sample, "answer.tsv"))
+        voice = [r["id"] for r in rows if r["original"].startswith("<VOICE:")]
+        self.assertFalse(voice, f"答えに音声の行がある: {voice}")
+        # ただし題材の側には音声が入っていること (落とす処理が働いた証拠になる)
+        import make_boku2_sample
+
+        self.assertTrue(any(t.startswith("<VOICE:")
+                            for tables in make_boku2_sample.MAPS.values()
+                            for table in tables for t in table),
+                        "題材に音声の行が無い。落とす処理が働いたか分からない")
+
     def test_all_four_containers_are_present(self):
         """公開ソースが挙げる文言の入れ物 4 つが練習データに全部あること (#117).
 

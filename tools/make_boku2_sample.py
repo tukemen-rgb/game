@@ -253,7 +253,12 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
         script = b"\x06\x00\x32\x00\x00\x00" + b"\x03\x00\x2d\x00" * 8      # 命令列らしきもの (会話ではない)
         with open(os.path.join(out_dir, "MAP", stem + ".BIN"), "wb") as fh:
             fh.write(build_map([script, talk, None]))
-        answer[stem] = [(f"{stem}:{ti}-{li}", t) for ti, table in enumerate(tables) for li, t in enumerate(table)]
+        # 音声の番号 (<VOICE:…>) は会話ではないので `text` が既定で落とす。
+        # 答えにも入れない (入れると docs/10 の「answer.tsv と一致すれば正しい」が
+        # **どうやっても成り立たない**。行番号は落とす前のまま。#118)
+        answer[stem] = [(f"{stem}:{ti}-{li}", t)
+                        for ti, table in enumerate(tables) for li, t in enumerate(table)
+                        if not t.startswith("<VOICE:")]
 
     with open(os.path.join(out_dir, "font.txt"), "w", encoding="utf-8") as fh:
         for r in range(0, len(glyphs), COLS):
