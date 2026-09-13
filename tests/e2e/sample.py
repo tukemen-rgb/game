@@ -120,18 +120,25 @@ async def main():
         import subprocess
         out = os.path.join(WORK, "cli_unpack_105")
         shutil.rmtree(out, ignore_errors=True)
+        maps_out = os.path.join(WORK, "cli_maps_106")
+        shutil.rmtree(maps_out, ignore_errors=True)
+        # 本体側 (unpack → text) と MAP 側 (maps → text) の両方。docs/10 の手順どおり
         for args in (["unpack", os.path.join(S, "BOKU2.IDX"), os.path.join(S, "BOKU2.IMG"), out],
                      ["text", out, "-f", os.path.join(S, "font.txt"),
-                      "-o", os.path.join(WORK, "cli_105.tsv")]):
+                      "-o", os.path.join(WORK, "cli_105.tsv")],
+                     ["maps", os.path.join(S, "MAP"), "-o", maps_out],
+                     ["text", maps_out, "-f", os.path.join(S, "font.txt"),
+                      "-o", os.path.join(WORK, "cli_maps_106.tsv")]):
             r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py")] + args,
                                capture_output=True, text=True, cwd=REPO)
             if r.returncode != 0:
                 errors.append(f"boku2 {args[0]} failed: {r.stdout[-200:]}{r.stderr[-200:]}")
         cli_rows = {}
-        with open(os.path.join(WORK, "cli_105.tsv"), encoding="utf-8-sig") as fh:
-            for line in fh.read().split("\n")[1:]:
-                if line.strip():
-                    cli_rows[line.split("\t")[0]] = line
+        for name in ("cli_105.tsv", "cli_maps_106.tsv"):
+            with open(os.path.join(WORK, name), encoding="utf-8-sig") as fh:
+                for line in fh.read().split("\n")[1:]:
+                    if line.strip():
+                        cli_rows[line.split("\t")[0]] = line
         if len(cli_rows) < 10:
             errors.append(f"CLI の TSV が {len(cli_rows)} 行しかない (比べる材料が無い)")
         compared = 0
@@ -157,6 +164,26 @@ async def main():
         print(f"TSV 突き合わせ: {compared} 行が画面と CLI で一致")
         if compared < 12:
             errors.append(f"突き合わせた行が {compared} 行しかない (素通りの疑い)")
+        async def compare_tsv(label, want_prefix):
+            """いま選んでいる部品の TSV を CLI の同じ住所の行と突き合わせる (#106)."""
+            await page.click("#msgtsv")
+            got = [l for l in (await page.input_value("#msgtsvtext")).split("\n")[1:] if l.strip()]
+            if not got:
+                errors.append(f"{label}: 画面の TSV が空")
+                return 0
+            n = 0
+            for row in got:
+                key = row.split("\t")[0]
+                if not key.startswith(want_prefix):
+                    errors.append(f"{label}: 住所が {key} (期待は {want_prefix}… )")
+                elif key not in cli_rows:
+                    errors.append(f"{label}: CLI に無い id: {key}")
+                elif cli_rows[key] != row:
+                    errors.append(f"{label}: 行が違う\n    画面: {row}\n    CLI : {cli_rows[key]}")
+                else:
+                    n += 1
+            return n
+
         # 6.7 入れ物の中の入れ物 (fish_on_mem.bin → 1.bin がまた入れ物 → その 2.bin が魚の説明)。
         #     画面では「切り分ける」を 2 回。CLI (#53) の再帰と同じ答えになること
         await select_file(page, "fish_on_mem", "fish_on_mem.bin")
@@ -179,6 +206,10 @@ async def main():
         print("inner note:", note_inner); print("fish:", fish)
         if "入れ物です" not in note_inner or fish != ["フナ\nぬまにいる{END}", "コイ\nかわにいる{END}"]:
             errors.append("nested container failed")
+        await page.fill("#msgglyphs", font)
+        await page.click("#msgparse")
+        await page.wait_for_timeout(200)
+        compared += await compare_tsv("fish_on_mem の部品", "fish_on_mem#1#2:")
         # 7. マップの入れ物 → 1.bin → 会話
         await select_file(page, "M_A01000", "M_A01000.BIN")
         await page.click('[data-tab="format"]')
@@ -196,6 +227,14 @@ async def main():
         await page.click("#msgparse")
         await page.wait_for_timeout(200)
         talk = await page.eval_on_selector_all("#msgbox tbody td:nth-child(4)", "els => els.map(e => e.textContent)")
+        # マップの会話も CLI (maps → text) と同じ住所・同じ本文であること (#106)
+        await page.fill("#msgglyphs", font)
+        await page.click("#msgparse")
+        await page.wait_for_timeout(200)
+        compared += await compare_tsv("マップの会話", "M_A01000:")
+        print(f"TSV 突き合わせ (部品も含む): {compared} 行")
+        if compared < 16:
+            errors.append(f"突き合わせた行が {compared} 行しかない (素通りの疑い)")
         print("idxnote:", note); print("dirs:", dirs); print("names:", names[:12])
         print("msg note:", note_msg); print("font:", "TIM2" in fmt, "位置 0x80" in fmt)
         print("menu:", menu); print("talk:", talk); print("errors:", errors)

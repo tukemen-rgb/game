@@ -3334,7 +3334,7 @@ async function buildIdxReport() {
   const msgs = items.filter((it) => /\.msg$/i.test(it.name));
   lines.push(`.msg: ${msgs.length} 件 (例: ${msgs.slice(0, 4).map((it) => it.base || it.name).join(", ")})`);
   /* 文言の入れ物 (公開ソースの一覧): 日記・保存画面・出来事・釣り */
-  const CONTAINERS = ["diary.bin", "saveload.bin", "on_mem_event.bin", "fish_on_mem.bin"];
+  const CONTAINERS = TEXT_CONTAINERS;
   const bases = new Set(items.map((it) => (it.base || it.name).toLowerCase()));
   const found = CONTAINERS.filter((n) => bases.has(n)), missing = CONTAINERS.filter((n) => !bases.has(n));
   lines.push(`[入れ物] 文言の入れ物: あり ${found.join(", ") || "なし"}` + (missing.length ? ` / 見つからない ${missing.join(", ")}` : ""));
@@ -4576,6 +4576,11 @@ function lzssScan(data, step, minOut) {
 /* @extract-end lzss */
 
 /* @extract-start bokumsg */
+
+/** 本体の中で、会話以外の文言が入っている入れ物 (公開ソースの一覧)。
+ *  tools/boku2.py の TEXT_CONTAINERS と同じ並び。「見つからない」の並び順にも使う */
+const TEXT_CONTAINERS = ["diary.bin", "saveload.bin", "on_mem_event.bin", "fish_on_mem.bin"];
+
 /**
  * 僕の夏休み 2 の会話テキスト (.msg)。
  *
@@ -5195,14 +5200,58 @@ function bokuMsgId(stem, i) {
   return stem ? `${stem}:${i}` : `${i}`;
 }
 
-function bokuMsgTsv(items, glyphs, alt, stem) {
+/**
+ * 校正用 TSV の id の頭 (住所) を、そのファイルの道から作る。
+ * `tools/boku2.py` の text_rows / text_rows_bytes と同じ答えにする。
+ *
+ *   /BOKU2.IMG/system/system.msg          → system
+ *   /BOKU2.IMG/fish_on_mem.bin/1.bin/2.bin → fish_on_mem#1#2   (入れ物の中の入れ物)
+ *   /M_A01000.BIN/1.bin                    → M_A01000          (マップの会話)
+ *
+ * 入れ物の部品はどれも `1.bin` `2.bin` なので、親を付けないと**別の入れ物の部品が
+ * 同じ住所になる**。CLI 側は同じ理由で親フォルダ名を使っている (#106)。
+ * 入れ物 (diary.bin など) は「親#番号」、マップは会話が入る 1 番だけマップ名そのもの
+ * — この差は CLI が maps と text の 2 通りで辿り着くところから来ている。
+ */
+/** 住所に添える位置の起点。入れ物 (diary.bin など) の部品は、**その入れ物の中の位置**を
+ *  出す (CLI は入れ物を再帰で読むので位置が積み上がる)。マップの部品は CLI が別ファイルとして
+ *  読むので 0 のまま。どちらに合わせるかは bokuTsvStem と同じ分かれ方 (#106) */
+function bokuTsvBaseOffset(entry, entries) {
+  const parts = String((entry && entry.path) || "").split("/").filter(Boolean);
+  const isPart = (s) => /^\d+\.bin$/i.test(s);
+  let last = parts.length - 1;
+  while (last > 0 && isPart(parts[last])) last--;
+  if (last === parts.length - 1) return 0;                     /* 部品ではない */
+  if (!TEXT_CONTAINERS.includes((parts[last] || "").toLowerCase())) return 0;   /* マップ */
+  const basePath = "/" + parts.slice(0, last + 1).join("/");
+  const base = (entries || []).find((e) => e.path === basePath);
+  return base && typeof base.offset === "number" && typeof entry.offset === "number"
+    ? entry.offset - base.offset : 0;
+}
+
+function bokuTsvStem(path) {
+  const parts = String(path || "").split("/").filter(Boolean);
+  const isPart = (s) => /^\d+\.bin$/i.test(s);
+  let last = parts.length - 1;
+  while (last > 0 && isPart(parts[last])) last--;
+  const baseName = parts[last] || "";
+  const baseStem = baseName.replace(/\.[^.]*$/, "");
+  const idx = parts.slice(last + 1).map((s) => s.replace(/\.bin$/i, ""));
+  if (!idx.length) return baseStem;
+  const container = TEXT_CONTAINERS.includes(baseName.toLowerCase());
+  if (!container && idx.length === 1 && idx[0] === "1") return baseStem;   /* マップの会話 */
+  return baseStem + "#" + idx.join("#");
+}
+
+function bokuMsgTsv(items, glyphs, alt, stem, baseOff) {
   const esc = (t) => t.replace(/\t/g, " ").replace(/\r?\n/g, "<BR>");
   const lines = ["id\toffset\tsize\toriginal\ttranslation"];
   for (const it of items) {
     if (!it.codes.length) continue;
     if (bokuMsgVoice(it.codes)) continue;                     /* 音声の番号は文章ではない */
     const text = esc(bokuMsgText(it.codes, glyphs, true, alt));
-    lines.push(`${bokuMsgId(stem, it.i)}\t0x${it.at.toString(16).toUpperCase()}`
+    const at = (baseOff || 0) + it.at;
+    lines.push(`${bokuMsgId(stem, it.i)}\t0x${at.toString(16).toUpperCase()}`
       + `\t${it.codes.length * 2}\t${text}\t${text}`);
   }
   return lines.join("\n") + "\n";
@@ -5361,10 +5410,10 @@ $("msgparse").addEventListener("click", () => {
   ta.spellcheck = false;
   ta.readOnly = true;
   ta.style.minHeight = "120px";
-  /* 拡張子を落とした名前を住所の頭にする (boku2.py text と同じ形) */
-  const stem = String((state.current && (state.current.base || state.current.name)) || "")
-    .split("/").pop().replace(/\.[^.]*$/, "");
-  ta.value = bokuMsgTsv(filled, glyphs, alt, stem);
+  /* 住所の頭は道から作る (入れ物の部品は親を付けないとぶつかる。#106) */
+  const stem = bokuTsvStem((state.current && (state.current.path || state.current.name)) || "");
+  const baseOff = bokuTsvBaseOffset(state.current, state.entries);
+  ta.value = bokuMsgTsv(filled, glyphs, alt, stem, baseOff);
   ta.hidden = true;
   btn.addEventListener("click", async () => {
     ta.hidden = false;
