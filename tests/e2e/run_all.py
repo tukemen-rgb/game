@@ -15,7 +15,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-CHECKS = ["split", "msg", "map", "tim2", "fontdraft", "sample", "build", "broken"]
+CHECKS = ["split", "msg", "map", "tim2", "fontdraft", "sample", "build", "broken", "viewer"]
 
 #: (これができていれば作らなくてよい印, 作る道具). **上から順に** 実行する。
 #: make_archive.py は make_sample.py の出力 (SCRIPT.BIN など) を材料にするので、
@@ -26,6 +26,7 @@ FIXTURES = [
     ("work/PACK.IDX", ["tools/make_archive.py"]),
     ("work/FONT.TMS", ["tools/make_tim2.py"]),
     ("work/BOKU2SAMPLE/BOKU2.IDX", ["tools/make_boku2_sample.py"]),
+    ("work/viewer.html", ["tools/make_viewer.py"]),      # docs/06 の検査台 (#110)
 ]
 
 

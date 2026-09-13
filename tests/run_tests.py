@@ -3721,7 +3721,9 @@ class TestE2eFixturesFromAScratchTree(unittest.TestCase):
             sys.path.remove(e2e)
         with tempfile.TemporaryDirectory() as tmp:
             shutil.copytree(os.path.join(REPO, "tools"), os.path.join(tmp, "tools"))
-            for extra in ("data", "web"):
+            # 取得したままの木にある物はすべて写す。exercises/ は make_viewer.py が
+            # 題材にする (#110)。work/ だけが無い状態を作るのがこの検査の趣旨
+            for extra in ("data", "web", "exercises"):
                 src = os.path.join(REPO, extra)
                 if os.path.isdir(src):
                     shutil.copytree(src, os.path.join(tmp, extra))
