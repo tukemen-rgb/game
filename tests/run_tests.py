@@ -3771,6 +3771,175 @@ class TestDisassemblerInBrowser(unittest.TestCase):
         self.assertIn("OK", res.stdout)
 
 
+#: 公開ソース (Hilltop Works) の置き場。リポジトリには**入れていない**ので、
+#: 無い環境ではこの一群を飛ばす。BOKU2_PUBLIC_SRC で場所を変えられる
+PUBLIC_SRC = os.environ.get("BOKU2_PUBLIC_SRC",
+                            "/home/user/hilltopworks/bokunonatsuyasumi2")
+
+
+class TestAgainstThePublicSource(unittest.TestCase):
+    """公開ソースの読み取り部を**実際に走らせて**、こちらの答えと比べる (#107).
+
+    #104〜#106 で画面と CLI をそろえたので、この 2 つは同じ答えしか出さなくなった。
+    残る危険は「**どちらも同じように間違っている**」型で、自分どうしを比べても
+    絶対に見つからない。docs/09 が「公開ソースで確認した」と書いている形式は、
+    今まで**ソースを読んで**確かめただけだった。読み違いはそのまま残る。
+
+    そこで、向こうの `readMSG` / `convertRawToText` / `readFont` を実行時に
+    取り出して、こちらの合成データに対して走らせる。**向こうのコードもデータも
+    このリポジトリには入れない** (置き場が無ければ飛ばす)。学ぶのは形式だけ、
+    という約束 (docs/05) はそのまま。
+
+    出る文字列の見た目は違って当たり前 (向こうは終端を {KEY_ERROR:0x8000} と
+    出し、詰め物もそのまま見せる)。**同じ意味に直してから**比べる。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import re
+
+        if not os.path.isdir(PUBLIC_SRC):
+            raise unittest.SkipTest(f"公開ソースが無い ({PUBLIC_SRC})")
+        msg_py = os.path.join(PUBLIC_SRC, "MSG.py")
+        res_py = os.path.join(PUBLIC_SRC, "resource.py")
+        for path in (msg_py, res_py):
+            if not os.path.isfile(path):
+                raise unittest.SkipTest(f"公開ソースに {os.path.basename(path)} が無い")
+
+        def take(src, name):
+            """関数 1 つ分の原文を切り出す (丸ごと import すると PIL や numpy を要求する)."""
+            m = re.search(rf"^def {name}\(.*?(?=^def |\Z)", src, re.S | re.M)
+            if not m:
+                raise unittest.SkipTest(f"公開ソースに {name} が見つからない (作りが変わった)")
+            return m.group(0)
+
+        import types
+
+        with open(msg_py, encoding="utf-8") as fh:
+            src = fh.read()
+        with open(res_py, encoding="utf-8") as fh:
+            rsrc = fh.read()
+        res = types.ModuleType("resource")
+        exec(take(rsrc, "readInt"), res.__dict__)
+        cls.ns = {"resource": res, "MSG_MODE": 0, "MAP_MODE": 1,
+                  "OFFSET_ONLY_MODE": 2, "EXTRACTION": 0}
+        for name in ("readMSG", "convertRawToText", "readFont"):
+            exec(take(src, name), cls.ns)
+
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        cls.sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        cls.unpacked = os.path.join(REPO, "work", "public_check")
+        import shutil
+        import subprocess
+        shutil.rmtree(cls.unpacked, ignore_errors=True)
+        for args in (["unpack", os.path.join(cls.sample, "BOKU2.IDX"),
+                      os.path.join(cls.sample, "BOKU2.IMG"), cls.unpacked],
+                     ["maps", os.path.join(cls.sample, "MAP"),
+                      "-o", os.path.join(cls.unpacked, "maps")]):
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py")] + args,
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                raise unittest.SkipTest(f"練習データを用意できない: {r.stdout[-200:]}")
+        with open(os.path.join(cls.sample, "font.txt"), encoding="utf-8") as fh:
+            cls.table = fh.read()
+        cls.glyphs = boku2.parse_glyph_table(cls.table)
+        import warnings
+        with warnings.catch_warnings():
+            # 向こうの readFont はファイルを閉じない。こちらで直す話ではないので黙らせる
+            warnings.simplefilter("ignore", ResourceWarning)
+            cls.dict = cls.ns["readFont"](os.path.join(cls.sample, "font.txt"), 0, 0)
+
+    @staticmethod
+    def canon_theirs(text: str) -> str:
+        """向こうの書き方を、意味だけの形にそろえる.
+
+        向こうは制御コードを辞書に入れていないので `{KEY_ERROR:0x8000}` と出る。
+        終端はそこで切る (詰め物 0xCDCD はその後ろにしか出ない)。
+        """
+        import re
+
+        end = text.find("{KEY_ERROR:0x8000}")
+        if end >= 0:
+            text = text[:end]
+        text = text.replace("{KEY_ERROR:0x8001}", "<BR>")
+        text = re.sub(r"\{WAIT=0x([0-9a-f]+)\}\\n", lambda m: f"<WAIT:{int(m.group(1), 16)}>", text)
+        return text.replace("{BREAK}\\n", "<BREAK>")
+
+    @staticmethod
+    def canon_ours(text: str) -> str:
+        import re
+
+        text = text.replace("{END}", "").replace("\n", "<BR>")
+        text = re.sub(r"\{WAIT (\d+)\}", lambda m: f"<WAIT:{m.group(1)}>", text)
+        return text.replace("{BREAK}<BR>", "<BREAK>")
+
+    def compare(self, path: str, mode: int, stride: int, alt: bool = False):
+        """1 ファイルを両方に読ませ、項目の切れ目と本文を突き合わせる。比べた項目数を返す."""
+        with open(path, "rb") as fh:
+            b = fh.read()
+        theirs = self.ns["readMSG"](path, 0, len(b), mode)
+        ours = boku2.parse_msg(b, stride)
+        self.assertIsNotNone(ours, f"{os.path.basename(path)} をこちらが読めない")
+        self.assertEqual(len(theirs), len(ours),
+                         f"{os.path.basename(path)}: 項目数が違う "
+                         f"(公開ソース {len(theirs)} / こちら {len(ours)})")
+        n = 0
+        for i, (raw, item) in enumerate(zip(theirs, ours)):
+            if boku2.voice_id(item["codes"]):
+                continue                      # 音声の番号。向こうは解釈せず生で出す
+            self.assertEqual(len(raw), len(item["codes"]) * 2,
+                             f"{os.path.basename(path)}[{i}]: 項目の長さが違う")
+            got = self.canon_ours(boku2.decode(item["codes"], self.glyphs, tags=False, alt=alt))
+            want = self.canon_theirs(self.ns["convertRawToText"](self.dict, raw, alt))
+            self.assertEqual(got, want,
+                             f"{os.path.basename(path)}[{i}] の本文が公開ソースと違う")
+            n += 1
+        return n
+
+    def test_the_glyph_table_is_the_same_size_as_theirs(self):
+        """向こうの font.txt は 1656 字。docs が言う 72 行 × 23 列の外からの裏付け."""
+        path = os.path.join(PUBLIC_SRC, "font.txt")
+        if not os.path.isfile(path):
+            self.skipTest("公開ソースに font.txt が無い")
+        with open(path, encoding="utf-8") as fh:
+            chars = fh.read().replace("\n", "")
+        self.assertEqual(len(chars), 72 * boku2.FONT_COLS,
+                         f"公開ソースの文字表が {len(chars)} 字 "
+                         f"(こちらの見立ては 72 × {boku2.FONT_COLS})")
+
+    def test_the_menu_msg_reads_the_same(self):
+        n = self.compare(os.path.join(self.unpacked, "system", "system.msg"), 0, 8)
+        self.assertGreaterEqual(n, 4, f"比べた項目が {n} 件しかない")
+
+    def test_the_alt_break_menu_reads_the_same(self):
+        """0x8002 を引数の無いページ送りとして読むファイル (ALT_BREAK_FILES)."""
+        n = self.compare(os.path.join(self.unpacked, "system", "item_info.msg"), 0, 8, alt=True)
+        self.assertGreaterEqual(n, 2, f"比べた項目が {n} 件しかない")
+
+    def test_the_map_conversation_tables_read_the_same(self):
+        """マップの会話は「表の一覧 + 4 バイト刻み」。こちらの 12 バイト項目の読みを外から確かめる."""
+        path = os.path.join(self.unpacked, "maps", "M_A01000", "1.bin")
+        with open(path, "rb") as fh:
+            b = fh.read()
+        tables = boku2.parse_tables(b)
+        self.assertTrue(tables, "こちらが表の一覧として読めない")
+        total = 0
+        for t in tables:
+            theirs = self.ns["readMSG"](path, t["off"], t["size"], 1)   # MAP_MODE
+            self.assertEqual(len(theirs), len(t["msg"] or []),
+                             f"表 {t['i']}: 項目数が違う (公開ソース {len(theirs)})")
+            for raw, item in zip(theirs, t["msg"]):
+                if boku2.voice_id(item["codes"]):
+                    continue
+                got = self.canon_ours(boku2.decode(item["codes"], self.glyphs, tags=False))
+                want = self.canon_theirs(self.ns["convertRawToText"](self.dict, raw))
+                self.assertEqual(got, want, f"表 {t['i']} の本文が公開ソースと違う")
+                total += 1
+        self.assertGreaterEqual(total, 4, f"比べた項目が {total} 件しかない")
+
+
 class TestEveryTagTheExtractorWritesIsUnderstood(unittest.TestCase):
     """取り出す側が書く記号を、測る側が全部知っていること (#105).
 
