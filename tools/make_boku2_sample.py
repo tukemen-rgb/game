@@ -159,6 +159,10 @@ DIARY = ["きょうは、", "をした。", "たのしかった。"]     # 日�
 # 保存画面の文言: **Shift-JIS そのまま** (公開ソースの SJIS_FILES = system\~saveload\2.bin)。
 # ここだけ文字表が要らない。5 種類ある文言の置き場のうち、練習データに無かった最後の 1 つ (#116)
 SAVELOAD = ["セーブしますか？", "はい", "いいえ"]
+# 出来事の文: on_mem_event.bin の 2〜5 番 (公開ソースの OFFSET_ONLY_MSG_FILES)。
+# 位置だけの表 (4 バイト刻み) で、項目の長さは次の位置から出す。読み方は .msg と同じ
+EVENTS = [["むしとりあみをてにいれた。"], ["つりざおをてにいれた。", "かわへいこう。"],
+          ["ラジオたいそうにでた。"], ["なつやすみがおわった。"]]
 MAPS = {
     "M_A01000": [
         ["<VOICE:00010001>", "きょうはうみにいくんだ。<BR>いっしょにいこうよ。<WAIT:0A>",
@@ -200,6 +204,13 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
     sjis = "\0".join(SAVELOAD).encode("cp932") + b"\0"
     saveload = build_map([b"\x44" * 24, b"\x55" * 16, sjis])
     answer["saveload"] = [(f"saveload#2:{i}", t) for i, t in enumerate(SAVELOAD)]
+    # 出来事の入れ物: 0・1 番は文でない部品、2〜5 番が「位置だけの表」(4 バイト刻み)
+    ev_parts = [b"\x66" * 20, b"\x77" * 12]
+    for k, lines in enumerate(EVENTS):
+        ev_parts.append(build_msg([encode(t, glyphs) for t in lines], 4))
+        answer[f"on_mem_event#{k + 2}"] = [(f"on_mem_event#{k + 2}:{i}", t)
+                                           for i, t in enumerate(lines)]
+    on_mem_event = build_map(ev_parts)
 
     font_tim2, _ = make_tim2.font_sheet(rows=(len(glyphs) + COLS - 1) // COLS, cols=COLS, cell=CELL)
     tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + font_tim2
@@ -211,6 +222,7 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
         (False, 1, "diary.bin", diary),
         (False, 1, "fish_on_mem.bin", fish_on_mem),
         (False, 1, "saveload.bin", saveload),
+        (False, 1, "on_mem_event.bin", on_mem_event),
         (True, 1, "00diary", None),
     ] + [(False, 0 if i == 7 else 1, f"nik{i:03d}.tm2", photo[i]) for i in range(8)] + [
         (True, 1, "system", None),

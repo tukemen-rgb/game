@@ -2887,13 +2887,15 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertIn("DFI: 期待どおり", res.stdout)
             self.assertIn("問題なし", res.stdout)
             self.assertIn("[フォント] system/bk_font.tms: TIM2 (位置 0x80)", res.stdout)
-            self.assertIn("[入れ物] 文言の入れ物: あり diary.bin, saveload.bin, fish_on_mem.bin",
-                          res.stdout)
+            self.assertIn("[入れ物] 文言の入れ物: あり diary.bin, saveload.bin,"
+                          " on_mem_event.bin, fish_on_mem.bin", res.stdout)
             # 並びは TEXT_CONTAINERS のとおり (画面の CONTAINERS と同じ順。#104)
-            self.assertIn("見つからない on_mem_event.bin", res.stdout)
+            # 4 つの入れ物が全部そろったので「見つからない」は出ない (#117)
+            self.assertNotIn("見つからない", res.stdout)
             # フォルダ付きの名前が出ること。docs/10 が 20 分の所で見ろと言っている
             # のはこれで、以前は生の名前を並べていてフォルダが付かなかった (#104)
-            self.assertIn("最初の名前: diary.bin / fish_on_mem.bin / saveload.bin / 00diary/nik000.tm2",
+            self.assertIn("最初の名前: diary.bin / fish_on_mem.bin / saveload.bin"
+                          " / on_mem_event.bin / 00diary/nik000.tm2",
                           res.stdout)
             self.assertIn("1 番が会話だった 2 件", res.stdout)
             self.assertNotIn("はじめから", res.stdout)          # 本文は出さない
@@ -4417,12 +4419,31 @@ class TestAllFiveTextPlacesAreInThePractice(unittest.TestCase):
         want = {
             ".msg (8 バイト刻み)": "system",
             "メニュー (ページ送り)": "item_info",
-            "出来事 (4 バイト刻み)": "fish_on_mem#1#2",
+            "入れ物の中の入れ物 (4 バイト刻み)": "fish_on_mem#1#2",
             "見出しの無い並び": "diary#0",
             "Shift-JIS": "saveload#2",
+            "出来事 (位置だけの表)": "on_mem_event#2",
         }
         missing = [k for k, stem in want.items() if stem not in kinds]
         self.assertFalse(missing, f"練習データに無い置き場: {missing} (出た id: {sorted(kinds)})")
+
+    def test_all_four_containers_are_present(self):
+        """公開ソースが挙げる文言の入れ物 4 つが練習データに全部あること (#117).
+
+        `check` の「見つからない」が空になるのが目印。1 つでも欠けていると、
+        その入れ物の読み方は通しで一度も走らない。
+        """
+        import subprocess
+
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                              "check", sample], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        line = next((ln for ln in res.stdout.split("\n") if ln.startswith("[入れ物]")), "")
+        self.assertTrue(line, "check に [入れ物] の行が無い")
+        for name in boku2.TEXT_CONTAINERS:
+            self.assertIn(name, line, f"練習データに {name} が無い: {line}")
+        self.assertNotIn("見つからない", line, f"まだ欠けている入れ物がある: {line}")
 
     def test_the_sample_builder_says_the_same(self):
         """答えの一覧にも Shift-JIS が入っていること (答え合わせが片手落ちにならない)."""
