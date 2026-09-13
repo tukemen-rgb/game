@@ -4363,6 +4363,94 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestTheStrideIsChosenByContent(unittest.TestCase):
+    """位置表の刻みを「先に読めた方」ではなく「中身が良い方」で選ぶこと (#115).
+
+    `.msg` の読み方は 8 バイト刻み → 4 バイト刻み → 見出しの無い並び → Shift-JIS の
+    順に試す。**前の段が間違って成功すると、後ろは試されない。**
+    8 バイト刻みは 4 バイト刻みのファイルでも通ることがあり (位置表の後ろに隙間が
+    あって、そこが増える偶数の並びに見える場合)、そのとき項目の切れ目が本文の
+    途中に来て**文がぶつ切り**になる。
+
+    見分ける手がかりは「終わりの印 (0x8000) で終わっている項目の割合」。
+    入れ物の刻み (parse_map_rec) が「部品が多く取れる方を採る」のと同じ考え方で、
+    こちらにだけ無かった。
+    """
+
+    @staticmethod
+    def four_stride_that_also_reads_as_eight() -> bytes:
+        """4 バイト刻みなのに 8 バイト刻みとしても通るファイル (作為的に組む).
+
+        位置表の後ろに隙間を空け、8 刻みが「位置」として読む所に増える偶数を置く。
+        """
+        n, body_at = 4, 64
+        offs = [body_at, body_at + 8, body_at + 16, body_at + 24]
+        head = struct.pack("<I", n) + b"".join(struct.pack("<I", o) for o in offs)
+        gap = bytearray(body_at - len(head))
+        struct.pack_into("<I", gap, 20 - len(head), 200)
+        struct.pack_into("<I", gap, 28 - len(head), 208)
+        body = (struct.pack("<H", 0x0041) * 3 + struct.pack("<H", 0x8000)) * 4
+        return head + bytes(gap) + body + b"\0" * 160
+
+    def test_the_trap_really_is_a_trap(self):
+        """まず「8 でも読めてしまう」ことを確かめる。読めないなら以下に意味が無い."""
+        b = self.four_stride_that_also_reads_as_eight()
+        self.assertIsNotNone(boku2.parse_msg(b, 8), "8 バイト刻みで読めない (罠が成立していない)")
+        self.assertIsNotNone(boku2.parse_msg(b, 4), "4 バイト刻みで読めない (作り方が違う)")
+
+    def test_the_better_reading_wins(self):
+        b = self.four_stride_that_also_reads_as_eight()
+        info: dict = {}
+        items = boku2.pick_msg(b, info)
+        self.assertEqual(info.get("stride"), 4,
+                         f"刻みの選び方が違う ({info.get('both_strides')})")
+        self.assertEqual([it["at"] for it in items], [64, 72, 80, 88],
+                         "項目の切れ目が本文の途中に来ている")
+
+    def test_the_practice_menu_still_reads_as_eight(self):
+        """`item_info.msg` は 8 でも 4 でも読めるが、正しいのは 8.
+
+        直しすぎ (何でも 4 にする) を止める側の検査。
+        """
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        import shutil
+        import subprocess
+        import tempfile
+
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        with tempfile.TemporaryDirectory() as tmp:
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), "unpack",
+                                os.path.join(sample, "BOKU2.IDX"),
+                                os.path.join(sample, "BOKU2.IMG"), tmp],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            path = os.path.join(tmp, "system", "item_info.msg")
+            self.assertTrue(os.path.exists(path), "item_info.msg が出てこない")
+            with open(path, "rb") as fh:
+                b = fh.read()
+        self.assertIsNotNone(boku2.parse_msg(b, 4), "4 でも読める前提が崩れている")
+        info: dict = {}
+        items = boku2.pick_msg(b, info)
+        self.assertEqual(info.get("stride"), 8,
+                         f"正しい 8 を選べていない ({info.get('both_strides')})")
+        with open(os.path.join(sample, "font.txt"), encoding="utf-8") as fh:
+            glyphs = boku2.parse_glyph_table(fh.read())
+        got = [boku2.decode(it["codes"], glyphs, tags=False, alt=True) for it in items]
+        self.assertEqual(got, ["あみ{BREAK}\nむしをつかまえる{END}",
+                               "つりざお{BREAK}\nさかなをつる{END}"],
+                         "メニューの文がぶつ切りになっている")
+
+    def test_both_sides_use_the_same_rule(self):
+        """画面側にも同じ選び方があること (#104 で懲りた「片側だけ」の再発を止める)."""
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        # assertIn は落ちたとき app.js を丸ごと吐く (#96)。自前の文言で出す
+        self.assertTrue("function bokuEndsWell" in js, "画面側に良し悪しの目安が無い")
+        self.assertTrue("score > best.score" in js, "画面側が中身で選んでいない")
+
+
 class TestTheBlindSpotOfTheImageFinderIsDocumented(unittest.TestCase):
     """docs/07 に書いた「取りこぼす絵」の表を、実際に測り直す (#114).
 

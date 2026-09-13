@@ -4731,12 +4731,30 @@ function parseSjisList(b, decode) {
 }
 
 /** 8 バイト刻みと 4 バイト刻みの両方を試す */
+/** 終わりの印 (0x8000) で終わっている項目の割合。読み方の当たり外れの目安 */
+function bokuEndsWell(r) {
+  const live = r.items.filter((it) => it.codes.length);
+  if (!live.length) return 0;
+  return live.filter((it) => it.codes[it.codes.length - 1] === 0x8000).length / live.length;
+}
+
+/**
+ * 位置表の刻み (8 / 4) を選ぶ。**両方読めたときは中身で決める** (#115)。
+ *
+ * 「先に試した 8 が読めたら 8」だと、4 バイト刻みのファイルが 8 として通ったときに
+ * 項目の切れ目が本文の途中に来て、文がぶつ切りになる。終わりの印で終わっている
+ * 項目の割合で見分ける (練習データの item_info.msg は 8 で 1.00 / 4 で 0.50)。
+ * 入れ物の刻み (parseBokuMap) が「部品が多く取れる方を採る」のと同じ考え方。
+ */
 function detectBokuMsg(b) {
+  let best = null;
   for (const stride of [8, 4]) {
     const r = parseBokuMsg(b, stride);
-    if (r) return r;
+    if (!r) continue;
+    const score = bokuEndsWell(r);
+    if (!best || score > best.score) best = { score, r };   /* 同点なら先の 8 を残す */
   }
-  return null;
+  return best ? best.r : null;
 }
 
 /**

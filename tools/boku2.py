@@ -282,6 +282,51 @@ def parse_msg(b: bytes, stride: int, info: dict | None = None) -> list[dict] | N
     return items
 
 
+def ends_well(items: list[dict]) -> float:
+    """終わりの印 (0x8000) で終わっている項目の割合。読み方の当たり外れの目安.
+
+    位置表の刻みを間違えると、項目の切れ目が本文の途中に来る。そうなると
+    「終わりの印で終わっていない項目」が増えるので、割合で見分けられる。
+    """
+    live = [it for it in items if it["codes"]]
+    if not live:
+        return 0.0
+    return sum(1 for it in live if it["codes"][-1] == 0x8000) / len(live)
+
+
+def pick_msg(b: bytes, info: dict | None = None) -> list[dict] | None:
+    """位置表の刻み (8 / 4) を選んで読む。**両方読めたときは中身で決める** (#115).
+
+    以前は「8 で読めたら 8」と、先に試したほうを無条件に採っていた。ところが
+    8 バイト刻みは 4 バイト刻みのファイルでも通ることがある (位置表の後ろに
+    隙間があり、そこが増える偶数の並びに見える場合)。そのときは項目の切れ目が
+    本文の途中に来て、**文の途中でぶつ切りになった行**が出る。
+
+    実際、練習データの `item_info.msg` は 8 でも 4 でも読めてしまう。正しいのは 8 で、
+    そのとき 2 項目とも終わりの印で終わる (割合 1.00)。4 で読むと「あみ」だけの
+    項目ができて 0.50 に落ちる。作為的に作った 4 バイト刻みのファイルでは逆に
+    8 が 0.25 / 4 が 0.75 になる。**どちらが正しいかは、この割合が言い当てる。**
+
+    片方しか読めないときは今までどおり (ほとんどのファイルはこちら)。
+    """
+    got = []
+    for stride in (8, 4):
+        sub: dict = {}
+        items = parse_msg(b, stride, sub)
+        if items:
+            got.append((ends_well(items), stride, items, sub))
+    if not got:
+        return None
+    # 同点なら先に試した 8 を残す (max は最初の最大値を返す)
+    best = max(got, key=lambda x: x[0])
+    if info is not None:
+        info.update(best[3])
+        info["stride"] = best[1]
+        if len(got) > 1:
+            info["both_strides"] = {s: round(sc, 2) for sc, s, _i, _n in got}
+    return best[2]
+
+
 def parse_tables(b: bytes) -> list[dict] | None:
     if len(b) < 16:
         return None
@@ -511,7 +556,7 @@ def _rows_of(b: bytes, stem: str, base_off: int, glyphs, keep_voice: bool, allow
                     rows.append((f"{stem}:{tb['i']}-{it['i']}", base_off + tb["off"] + it["at"],
                                  len(it["codes"]) * 2, decode(it["codes"], glyphs, alt=alt)))
         return rows
-    msg = parse_msg(b, 8) or parse_msg(b, 4) or (parse_raw(b) if allow_raw else None)
+    msg = pick_msg(b) or (parse_raw(b) if allow_raw else None)
     if msg:
         for it in msg:
             if it["codes"] and (keep_voice or not voice_id(it["codes"])):
@@ -762,7 +807,7 @@ def check(folder: str, out=sys.stdout) -> int:
             img.seek(e["at"])
             b = img.read(e["len"])
             info: dict = {}
-            if parse_msg(b, 8, info) or parse_msg(b, 4) or parse_tables(b) or parse_raw(b) or parse_sjis_list(b):
+            if pick_msg(b, info) or parse_tables(b) or parse_raw(b) or parse_sjis_list(b):
                 ok_msg += 1
                 if info.get("len_field") == "ok":
                     len_ok += 1
