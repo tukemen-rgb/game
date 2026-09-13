@@ -3346,7 +3346,10 @@ async function buildIdxReport() {
       problems++;
       lines.push(`→ フォルダの規則が 2 通りで食い違うファイル ${mism.length} 件 (例: ${mism[0][0]} / ${mism[0][1]})。この行ごと報告してください`);
     } else {
-      lines.push("フォルダの規則: 2 通り (stack / flag) で一致");
+      const tested = dfiRuleTested(b, dataEntry.size);
+      lines.push(tested
+        ? `フォルダの規則: 2 通り (stack / flag) で一致 (フォルダの中のファイル ${tested} 件で突き合わせた)`
+        : "フォルダの規則: この索引に入れ子が無いので、2 通りの違いは出ません (試せていない)");
     }
   }
 
@@ -3642,6 +3645,18 @@ function dfiRuleMismatch(idx, dataSize) {
     if (a.entries[i].name !== b.entries[i].name) out.push([a.entries[i].name, b.entries[i].name]);
   }
   return out;
+}
+
+/** 2 通りの規則で **差が出うるファイル** の数 (#125)。
+ *
+ *  フォルダの閉じ方の規則なので、索引に入れ子が無ければ 2 通りは必ず同じ答えを出す。
+ *  そこで「2 通りで一致」と言うと、何も試していないのに規則が裏付いたように読める。
+ *  フォルダの規則は docs/09 の表でまだ「確かめていない」側にある。
+ */
+function dfiRuleTested(idx, dataSize) {
+  const b = readDfi(idx, dataSize, "flag");
+  if (!b) return 0;
+  return b.entries.filter((e) => (e.name || "").includes("/")).length;
 }
 
 function analyzeNamedIndex(idx, dataSize) {

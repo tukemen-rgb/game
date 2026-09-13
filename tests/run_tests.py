@@ -4506,6 +4506,65 @@ class TestNothingIsNotAPass(unittest.TestCase):
         self.assertTrue("文字表は試せていない" in py and "文字表は試せていません" in py,
                         "CLI 側 (check / text) のどちらかに文言が無い")
 
+    def test_maps_refuses_when_it_split_nothing(self):
+        """入れ物が 0 個なら「0 個の入れ物から 0 個の部品」で終わらないこと (#125).
+
+        docs/10 の 25 分の行は「0 個でないこと」を**人に見張らせていた**。
+        道具が言えることを人の目に任せない。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = self.cli("boku2.py", "maps", tmp, "-o", os.path.join(tmp, "o"))
+        self.assertEqual(rc, 1, f"0 個なのに合格になった:\n{out}")
+        self.assertIn("入れ物が 1 つも見つかりませんでした", out, out)
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        self.assertTrue("入れ物が 1 つも見つかりませんでした" in doc,
+                        "docs/10 の「困ったとき」にこの断り文句が無い")
+
+    def test_the_folder_rule_agreement_says_how_much_it_compared(self):
+        """「2 通りで一致」に分母が付くこと。入れ子が無ければ「試せていない」と言う (#125).
+
+        フォルダの規則は docs/09 の表でまだ「確かめていない」側にあり、
+        docs/10 はこの行を報告の決め手に挙げている。入れ子の無い索引では
+        2 通りは必ず同じ答えを出すので、分母の無い「一致」は裏付けに見えてしまう。
+        """
+        import io
+
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        with open(os.path.join(sample, "BOKU2.IDX"), "rb") as fh:
+            idx = fh.read()
+        size = os.path.getsize(os.path.join(sample, "BOKU2.IMG"))
+
+        tested = boku2.dfi_rule_tested(idx, size)
+        in_folder = sum(1 for e in boku2.read_dfi(idx, size, "flag") if "/" in e["path"])
+        self.assertEqual(tested, in_folder, "突き合わせた件数がフォルダの中のファイル数と違う")
+        self.assertGreater(tested, 0, "練習データに入れ子が無い (前提が崩れた)")
+
+        out = io.StringIO()
+        boku2.check(sample, out=out)
+        self.assertIn(f"フォルダの中のファイル {tested} 件で突き合わせた", out.getvalue(),
+                      "「一致」に分母が付いていない")
+
+        # 入れ子がまったく無い索引を作って、「一致」と言わないことを見る
+        flat = self.flat_dfi()
+        # まずこの索引が本当に読めること。読めない索引なら 0 件は当たり前で、検査にならない
+        self.assertEqual(len(boku2.read_dfi(flat, 6 * 2048, "flag")), 6,
+                         "作った平らな索引が読めていない (この検査が空振りする)")
+        self.assertEqual(boku2.dfi_rule_mismatch(flat, 6 * 2048), [], "入れ子が無いのに食い違う")
+        self.assertEqual(boku2.dfi_rule_tested(flat, 6 * 2048), 0,
+                         "入れ子が無いのに「突き合わせた」と数えている")
+
+    def flat_dfi(self) -> bytes:
+        """入れ子がまったく無い DFI 索引 (根にファイルが並ぶだけ)."""
+        names = [f"f{i}.bin" for i in range(6)]
+        recs = [(1, 1, 0, 0)] + [(0, 0 if i == 5 else 1, i, 2048) for i in range(6)]
+        body = b"".join(struct.pack("<HHIII", d, more, 0, lba, ln) for d, more, lba, ln in recs)
+        name_blob = b"/\0" + b"".join(n.encode("ascii") + b"\0" for n in names)
+        return b"DFI\0" + struct.pack("<III", len(recs), 0, 0) + body + name_blob
+
     def test_the_docs_quote_the_refusals_word_for_word(self):
         """docs/10 の「困ったとき」が挙げる断り文句が、道具の出力に本当にあること.
 

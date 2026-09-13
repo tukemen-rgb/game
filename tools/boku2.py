@@ -142,6 +142,17 @@ def dfi_rule_mismatch(idx: bytes, data_size: int) -> list[tuple[str, str]]:
     return [(x["path"], y["path"]) for x, y in zip(a, b) if x["path"] != y["path"]]
 
 
+def dfi_rule_tested(idx: bytes, data_size: int) -> int:
+    """2 つの規則を突き合わせたときに、**差が出うるファイル**の数を返す (#125).
+
+    フォルダの閉じ方の規則なので、索引が入れ子を持たなければ 2 通りは必ず同じ答えを出す。
+    そのとき「2 通りで一致」と言うと、**何も試していない**のに規則が裏付いたように読める。
+    フォルダの規則は docs/09 の表でまだ「確かめていない」側にあり、docs/10 は
+    この行を報告の決め手に挙げているので、分母の無い「一致」は危ない。
+    """
+    return sum(1 for e in read_dfi(idx, data_size, "flag") if "/" in e["path"])
+
+
 def safe_parts(path: str) -> list[str]:
     """索引の名前をそのままフォルダ名に使うと、'..' や '\\' で出力先の外に書いてしまう。
     索引は信用しない: 区切りを揃え、上に戻る部品と空の部品を落とし、危ない文字は _ にする."""
@@ -788,8 +799,12 @@ def check(folder: str, out=sys.stdout) -> int:
         problems += 1
         say(f"→ フォルダの規則が 2 通りで食い違うファイル {len(mism)} 件 (例: {mism[0][0]} / {mism[0][1]})。"
             "この行ごと報告してください")
+    elif dfi_rule_tested(idx, img_size):
+        say(f"フォルダの規則: 2 通り (stack / flag) で一致 "
+            f"(フォルダの中のファイル {dfi_rule_tested(idx, img_size)} 件で突き合わせた)")
     else:
-        say("フォルダの規則: 2 通り (stack / flag) で一致")
+        # 入れ子が無ければ 2 通りは必ず同じ答えを出す。「一致」と書くと裏付けに見える
+        say("フォルダの規則: この索引に入れ子が無いので、2 通りの違いは出ません (試せていない)")
     msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
     fonts = [e for e in entries if "font" in os.path.basename(e["path"]).lower()]
     say(f".msg: {len(msgs)} 件 (例: {', '.join(os.path.basename(e['path']) for e in msgs[:4])})")
@@ -966,6 +981,15 @@ def run(args) -> int:
         for f in files:
             stem = os.path.splitext(os.path.basename(f))[0]
             total += split_map(f, os.path.join(args.out, stem))
+        if not total:
+            # 0 個を「0 個の入れ物から 0 個の部品」で終わると、手順が進んだように読める。
+            # docs/10 の 25 分の行は「0 個でないこと」を人に見張らせていた (#125)
+            print(f"→ 入れ物が 1 つも見つかりませんでした (見たファイル {len(files)} 個)",
+                  file=sys.stderr)
+            print("   指定した場所に MAP のファイルがありません。"
+                  "吸い出したフォルダの MAP/ を指定してください:", file=sys.stderr)
+            print("     python3 tools/boku2.py maps 実物/MAP -o OUT/maps", file=sys.stderr)
+            return 1
         print(f"{len(files)} 個の入れ物から {total} 個の部品 → {args.out}")
     elif args.cmd == "text":
         glyphs = load_font(args.font)

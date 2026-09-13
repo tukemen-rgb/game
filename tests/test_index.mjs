@@ -72,7 +72,7 @@ const ascii2 = (bytes) => {
 };
 const named = new Function("u32le", "ascii",
   src.slice(nstart, nend)
-  + "\nreturn { analyzeNamedIndex, namedEntries, isNameAt, scoreNamedLayout, readDfi, dfiRuleMismatch };")(
+  + "\nreturn { analyzeNamedIndex, namedEntries, isNameAt, scoreNamedLayout, readDfi, dfiRuleMismatch, dfiRuleTested };")(
   u32le, ascii2);
 
 /* 実物と同じ形の索引を組み立てる。
@@ -317,6 +317,26 @@ const odd = encodeRecs([
 ]);
 const mism = named.dfiRuleMismatch(odd.buf, odd.dataSize);
 if (!mism.length || mism[0][0] !== "A/C/c0.bin" || mism[0][1] !== "C/c0.bin") fail(`食い違いが検出されない: ${JSON.stringify(mism.slice(0, 2))}`);
+
+/* 「一致」に分母を付ける (#125)。入れ子が無ければ 2 通りは必ず同じ答えを出すので、
+   そこで「一致」と言うと**何も試していない**のに規則が裏付いたように読める。
+   数を数えるのは web/app.js の dfiRuleTested。本物を動かして確かめる */
+{
+  const tested = named.dfiRuleTested(real.buf, real.dataSize);
+  if (!tested) fail("入れ子のある索引で、突き合わせた件数が 0 と出る");
+  if (tested !== real.want.filter((w) => w.name.includes("/")).length) {
+    fail(`突き合わせた件数が ${tested} (フォルダの中のファイルの数と違う)`);
+  }
+  /* 入れ子がまったく無い索引: 根に並ぶだけ */
+  const flat = encodeRecs([
+    { dir: true, more: 1, name: "/" },
+    ...Array.from({ length: 6 }, (_, i) => ({ dir: false, more: i === 5 ? 0 : 1, name: `f${i}.bin` })),
+  ]);
+  if (named.dfiRuleMismatch(flat.buf, flat.dataSize).length !== 0) fail("入れ子が無いのに食い違う");
+  if (named.dfiRuleTested(flat.buf, flat.dataSize) !== 0) {
+    fail("入れ子が無いのに「突き合わせた」と数えている");
+  }
+}
 
 /* 分かっている形は当てにいかず、そのまま読む */
 const dfiCand = named.readDfi(real.buf, real.dataSize);
