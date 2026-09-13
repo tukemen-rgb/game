@@ -618,12 +618,27 @@ def glyph_table_mapping(glyphs: list) -> dict[bytes, str]:
     return mapping
 
 
+#: TIM2 の見出しの直後に 0x70 の空きが入ることがある目印。公開ソース TIM2.py が
+#: `whitespace1 == 0x4001a0` で見ているのと同じ値 (向こうの註釈は "literally why")。
+#: 形式の欄が 1 のときは元から 0x80 進めるので、これはその欄が 0 のときの逃げ道 (#109)
+TIM2_EXTRA_PAD_MARK = 0x4001A0
+
+
+def tim2_header_at(b: bytes, at: int, fmt: int) -> int:
+    """`at` から画像の見出しまでの距離。公開ソース TIM2.py と同じ判定にする."""
+    if fmt:
+        return 0x80
+    if at + 12 <= len(b) and struct.unpack_from("<I", b, at + 8)[0] == TIM2_EXTRA_PAD_MARK:
+        return 0x80
+    return 0x10
+
+
 def tim2_info(b: bytes) -> dict | None:
     """TIM2 の見出しだけ読む (ブラウザ側 parseTim2 の要点)。.tms の 0x80 前置きも見る."""
     for at in (0, 0x80, 0x10, 0x20, 0x40):
         if b[at:at + 4] == b"TIM2":
             fmt, count = b[at + 5], struct.unpack_from("<H", b, at + 6)[0]
-            p = at + (0x80 if fmt else 0x10)
+            p = at + tim2_header_at(b, at, fmt)
             if p + 24 > len(b):
                 return {"at": at, "format": fmt, "count": count}
             clut_colors = struct.unpack_from("<H", b, p + 14)[0]

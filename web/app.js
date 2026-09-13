@@ -5595,7 +5595,11 @@ function parseTim2(b, at) {
   const version = b[at + 4], format = b[at + 5], count = u16le(b, at + 6);
   if (count < 1 || count > 64) return null;
   const pictures = [];
-  let p = at + (format ? 0x80 : 0x10);
+  /* 形式の欄が 1 なら 0x70 の空きが入る。加えて、+8 の値が 0x4001A0 のときも入る
+     (公開ソース TIM2.py が同じ判定をしている。向こうの註釈は "literally why")。
+     見出しの位置を間違えると、幅も画素の種類も全部ずれる (#109) */
+  const extraPad = format || (at + 12 <= b.length && u32le(b, at + 8) === 0x4001A0);
+  let p = at + (extraPad ? 0x80 : 0x10);
   for (let i = 0; i < count && p + 48 <= b.length; i++) {
     const total = u32le(b, p), clutSize = u32le(b, p + 4), imageSize = u32le(b, p + 8);
     const headerSize = u16le(b, p + 12), clutColors = u16le(b, p + 14);

@@ -4008,6 +4008,165 @@ class TestAgainstThePublicSource(unittest.TestCase):
             self.assertIn('rule = rule || "flag"', fh.read(),
                           "画面の既定が flag でない")
 
+    def their_clut_order(self, n: int, image_format: int, linear: bool = False) -> dict:
+        """公開ソース TIM2.py のパレット並び替えの式を**そのまま動かして**、置換を取り出す.
+
+        向こうは 16×16 の升目に置く形で書いてある。こちらは番号→番号の関数
+        (csm1Index) なので、式を動かして (行, 列) を番号に直してから比べる。
+        """
+        with open(os.path.join(PUBLIC_SRC, "TIM2.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        try:
+            start = src.index("            for x in range(n_palette_entries):")
+            # 同じ行が 2 回出る (内側の else と外側の else)。2 つ目まで含めないと
+            # 並び替えをしない側が丸ごと落ちる (最初これで空振りした)
+            mark = "CLUT_array[x//16][x%16] = (red, green, blue, alpha)"
+            first = src.index(mark, start)
+            end = src.index("\n", src.index(mark, first + 1)) + 1
+        except ValueError:
+            self.skipTest("公開ソース TIM2.py の作りが変わった")
+        body = "\n".join(ln[12:] if ln.startswith(" " * 12) else ln
+                         for ln in src[start:end].split("\n"))
+
+        cells = {}
+
+        class Row:
+            def __init__(self, i):
+                self.i = i
+
+            def __setitem__(self, j, v):
+                cells[self.i * 16 + j] = v[0]
+
+        class Grid:
+            def __getitem__(self, i):
+                return Row(i)
+
+        class Feed:
+            def __init__(self):
+                self.k = 0
+
+            def read(self, _n):
+                v = self.k
+                self.k += 1
+                return v.to_bytes(4, "little")
+
+        exec(body, {"n_palette_entries": n, "TIM2_file": Feed(), "CLUT_array": Grid(),
+                    "palette": [], "linear_CLUT": linear, "image_format": image_format})
+        return cells
+
+    def test_the_palette_reorder_matches_the_public_source(self):
+        """8bit 索引のパレット並び替え (CSM1) が公開ソースと同じ置換であること (#109).
+
+        ここは docs/09 が「GS の CSM1 並び替えつき」とだけ書いてきた所で、
+        いちばん間違えても気づきにくい (色がずれるだけで、絵は出る)。
+        """
+        ours = self.ours_csm1()          # 画面の本物を動かす (書き写すと壊しても気づかない)
+        theirs = self.their_clut_order(256, 5)
+        self.assertEqual(len(theirs), 256, f"向こうが置いたのは {len(theirs)} 色")
+        self.assertTrue(any(theirs[p] != p for p in range(256)),
+                        "並び替えが起きていない。これでは一致に意味が無い")
+        for p in range(256):
+            self.assertEqual(theirs[p], ours[p], f"{p} 番の置き場が違う")
+
+    @staticmethod
+    def ours_csm1() -> list:
+        """web/app.js の csm1Index を**そのまま**動かして 0..255 の対応を得る (#109).
+
+        最初はこの式を Python で書き写していた。画面側を壊しても検査が通ってしまい、
+        #103 で踏んだ「書き写した定数は古くなる」と同じ穴だった。本物を動かす。
+        """
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');"
+            "const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('/* @extract-start tim2 */');"
+            "const b=s.indexOf('/* @extract-end tim2 */');"
+            "if(a<0||b<0){console.error('no tim2 block');process.exit(2);}"
+            "const m=new Function('u16le','u32le',s.slice(a,b)+'\\nreturn {csm1Index};')"
+            "(()=>0,()=>0);"
+            "console.log(JSON.stringify([...Array(256).keys()].map(m.csm1Index)));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("csm1Index を取り出せない: " + res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    def test_the_four_bit_palette_is_not_reordered_on_either_side(self):
+        """4bit 索引では並び替えない。こちらも imageType 5 のときだけ並び替える."""
+        theirs = self.their_clut_order(256, 4)
+        self.assertEqual(len(theirs), 256)
+        self.assertTrue(all(theirs[p] == p for p in range(256)),
+                        "向こうは 4bit でも並び替えていた")
+        js = self.read_app_js()
+        self.assertIn("pic.imageType !== 5", js,
+                      "画面側が 8bit 索引だけに絞っていない")
+
+    def test_the_extra_padding_rule_matches(self):
+        """見出しの前に 0x70 の空きが入る条件 (#109).
+
+        公開ソースは「形式の欄が 1」のほかに「+8 の値が 0x4001A0」でも空きを見込む。
+        こちらは前者しか見ていなかった。見出しの位置を外すと幅も画素の種類も全部ずれる。
+        """
+        import struct
+
+        head = b"TIM2" + bytes([4, 0]) + struct.pack("<H", 1)
+        self.assertEqual(boku2.tim2_header_at(head + struct.pack("<I", 0x4001A0), 0, 0), 0x80,
+                         "0x4001A0 のときに 0x70 の空きを見込んでいない")
+        self.assertEqual(boku2.tim2_header_at(head + struct.pack("<I", 0), 0, 0), 0x10)
+        self.assertEqual(boku2.tim2_header_at(head + struct.pack("<I", 0), 0, 1), 0x80,
+                         "形式の欄が 1 のときの空きが消えている")
+        # 画面側は本物を動かして確かめる。文字を探すだけだと、比べる値を変えられても通る
+        self.assertEqual(self.browser_header_at(0x4001A0), 0x80,
+                         "画面側が 0x4001A0 のときに 0x70 の空きを見込んでいない")
+        self.assertEqual(self.browser_header_at(0), 0x10,
+                         "画面側が余計に空きを入れている")
+
+    @staticmethod
+    def browser_header_at(word: int) -> int:
+        """形式の欄 0 で +8 が `word` の TIM2 を画面の parseTim2 に読ませ、見出しの位置を返す."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');"
+            "const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('/* @extract-start tim2 */');"
+            "const b=s.indexOf('/* @extract-end tim2 */');"
+            "const u16le=(x,p)=>x[p]|(x[p+1]<<8);"
+            "const u32le=(x,p)=>((x[p]|(x[p+1]<<8)|(x[p+2]<<16)|(x[p+3]<<24))>>>0);"
+            "const m=new Function('u16le','u32le',s.slice(a,b)+'\\nreturn {parseTim2};')(u16le,u32le);"
+            f"const W={word};"
+            "const buf=new Uint8Array(0x200);"
+            "buf.set([0x54,0x49,0x4D,0x32,4,0,1,0],0);"
+            "buf[8]=W&0xFF;buf[9]=(W>>8)&0xFF;buf[10]=(W>>16)&0xFF;buf[11]=(W>>24)&0xFF;"
+            # 見出しを 0x10 と 0x80 の両方に置き、どちらを読んだかを幅で見分ける
+            "const put=(p,w)=>{buf[p+12]=48;buf[p+14]=16;buf[p+18]=3;buf[p+19]=5;"
+            "buf[p+20]=w&0xFF;buf[p+21]=(w>>8)&0xFF;buf[p+22]=8;};"
+            "put(0x10,111);put(0x80,222);"
+            "const r=m.parseTim2(buf,0);"
+            "console.log(JSON.stringify(r&&r.pictures[0]?r.pictures[0].width:null));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("parseTim2 を動かせない: " + res.stdout + res.stderr)
+        width = json.loads(res.stdout)
+        return {111: 0x10, 222: 0x80}.get(width, width)
+
+    @staticmethod
+    def read_app_js() -> str:
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            return fh.read()
+
     def test_the_glyph_table_is_the_same_size_as_theirs(self):
         """向こうの font.txt は 1656 字。docs が言う 72 行 × 23 列の外からの裏付け."""
         path = os.path.join(PUBLIC_SRC, "font.txt")
