@@ -4366,6 +4366,88 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestTheExerciseAnswersAreTrue(unittest.TestCase):
+    """課題 5・6 の答え (answers/qa_answers.md) が、道具の出す結果と合っていること (#119).
+
+    #118 で「答えを持つ仕掛けは、答え自体を検査しないと間違いを増幅する置き場になる」
+    と書いた。その目でもう 1 つの答え —— 仕込んだ不具合の一覧 —— を見る。
+
+    答えは 3 つのことを言い切っている: **20 行に仕込んだ**、**指摘は 27 件**、
+    そして行ごとに**どの検査が拾うか**。どれも `proofread.py` を走らせれば
+    確かめられるのに、確かめる仕掛けが無かった (既存の検査は「仕込んだ行と
+    指摘の出た行が同じ集合か」までで、**検査の名前までは見ていない**)。
+
+    行ごとの検査名がずれると、課題 7 (道具を直す) の題材そのものが狂う。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import proofread
+
+        cls.rows = scrp.read_tsv(os.path.join(REPO, "exercises", "qa_target.tsv"))
+        rules = proofread.load_rules(os.path.join(REPO, "data", "rules.json"), "ja")
+        gloss = proofread.load_glossary(os.path.join(REPO, "data", "glossary.tsv"))
+        chars = proofread.load_font_chars(os.path.join(REPO, "data", "font_chars.txt"))
+        cls.fired: dict[str, set] = {}
+        cls.count = 0
+        for row in cls.rows:
+            hits = proofread.check_row(row, rules, gloss, chars)
+            if hits:
+                cls.fired.setdefault(row["id"], set()).update(f.rule for f in hits)
+            cls.count += len(hits)
+        # 行をまたぐ検査 (同じ原文に別の訳。#86 でここを見落とした)
+        for f in proofread.check_consistency(cls.rows, lambda r: 0):
+            cls.fired.setdefault(f.row_id, set()).add(f.rule)
+            cls.count += 1
+        with open(os.path.join(REPO, "answers", "qa_answers.md"), encoding="utf-8") as fh:
+            cls.doc = fh.read()
+
+    def doc_rows(self) -> dict:
+        """答えの表を {id: そこに書いてある検査名の集合} で返す."""
+        import re
+
+        out = {}
+        for line in self.doc.split("\n"):
+            if not re.match(r"^\|\s*\d+\s*\|", line):
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            out[cells[0]] = set(re.findall(r"`([a-z_]+)`", cells[2]))
+        return out
+
+    def test_the_stated_counts_are_right(self):
+        """「20 行に仕込んで指摘は 27 件」を数え直す."""
+        import re
+
+        m = re.search(r"(\d+) 行に不具合を仕込んでいます \(指摘は (\d+) 件\)", self.doc)
+        self.assertTrue(m, "答えの冒頭の言い方が変わっている")
+        rows_said, found_said = int(m.group(1)), int(m.group(2))
+        self.assertEqual(len(self.fired), rows_said,
+                         f"指摘の出た行が {len(self.fired)} 行 (答えは {rows_said} 行)")
+        self.assertEqual(self.count, found_said,
+                         f"指摘が {self.count} 件 (答えは {found_said} 件)")
+        self.assertEqual(len(self.doc_rows()), rows_said,
+                         "表の行数が冒頭の数と違う")
+
+    def test_every_row_names_the_checks_that_actually_fire(self):
+        """行ごとの検査名が、実際に発火するものと一致すること."""
+        said = self.doc_rows()
+        self.assertTrue(said, "答えの表を読めない")
+        wrong = []
+        for rid, want in said.items():
+            got = self.fired.get(rid, set())
+            if want != got:
+                wrong.append(f"id {rid}: 答え={sorted(want)} 実際={sorted(got)}")
+        self.assertFalse(wrong, "答えの検査名が実際と違う:\n  " + "\n  ".join(wrong))
+
+    def test_the_answer_and_the_planting_agree(self):
+        """答えの表の id と、仕込みの定義 (plant_errors) の id が同じであること."""
+        import plant_errors
+
+        planted = {str(rid) for rid, *_ in plant_errors.PLANTED}
+        self.assertEqual(set(self.doc_rows()), planted,
+                         "答えの表と仕込みの定義で id が違う")
+
+
 class TestAllFiveTextPlacesAreInThePractice(unittest.TestCase):
     """docs/09 が挙げる 5 種類の文言の置き場が、練習データに全部あること (#116).
 
