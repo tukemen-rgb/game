@@ -73,7 +73,18 @@ async def main():
                               f"画面は {box[:90]!r}")
             else:
                 checked += 1
-            print(f"  {name}: {diagnosis}")
+            # 判定を言い切っておいて「根拠 0 件」と続けないこと (#112)。
+            # 内訳の証拠が「2 種類以上のとき」しか出ず、100% 1 種類のファイル
+            # (BGM.ADP は波形 100%、PAD.DAT はゼロ埋め 100%) で、いちばん強い証拠が
+            # 消えていた。理由を述べた直後に「決め手が無い」と出るのは矛盾に読める。
+            m = re.search(r"そう判断した根拠 \((\d+)\)", box)
+            if not m:
+                errors.append(f"{name}: 根拠の見出しが出ていない")
+            elif m.group(1) == "0":
+                errors.append(f"{name}: 「{diagnosis}」と言い切ったのに根拠が 0 件")
+            if "決め手になる手がかりが見つかりませんでした" in box:
+                errors.append(f"{name}: 判定を出しているのに「決め手が無い」と言っている")
+            print(f"  {name}: {diagnosis} (根拠 {m.group(1) if m else '?'} 件)")
 
         if checked < 7:
             errors.append(f"確かめた行が {checked} 行しかない (素通りの疑い)")
