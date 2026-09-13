@@ -4366,6 +4366,97 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestExerciseSevenIsDoable(unittest.TestCase):
+    """課題 7 の前提が本当かを確かめる (#122).
+
+    課題 7 は「`--var-width 6` を付けると **id 2** が仕様違反として出る
+    (14 + 6 = 20 > 18)」を導入に使い、そこから `--name-width` を作らせる。
+    ところが **id 2 では出ない**。id 2 の訳文は `<VAR:00>` が `あなた` に
+    置き換わっている行 (課題 5 の `placeholder` の仕込み) なので、差し込む変数が
+    無く 17 文字にしかならない。校正が見るのは訳文の側。
+    20 文字になるのは**原文**で、そちらは検査台でしか見られない。
+
+    実際に出るのは **id 22** (13 → 19)。導入でつまずくと課題そのものに入れないので、
+    例を id 22 に直した。ここではその例と、課題が「もう用意してある」と言っている
+    材料が本当にあるかを見る。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import proofread
+
+        cls.pf = proofread
+        cls.rows = scrp.read_tsv(os.path.join(REPO, "exercises", "qa_target.tsv"))
+        cls.rules = proofread.load_rules(os.path.join(REPO, "data", "rules.json"), "ja")
+        cls.gloss = proofread.load_glossary(os.path.join(REPO, "data", "glossary.tsv"))
+        cls.chars = proofread.load_font_chars(os.path.join(REPO, "data", "font_chars.txt"))
+        with open(os.path.join(REPO, "exercises", "README.md"), encoding="utf-8") as fh:
+            cls.doc = fh.read()
+
+    def fired(self, row_id: str, var_width: float) -> set:
+        row = next(r for r in self.rows if r["id"] == row_id)
+        tw = self.pf.tag_widths_of(self.rules, var_width)
+        return {f.rule for f in self.pf.check_row(row, self.rules, self.gloss, self.chars, tw)}
+
+    def test_the_example_row_really_fires_only_with_the_flag(self):
+        """課題が挙げる行が、`--var-width` を付けたときだけ幅で引っかかること."""
+        import re
+
+        m = re.search(r"`id (\d+)` の `<VAR:00>.*?` が\n`line_width` で出ます", self.doc)
+        self.assertTrue(m, "課題 7 が例の id を挙げていない")
+        rid = m.group(1)
+        self.assertNotIn("line_width", self.fired(rid, 0.0),
+                         f"id {rid} は --var-width 無しでも幅で引っかかる (例にならない)")
+        self.assertIn("line_width", self.fired(rid, 6.0),
+                      f"id {rid} が --var-width 6 でも幅で引っかからない")
+
+    def test_the_document_warns_that_id_2_does_not_fire(self):
+        """id 2 では出ないことと、その理由が書いてあること."""
+        self.assertTrue("**`id 2` では出ません。**" in self.doc,
+                        "id 2 で出ないという断りが無い")
+        self.assertNotIn("line_width", self.fired("2", 6.0),
+                         "id 2 が幅で引っかかる (文書の断りのほうが古い)")
+
+    def test_the_widths_the_document_quotes_are_measured(self):
+        """13 → 19 と、原文が 20 になることを測り直す."""
+        import re
+
+        m = re.search(r"\((\d+) 文字 \+ 名前 (\d+) 文字 = (\d+) 文字 > (\d+)\)", self.doc)
+        self.assertTrue(m, "課題 7 の計算が読み取れない")
+        plain, name, total, limit = (int(x) for x in m.groups())
+        row = next(r for r in self.rows if r["id"] == "22")
+        bare = scrp.display_width(row["translation"], self.pf.tag_widths_of(self.rules, 0.0))
+        wide = scrp.display_width(row["translation"], self.pf.tag_widths_of(self.rules, float(name)))
+        self.assertEqual(bare, plain, f"名前なしの幅が {bare} (文書は {plain})")
+        self.assertEqual(wide, total, f"名前ありの幅が {wide} (文書は {total})")
+        self.assertEqual(float(limit), self.rules["line_max_width"], "上限が違う")
+        # 原文が 20 文字になる、という別の主張も測る
+        two = next(r for r in self.rows if r["id"] == "2")
+        first = scrp.split_lines(two["original"])[0]
+        self.assertEqual(scrp.display_width(first, self.pf.tag_widths_of(self.rules, 6.0)), 20.0,
+                         "id 2 の原文が 20 文字にならない")
+
+    def test_the_parts_the_exercise_promises_are_there(self):
+        """「もう用意してある」と言っている材料が本当にあること.
+
+        これが無いと課題に入れない: 任意のタグ名で幅を渡せること / 話者名の表 /
+        設定から既定値を読む書き方。
+        """
+        self.assertEqual(scrp.display_width("<NAME:01>あいう", {"NAME": 4}), 7.0,
+                         "display_width が NAME の幅を数えられない (課題 7 が成り立たない)")
+        self.assertEqual(scrp.display_width("<NAME:01>あいう", {}), 3.0,
+                         "幅を渡さないときに数えてしまっている")
+        names = self.pf.load_names(os.path.join(REPO, "data", "names.tsv"))
+        self.assertTrue(names, "話者名の表が読めない")
+        self.assertGreaterEqual(max(len(v) for v in names.values()), 2,
+                                "auto の材料になる名前が短すぎる")
+        # 設定から既定を読む書き方 (var_width) が手本として残っていること
+        import inspect
+
+        src = inspect.getsource(self.pf.tag_widths_of)
+        self.assertIn('rules.get("var_width"', src, "設定から読む手本が消えている")
+
+
 class TestExerciseTwoRuleOfThumbIsTrue(unittest.TestCase):
     """課題 2 の「`82 xx` は仮名」が、題材で本当かを数える (#121).
 
