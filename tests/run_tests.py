@@ -4458,6 +4458,133 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestTheQaAnswerKeyIsTrue(unittest.TestCase):
+    """課題 5・6 の答え (`answers/qa_answers.md`) を、道具に通して確かめる (#128).
+
+    この答えは**書いてある文章**でしかなかった。検査を足したり題材をいじったりすれば
+    黙って古くなる (#127 で検査を 1 つ足したばかり)。そこで答えの中身を読み取って、
+    実際に `proofread.py` と `insert_text.py` にかけ、書いてある数と突き合わせる。
+
+    実際、この形で 2 つ見つかった:
+
+    * **修正例に id 24 が抜けていた。** そのとおりに直すと ERROR が 1 件残る。
+      しかも id 24 は「数字は字面では気づけない」の**見本として挙げている当の行**。
+    * **「容量にも収まります」が条件不足だった。** `ERROR` の行だけ直すと
+      3 バイトはみ出す。余白は 2 バイト以下しかなく、浮かせる分は `WARN` の側にある。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import proofread
+
+        cls.pf = proofread
+        cls.rows = scrp.read_tsv(os.path.join(REPO, "exercises", "qa_target.tsv"))
+        cls.rules = proofread.load_rules(os.path.join(REPO, "data", "rules.json"), "ja")
+        cls.gloss = proofread.load_glossary(os.path.join(REPO, "data", "glossary.tsv"))
+        cls.chars = proofread.load_font_chars(os.path.join(REPO, "data", "font_chars.txt"))
+        with open(os.path.join(REPO, "answers", "qa_answers.md"), encoding="utf-8") as fh:
+            cls.doc = fh.read()
+
+    def findings(self, rows):
+        tw = self.pf.tag_widths_of(self.rules, 0.0)
+        out = []
+        for r in rows:
+            out += self.pf.check_row(r, self.rules, self.gloss, self.chars, tw)
+        return out + self.pf.check_consistency(rows, lambda rid: None)
+
+    def fix_list(self) -> dict:
+        """答えの「課題 6 の修正例」の中身を読み取る."""
+        import re
+
+        block = self.doc.split("```")[1]
+        fix = {}
+        for line in block.strip().splitlines():
+            m = re.match(r"(\d+)\s+(.*)$", line.strip())
+            if m:
+                fix[m.group(1)] = m.group(2)
+        return fix
+
+    def applied(self, only_ids=None) -> list:
+        fix = self.fix_list()
+        rows = [dict(r) for r in self.rows]
+        for r in rows:
+            if r["id"] in fix and (only_ids is None or r["id"] in only_ids):
+                r["translation"] = fix[r["id"]]
+        return rows
+
+    def bytes_of(self, rows) -> int | None:
+        """入れ直したときの大きさ。容量に収まらなければ None."""
+        import subprocess
+
+        problem = ensure_practice("work/SCRIPT.BIN", "make_sample.py")
+        if problem:
+            self.skipTest(problem)
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv, out = os.path.join(tmp, "f.tsv"), os.path.join(tmp, "S.BIN")
+            scrp.write_tsv(tsv, rows)
+            r = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "insert_text.py"), tsv,
+                 "-o", out, "--original", os.path.join(REPO, "work", "SCRIPT.BIN")],
+                capture_output=True, text=True, cwd=REPO)
+            return os.path.getsize(out) if r.returncode == 0 else None
+
+    def test_the_table_matches_what_the_tool_actually_reports(self):
+        """答えの表の id と検出項目が、実際の出力と 1 対 1 で合うこと."""
+        import collections
+        import re
+
+        actual = collections.defaultdict(collections.Counter)
+        for f in self.findings(self.rows):
+            actual[f.row_id][f.rule] += 1
+        claimed = {}
+        for line in self.doc.splitlines():
+            m = re.match(r"\| (\d+) \| .*? \| (.+?) \| ", line)
+            if not m:
+                continue
+            c = collections.Counter()
+            for rm in re.finditer(r"`([a-z_]+)`(?: ×(\d+))?", m.group(2)):
+                c[rm.group(1)] += int(rm.group(2) or 1)
+            claimed[m.group(1)] = c
+        self.assertEqual(dict(claimed), {k: dict(v) for k, v in actual.items()},
+                         "答えの表と実際の指摘が食い違う")
+        # 前書きの「20 行 / 27 件」も数え直す
+        self.assertIn(f"{len(actual)} 行に不具合", self.doc, "行数の書き方が実際と違う")
+        self.assertIn(f"指摘は {len(self.findings(self.rows))} 件", self.doc,
+                      "指摘の件数が実際と違う")
+
+    def test_following_the_fix_list_really_clears_every_error(self):
+        """修正例のとおりに直すと ERROR が 0 になること (id 24 の抜けで 1 件残っていた)."""
+        errs = [f for f in self.findings(self.applied()) if f.severity == "ERROR"]
+        self.assertEqual(errs, [], f"修正例に従っても ERROR が残る: "
+                                   f"{[(f.row_id, f.rule) for f in errs]}")
+
+    def test_fixing_only_the_errors_does_not_fit_and_the_docs_say_so(self):
+        """`ERROR` の行だけ直すと容量に入らないこと。答えがその数を書いていること."""
+        err_ids = {f.row_id for f in self.findings(self.rows) if f.severity == "ERROR"}
+        rows = self.applied(only_ids=err_ids)
+        self.assertEqual([f for f in self.findings(rows) if f.severity == "ERROR"], [],
+                         "ERROR の行を直したのに ERROR が残る (前提が崩れた)")
+        self.assertIsNone(self.bytes_of(rows),
+                          "ERROR の行だけで容量に収まってしまう (答えの説明のほうが古い)")
+        self.assertTrue("3 バイト超過" in self.doc, "はみ出す量が答えに書いていない")
+
+    def test_the_byte_counts_in_the_answer_are_measured(self):
+        """答えが挙げる 2,118 / 2,120 を測り直す."""
+        size = self.bytes_of(self.applied())
+        self.assertIsNotNone(size, "修正例のとおりに直しても容量に入らない")
+        self.assertIn(f"{size:,} バイト", self.doc, f"修正例の大きさは {size:,} バイト")
+
+        rows = self.applied()
+        for r in rows:                       # WARN も残らず直した状態
+            if r["id"] == "38":
+                r["translation"] = "いいえ"
+        both = self.bytes_of(rows)
+        self.assertEqual([f for f in self.findings(rows) if f.severity != "ERROR"], [],
+                         "全部直したのに WARN が残る (前提が崩れた)")
+        self.assertIsNotNone(both, "全部直しても容量に入らない")
+        self.assertIn(f"{both:,} バイト", self.doc, f"全部直すと {both:,} バイト")
+
+
 class TestKanjiHidingInKatakana(unittest.TestCase):
     """カタカナに紛れた形の似た漢字を拾う検査 (#127).
 

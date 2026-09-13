@@ -202,6 +202,10 @@ python3 tools/make_viewer.py --tsv work/qa_fixed.tsv -o work/viewer_fixed.html
 
 * `proofread.py` の ERROR が 0 件
 * `insert_text.py` が容量オーバーで落ちない
+  — **この 2 つは別々には満たせません。** `ERROR` の行だけ直すと 3 バイト
+  はみ出します。浮かせる分は `WARN` の側 (三点リーダの詰め、行末の空白) に
+  あるので、`WARN` も見ないと入りません。実測は `answers/qa_answers.md` の
+  「容量」の節
 * 入れ直したファイルから再抽出したテキストが、意図したものと一致する
 * 検査台の画面で、枠から出た文字と □ が 1 つも無い
 
