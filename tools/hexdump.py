@@ -80,16 +80,32 @@ def unknown_report(data: bytes, decoded: dict[int, str], table_path: str) -> lis
         return []
     total = sum(tally.values())
     lines = [f"\n表に無いバイトが {len(tally)} 種類 / 計 {total} 個ありました:"]
+    leads = []
     for value, count in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])):
         where = [i for i, ch in decoded.items() if ch == "." and data[i] == value]
         spots = "、".join(f"0x{i:04X}" for i in sorted(where)[:4])
         more = " ほか" if len(where) > 4 else ""
-        lines.append(f"  0x{value:02X}  {count} 回  ({spots}{more})")
+        # 続くバイトが毎回違うなら、それは 1 文字ではなく **2 バイトの前半** の疑いが濃い。
+        # そのときは「この値を 1 つ足す」では済まず、組の数だけ 4 桁で足すことになる。
+        # 数えて言うだけで、決めつけない (#120)
+        pairs = sorted({data[i + 1] for i in where if i + 1 < len(data)})
+        note = ""
+        if count >= 3 and len(pairs) == count:
+            note = f" — 続くバイトが毎回違う ({len(pairs)} 通り)"
+            leads.append((value, pairs))
+        lines.append(f"  0x{value:02X}  {count} 回  ({spots}{more}){note}")
     # ここで実在の対応 (B2=。 など) を例に出すと課題 3 の答えを漏らすので、書き方だけ言う
     lines.append(f"  {table_path} に「16 進=文字」の行を足します。1 バイトなら 2 桁、"
                  "2 バイトで 1 文字なら 4 桁で書きます (docs/01)")
     lines.append("  表に無いバイトのすぐ次の文字は当てにできません。2 バイトで 1 文字なら、"
                  "後半だけが別の字として読まれます")
+    for value, pairs in leads:
+        # **全部**挙げる。「N 行です」と言いながら例を 4 つしか出さないと、
+        # 言われたとおりに足しても読めない字が残る (最初そう書いて自分で踏んだ #120)。
+        # 数は「表に無い出現数」が上限なので、増えすぎる心配はない
+        shown = " ".join(f"{value:02X}{p:02X}" for p in pairs)
+        lines.append(f"  0x{value:02X} が 2 バイトの前半なら、足すのは 1 行ではなく "
+                     f"**{len(pairs)} 行** です (4 桁で: {shown})")
     return lines
 
 

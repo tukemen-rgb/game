@@ -4366,6 +4366,101 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestExerciseThreeCanActuallyBeFinished(unittest.TestCase):
+    """課題 3 を手順どおりにやると、道具の言うとおりに足せば読めること (#120).
+
+    課題 3 は「手順 2 の出力の『表に無いバイト』が足すべきものの全部」と
+    書いていた。実際にやってみると**足りなかった**。id 0 を読むのに要るのは
+    `B3` `B2` の 2 つと、**2 バイトの漢字 7 種類** (E03E E03D E055 …)。
+    ところが道具は「表に無いバイトが 3 種類」としか言わず、`E0` を 1 つと数えていた。
+    素人が `E0=漢` のように 1 行足しても、当然まだ読めない。
+
+    道具に「続くバイトが毎回違う → 前半の疑い。足すのは N 行」と言わせ、
+    課題の文もそれに合わせた。ここでは**言われたとおりに足すと本当に読めるか**を
+    通しで確かめる。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/MSG_ENC.BIN", "make_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+
+    @staticmethod
+    def table_of(path):
+        out = {}
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if "=" in line:
+                    k, v = line.rstrip("\n").split("=", 1)
+                    out[k.strip().upper()] = v
+        return out
+
+    def test_the_tool_says_how_many_rows_to_add(self):
+        """「1 行ではなく N 行」を、続くバイトの数から言うこと."""
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            guess = os.path.join(tmp, "guess.tbl")
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "relative_search.py"),
+                                os.path.join(REPO, "work", "MSG_ENC.BIN"),
+                                "--search", "ここは", "--derive", guess],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "hexdump.py"),
+                                os.path.join(REPO, "work", "MSG_ENC.BIN"),
+                                "--table", guess, "--message", "0"],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            out = r.stdout
+        self.assertIn("表に無いバイト", out, "足りないバイトの一覧が出ていない")
+        self.assertIn("続くバイトが毎回違う", out,
+                      "2 バイトの前半らしさを言っていない:\n" + out[-400:])
+        self.assertIn("足すのは 1 行ではなく", out,
+                      "何行足せばよいかを言っていない:\n" + out[-400:])
+
+    def test_adding_exactly_what_the_tool_names_finishes_the_exercise(self):
+        """道具が挙げたものを (答えの表から) 足すと、id 0 が最後まで読めること.
+
+        「言われたとおりに足したのに読めない」が起きないことの確認。
+        """
+        import re
+        import subprocess
+        import tempfile
+
+        answers = self.table_of(os.path.join(REPO, "answers", "custom.tbl"))
+        with tempfile.TemporaryDirectory() as tmp:
+            guess = os.path.join(tmp, "guess.tbl")
+            subprocess.run([sys.executable, os.path.join(REPO, "tools", "relative_search.py"),
+                            os.path.join(REPO, "work", "MSG_ENC.BIN"),
+                            "--search", "ここは", "--derive", guess],
+                           capture_output=True, text=True, check=True)
+            out = subprocess.run([sys.executable, os.path.join(REPO, "tools", "hexdump.py"),
+                                  os.path.join(REPO, "work", "MSG_ENC.BIN"),
+                                  "--table", guess, "--message", "0"],
+                                 capture_output=True, text=True).stdout
+            # 道具が名指しした値だけを拾う (1 バイトの行と、4 桁で挙がった組)
+            singles = re.findall(r"^  0x([0-9A-F]{2})  \d+ 回", out, re.M)
+            pairs = re.findall(r"([0-9A-F]{4})", out.split("足すのは 1 行ではなく")[-1]) \
+                if "足すのは 1 行ではなく" in out else []
+            add = []
+            for key in [p for p in pairs] + [s for s in singles]:
+                if key in answers:
+                    add.append((key, answers[key]))
+            self.assertTrue(add, f"足す材料が拾えない (singles={singles} pairs={pairs})")
+            with open(guess, "a", encoding="utf-8") as fh:
+                for key, ch in add:
+                    fh.write(f"{key}={ch}\n")
+            done = subprocess.run([sys.executable, os.path.join(REPO, "tools", "hexdump.py"),
+                                   os.path.join(REPO, "work", "MSG_ENC.BIN"),
+                                   "--table", guess, "--message", "0"],
+                                  capture_output=True, text=True).stdout
+        self.assertNotIn("表に無いバイト", done,
+                         "言われたとおりに足したのに、まだ読めない字が残っている:\n"
+                         + done[-500:])
+
+
 class TestTheExerciseAnswersAreTrue(unittest.TestCase):
     """課題 5・6 の答え (answers/qa_answers.md) が、道具の出す結果と合っていること (#119).
 
