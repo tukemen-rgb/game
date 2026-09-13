@@ -3389,8 +3389,11 @@ async function buildIdxReport() {
     const glyphs = glyphText.trim() ? parseGlyphTable(glyphText) : null;
     if (glyphs) {
       const missing = [...usedHere].filter((c) => glyphs[c] === undefined || glyphs[c] === null).sort((a, b) => a - b);
+      const verdict = bokuGlyphVerdict(true, usedHere.size, missing.length);
       lines.push(`[文字表] 貼ってある文字表: ${glyphs.filter((g) => g !== undefined && g !== null).length} 字 / 上の .msg で使われている番号 ${usedHere.size} 種のうち文字表に無い ${missing.length} 種`
-        + (missing.length ? ` (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""}。フォント画像の目盛りで橙の枠の字を書き足す)` : "。この範囲は全部読める"));
+        + { untested: "。文字番号を使っている行が無いので、文字表は試せていない",
+            missing: ` (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""}。フォント画像の目盛りで橙の枠の字を書き足す)`,
+            ok: "。この範囲は全部読める" }[verdict]);
     } else {
       lines.push("[文字表] 文字表はまだ貼っていない (「.msg として読む」の欄に貼ってから、もう一度この要約を作ると出来具合が出る)");
     }
@@ -5297,6 +5300,21 @@ function bokuMsgTsv(items, glyphs, alt, stem, baseOff) {
   }
   return lines.join("\n") + "\n";
 }
+
+/** 文字表の出来具合を 1 語で言う。**使われている番号が 0 種のときに
+ *  「全部読める」と言わない**のが要点 (#124)。
+ *
+ *  0 種になるのは、その範囲が Shift-JIS だけの場合 (保存画面の一部) や、
+ *  本文が空の場合。文字表は一度も引かれていないので、**試せていない**のであって
+ *  読めたのではない。docs/10 は「文字表で全部読める」を文字表が仕上がった印として
+ *  見ろと言っているので、そこで嘘をつくと、埋めていない文字表のまま先に進む。
+ *  戻り値: "none" 文字表なし / "untested" 引く番号が無い / "missing" 足りない / "ok" 全部ある
+ */
+function bokuGlyphVerdict(hasTable, usedCount, missingCount) {
+  if (!hasTable) return "none";
+  if (!usedCount) return "untested";
+  return missingCount ? "missing" : "ok";
+}
 /* @extract-end bokumsg */
 
 $("msgparse").addEventListener("click", () => {
@@ -5364,9 +5382,12 @@ $("msgparse").addEventListener("click", () => {
   state.missingGlyphs = new Set(missing);
   note.textContent = tablesInfo + `${r.count} 件` + (r.stride ? ` (位置表は ${r.stride} バイト刻み)` : "") + ` · 本文あり ${filled.length} 件`
     + ` · 文字番号の最大 ${maxCode} · 使われている番号 ${used.length} 種`
-    + (glyphs
-      ? ` · 文字表 ${glyphCount} 字` + (missing.length ? ` · 文字表に無い番号 ${missing.length} 種 (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""})` : " · 文字表で全部読める")
-      : " · 文字表なし (番号のまま表示)");
+    + {
+      none: " · 文字表なし (番号のまま表示)",
+      untested: ` · 文字表 ${glyphCount} 字 · この範囲は文字番号を使っていないので、文字表は試せていない`,
+      missing: ` · 文字表 ${glyphCount} 字 · 文字表に無い番号 ${missing.length} 種 (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""})`,
+      ok: ` · 文字表 ${glyphCount} 字 · 文字表で全部読める`,
+    }[bokuGlyphVerdict(!!glyphs, used.length, missing.length)];
 
   /* 書き出す手間を減らす: 使われている番号だけ、「番号=」の雛形で並べる。
      文字を埋めて上の欄に貼れば、その番号だけの文字表として読める */

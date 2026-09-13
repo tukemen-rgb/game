@@ -11,7 +11,7 @@ if (s < 0 || e < 0) { console.error("app.js に bokumsg マーカーが無い");
 const u32le = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 const u16le = (b, p) => b[p] | (b[p + 1] << 8);
 const m = new Function("u32le", "u16le",
-  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable, glyphsToHexTable, parseBokuMsgRaw, parseSjisList };")(u32le, u16le);
+  src.slice(s, e) + "\nreturn { parseBokuMsg, detectBokuMsg, bokuMsgText, parseBokuMsgTables, parseBokuMap, bokuMsgVoice, bokuMsgTsv, bokuMsgUsed, parseGlyphTable, glyphsToHexTable, parseBokuMsgRaw, parseSjisList, bokuGlyphVerdict };")(u32le, u16le);
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 
@@ -277,6 +277,28 @@ if (m.parseBokuMsgRaw(new Uint8Array([5, 0, 6, 0]))) fail("終わりの無い並
   /* 4 バイト刻みには長さの欄が無いので、そもそも見ない */
   const four = m.detectBokuMsg(buildMsg([[0, 1, 0x8000], [2, 0x8000]], 4));
   if (four && four.stride === 4 && four.lenField !== null) fail("4 バイト刻みで長さの欄を見た");
+}
+
+/* 文字表の出来具合の言い分け。0 種で「全部読める」と言わないこと (#124)。
+   画面の文言はここの戻り値で選ぶので、**実際に動く関数**を呼んで確かめる
+   (定数を書き写した検査は #99・#103・#109 で 3 度すり抜けた) */
+{
+  const v = m.bokuGlyphVerdict;
+  if (v(false, 12, 0) !== "none") fail("文字表なしを none と言わない");
+  if (v(false, 0, 0) !== "none") fail("文字表なしは、使った番号が 0 でも none");
+  if (v(true, 0, 0) !== "untested") fail("使われている番号 0 種を『全部読める』と言っている");
+  if (v(true, 12, 3) !== "missing") fail("足りない番号があるのに missing でない");
+  if (v(true, 12, 0) !== "ok") fail("全部あるのに ok でない");
+
+  /* 画面の文言側: 4 通りとも枝が用意してあること (取りこぼすと undefined が出る) */
+  for (const key of ["none", "untested", "missing", "ok"]) {
+    if (!new RegExp(`\\b${key}:`).test(src.slice(src.indexOf("使われている番号 ${used.length} 種")))) {
+      fail(`.msg の要約に ${key} の文言が無い`);
+    }
+  }
+  /* 「試せていない」が実在の文言として画面と報告の両方にあること */
+  const notes = src.split("文字表は試せていない").length - 1;
+  if (notes < 2) fail(`「試せていない」の文言が ${notes} か所 (要約と報告用の 2 か所に要る)`);
 }
 
 fs.mkdirSync(path.join(repo, "work"), { recursive: true });

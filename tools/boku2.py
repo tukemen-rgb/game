@@ -841,7 +841,9 @@ def check(folder: str, out=sys.stdout) -> int:
             say(f"[文字表] font.txt: {sum(1 for g in glyphs if g)} 字 / 上の .msg で使われている番号 {len(used_here)} 種のうち"
                 f"文字表に無い {len(missing)} 種"
                 + (f" (例: {' '.join(str(u) for u in missing[:10])}{' …' if len(missing) > 10 else ''})。"
-                   "フォント画像のこの番号を書き足す (docs/10 の手順 3)" if missing else "。この範囲は全部読める"))
+                   "フォント画像のこの番号を書き足す (docs/10 の手順 3)" if missing
+                   else "。文字番号を使っている行が無いので、文字表は試せていない" if not used_here
+                   else "。この範囲は全部読める"))
         else:
             say("[文字表] font.txt はまだ無い (作ったらこのフォルダに置くと、ここで出来具合を確かめられる)")
         for e in fonts[:3]:
@@ -1006,12 +1008,19 @@ def run(args) -> int:
         if glyphs:
             # 文字表が短い / 抜けがあると本文に [番号] が残る。どの番号か数えて知らせる
             missing = [u for u in used_codes(files) if u >= len(glyphs) or glyphs[u] is None]
+            used = used_codes(files)
             if missing:
                 print(f"文字表に無い番号: {len(missing)} 種 (例: {' '.join(str(u) for u in missing[:12])}"
                       f"{' …' if len(missing) > 12 else ''})。本文ではこの番号が [番号] のまま残っています。"
                       f"フォント画像のこの番号の文字を文字表に足してください", file=sys.stderr)
+            elif not used:
+                # 0 種で「全部読めました」と言うと、**文字表を一度も引いていない**のに
+                # 仕上がった印 (docs/10 の 55 分の行) が出る。Shift-JIS だけの範囲
+                # (保存画面の一部) を 1 ファイルだけ渡すとこうなる (#124)
+                print("文字番号を使っている行がありませんでした。文字表は試せていません "
+                      "(この範囲は Shift-JIS です)", file=sys.stderr)
             else:
-                print(f"文字表で全部読めました (使われている番号 {len(used_codes(files))} 種)", file=sys.stderr)
+                print(f"文字表で全部読めました (使われている番号 {len(used)} 種)", file=sys.stderr)
     elif args.cmd == "used":
         used = used_codes(expand_patterns(args.files))
         if not used:

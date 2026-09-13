@@ -4459,6 +4459,53 @@ class TestNothingIsNotAPass(unittest.TestCase):
         self.assertNotIn("この番号だけ書き出せば", out,
                          "書き出す番号が無いのに「この番号だけ書き出せば読める」")
 
+    def test_a_range_that_never_uses_the_glyph_table_is_not_called_readable(self):
+        """文字番号を 1 つも使わない範囲を「文字表で全部読めました」と言わないこと (#124).
+
+        保存画面の一部は Shift-JIS で、文字表を引かない。そこだけを `text` に渡すと
+        「使われている番号 0 種」で**全部読めた**ことになっていた。
+        docs/10 の 55 分の行は、この文言を文字表が仕上がった印として見ろと言っている。
+        """
+        sjis = "\0".join(["セーブしますか？", "はい", "いいえ"]).encode("cp932") + b"\0"
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "x.msg"), "wb") as fh:
+                fh.write(sjis)
+            font = os.path.join(tmp, "font.txt")
+            with open(font, "w", encoding="utf-8") as fh:
+                fh.write("あいうえお\n")
+            rc, out = self.cli("boku2.py", "text", tmp, "-f", font,
+                               "-o", os.path.join(tmp, "o.tsv"))
+            with open(os.path.join(tmp, "o.tsv"), encoding="utf-8-sig") as fh:
+                got = fh.read()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("セーブしますか？", got, "Shift-JIS の行が取り出せていない (前提が崩れた)")
+        self.assertNotIn("文字表で全部読めました", out,
+                         "文字表を一度も引いていないのに「全部読めました」と言っている")
+        self.assertIn("試せていません", out, out)
+        # docs/10 の 55 分の行と「困ったとき」が、この 3 つ目の結果を知っていること
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        self.assertTrue("文字表は試せていません" in doc,
+                        "docs/10 が 3 つ目の結果 (試せていません) を書いていない")
+
+    def test_the_browser_says_the_same_thing_for_a_table_it_never_used(self):
+        """画面の言い分けが CLI と同じ 4 通りで、0 種を ok と言わないこと.
+
+        判定そのものは web/app.js の `bokuGlyphVerdict` を **node で動かして**
+        確かめる (tests/test_bokumsg.mjs)。ここでは画面と CLI が同じ言葉を
+        持っていることだけを見る。
+        """
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertTrue("function bokuGlyphVerdict(" in js,
+                        "画面側の言い分けが関数になっていない (書き写した検査になる)")
+        self.assertTrue("文字表は試せていない" in js,
+                        "画面に「試せていない」の文言が無い")
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            py = fh.read()
+        self.assertTrue("文字表は試せていない" in py and "文字表は試せていません" in py,
+                        "CLI 側 (check / text) のどちらかに文言が無い")
+
     def test_the_docs_quote_the_refusals_word_for_word(self):
         """docs/10 の「困ったとき」が挙げる断り文句が、道具の出力に本当にあること.
 
