@@ -4366,6 +4366,85 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestExerciseTwoRuleOfThumbIsTrue(unittest.TestCase):
+    """課題 2 の「`82 xx` は仮名」が、題材で本当かを数える (#121).
+
+    課題 2 は要点として「`82 xx` がひらがな、`F0` が改行、`FF` が終端」を
+    **目で覚えろ**と言っていた。前 2 つと最後は正しいが、**`82` は仮名だけでは
+    ない**。Shift-JIS では `82 4F`〜`82 9A` が全角の英数字で、題材にも
+    `３００` (id 3) や `８５０` (id 24) が入っている。どちらも課題 5・6 で
+    もう一度出てくる行なので、「82 なら仮名」と覚えたまま手で読むと数字を外す。
+
+    覚え違いは道具では捕まらない (道具は正しく読む) ので、**文書の側**を直した。
+    ここでは文書が挙げている数と範囲を数え直す。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/SCRIPT.BIN", "make_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        arch = scrp.read_archive(os.path.join(REPO, "work", "SCRIPT.BIN"))
+        cls.kana, cls.alnum, cls.alnum_ids = 0, 0, set()
+        for idx in range(arch.count):
+            raw = arch.raw_block(idx)
+            i = 0
+            while i < len(raw):
+                b = raw[i]
+                if b in (0xF0, 0xF2, 0xFF):          # 改行 / 待ち / 終端
+                    i += 1
+                    continue
+                if b == 0xF1:                        # 話者名 (引数 1 バイト)
+                    i += 2
+                    continue
+                if 0x81 <= b <= 0x9F or 0xE0 <= b <= 0xEF:
+                    if b == 0x82:
+                        trail = raw[i + 1]
+                        if 0x9F <= trail <= 0xF1:
+                            cls.kana += 1
+                        elif 0x4F <= trail <= 0x9A:
+                            cls.alnum += 1
+                            cls.alnum_ids.add(idx)
+                    i += 2
+                else:
+                    i += 1
+        with open(os.path.join(REPO, "exercises", "README.md"), encoding="utf-8") as fh:
+            cls.doc = fh.read()
+
+    def test_the_document_admits_that_82_is_not_always_kana(self):
+        self.assertTrue("`82` なら必ず仮名、ではありません" in self.doc,
+                        "課題 2 が「82 なら仮名」と言い切ったままになっている")
+
+    def test_the_counts_in_the_document_are_measured(self):
+        import re
+
+        m = re.search(r"前者が (\d+) 回、後者が (\d+) 回", self.doc)
+        self.assertTrue(m, "課題 2 に数が書かれていない")
+        self.assertEqual(int(m.group(1)), self.kana,
+                         f"仮名が {self.kana} 回 (文書は {m.group(1)} 回)")
+        self.assertEqual(int(m.group(2)), self.alnum,
+                         f"全角英数が {self.alnum} 回 (文書は {m.group(2)} 回)")
+
+    def test_the_ids_the_document_names_really_contain_them(self):
+        """文書が例に挙げた id に、本当に全角英数が入っていること."""
+        import re
+
+        named = {int(x) for x in re.findall(r"id (\d+) の `[０-９]+`", self.doc)}
+        self.assertTrue(named, "課題 2 が例の id を挙げていない")
+        self.assertTrue(named <= self.alnum_ids,
+                        f"文書が挙げた id {sorted(named)} のうち "
+                        f"{sorted(named - self.alnum_ids)} には全角英数が無い")
+
+    def test_the_boundary_in_the_document_is_the_real_one(self):
+        """境目 (9F) が本当の境目であること。ここを外すと覚え直しになる."""
+        self.assertEqual("ぁ".encode("cp932").hex().upper(), "829F")
+        self.assertEqual("ん".encode("cp932").hex().upper(), "82F1")
+        self.assertEqual("０".encode("cp932").hex().upper(), "824F")
+        self.assertEqual("ｚ".encode("cp932").hex().upper(), "829A")
+        self.assertTrue("`82 9F`〜`82 F1`" in self.doc, "かなの範囲が違う")
+        self.assertTrue("`82 4F`〜`82 9A`" in self.doc, "全角英数の範囲が違う")
+
+
 class TestExerciseThreeCanActuallyBeFinished(unittest.TestCase):
     """課題 3 を手順どおりにやると、道具の言うとおりに足せば読めること (#120).
 
