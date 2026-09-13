@@ -4458,6 +4458,97 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestKanjiHidingInKatakana(unittest.TestCase):
+    """カタカナに紛れた形の似た漢字を拾う検査 (#127).
+
+    長音記号 `ー` (U+30FC) と漢数字の `一` (U+4E00) は、小さいビットマップ
+    フォントでは見分けがつかない。**英語化パッチの公開ソースに、取り出した
+    日本語がそのまま残っていて**、買い物メニューが「コ一ヒ一牛乳」、
+    虫相撲が「グレ一ト」「ハリケ一ン」になっている (`MENU_TEXT_EXCEPTIONS` /
+    `BUGGED_LINES`)。製品側の誤字か、文字表を作るときの取り違えかは、
+    手元のデータでは決められない。どちらにせよ目では気づけないので機械に見張らせる。
+
+    検査の値打ちは**取りこぼさないこと**と**正しい日本語で鳴らないこと**の両方で
+    決まる。片方だけ見ても意味がないので、両方を数える。
+    """
+
+    #: 公開ソースの MENU_TEXT_EXCEPTIONS / BUGGED_LINES にそのまま出てくる形
+    BAD = ["グレ一ト", "ハリケ一ン", "コ一ヒ一牛乳", "ジェットサイダ一",
+           "チュ一チュ一アイス", "ベ一スボ一ルバ一", "ボ一ルガム", "クリ一ム",
+           "ベビ一スタ一ラ一メン", "北極バ一", "虫交換ノ一ト"]
+    #: 鳴ってはいけない、正しい日本語
+    GOOD = ["コーヒーを一杯", "メートル一本", "ビール一杯だけ", "テスト二回目",
+            "カード一枚", "ジェットサイダー", "グレート", "一日中あそんだ",
+            "力をこめる", "口をひらく", "セリカ。", "ジュースを一本<BR>買った",
+            "アイス、一つ", "ゲーム", "スタート"]
+
+    @classmethod
+    def setUpClass(cls):
+        import proofread
+
+        cls.pf = proofread
+        cls.rules = proofread.load_rules(os.path.join(REPO, "data", "rules.json"), "ja")
+
+    def fires(self, text: str) -> bool:
+        row = {"id": "0", "original": text, "translation": text}
+        found = self.pf.check_row(row, self.rules, [], None,
+                                  self.pf.tag_widths_of(self.rules, 0.0))
+        return any(f.rule == "notation" and "似た漢字" in f.message for f in found)
+
+    def test_it_catches_every_real_example_from_the_public_source(self):
+        missed = [t for t in self.BAD if not self.fires(t)]
+        self.assertEqual(missed, [], f"公開ソースに実在する形を拾えない: {missed}")
+
+    def test_it_stays_quiet_on_correct_japanese(self):
+        noisy = [t for t in self.GOOD if self.fires(t)]
+        self.assertEqual(noisy, [], f"正しい日本語で鳴っている: {noisy}")
+
+    def test_it_is_quiet_on_everything_already_in_the_repo(self):
+        """手持ちの本文と教材で 1 件も鳴らないこと (鳴ったら誤検出かこちらの誤字)."""
+        import glob
+
+        hits = []
+        for path in ("exercises/qa_target.tsv", "work/BOKU2SAMPLE/answer.tsv"):
+            full = os.path.join(REPO, path)
+            if not os.path.isfile(full):
+                continue
+            for row in scrp.read_tsv(full):
+                for col in ("original", "translation"):
+                    if row.get(col) and self.fires(row[col]):
+                        hits.append(f"{path} id={row.get('id')} {col}")
+        for path in glob.glob(os.path.join(REPO, "docs", "*.md")):
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            # docs/04 と docs/10 は**わざと**実例を載せているので除く
+            if os.path.basename(path).startswith(("04-", "09-", "10-")):
+                continue
+            for line in text.splitlines():
+                if self.fires(line):
+                    hits.append(f"{os.path.basename(path)}: {line[:40]}")
+        self.assertEqual(hits, [], f"鳴ってはいけない所で鳴った: {hits[:5]}")
+
+    def test_the_examples_really_are_in_the_public_source(self):
+        """BAD の 11 個が本当に公開ソースに書いてあること (#127).
+
+        「実在する形で測った」が検査の値打ちの土台なので、そこを書き写しで
+        済ませない。公開ソースが無い環境では飛ばす (中身は取り込まない)。
+        """
+        msg_py = os.path.join(PUBLIC_SRC, "MSG.py")
+        if not os.path.isfile(msg_py):
+            self.skipTest(f"公開ソースが無い ({PUBLIC_SRC})")
+        with open(msg_py, encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+        missing = [t for t in self.BAD if t not in src]
+        self.assertEqual(missing, [], f"公開ソースに無い形を実例として挙げている: {missing}")
+
+    def test_the_docs_say_where_the_example_came_from(self):
+        """実例の出どころを書いてあること。作り話にしない."""
+        with open(os.path.join(REPO, "docs", "04-校正とQA.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        for phrase in ("MENU_TEXT_EXCEPTIONS", "コ一ヒ一牛乳", "どちらとも決められません"):
+            self.assertTrue(phrase in doc, f"docs/04 に「{phrase}」が無い")
+
+
 class TestNothingIsNotAPass(unittest.TestCase):
     """「0 件だから合格」を言わせない (#123).
 
