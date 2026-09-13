@@ -4363,6 +4363,105 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestTheBlindSpotOfTheImageFinderIsDocumented(unittest.TestCase):
+    """docs/07 に書いた「取りこぼす絵」の表を、実際に測り直す (#114).
+
+    「見つけた絵」は (1) 分類が タイル (2) 縦の相関が小さい、の順に見る。
+    **(1) で落ちた絵は (2) がどれだけ良くても拾われない。** 実際に落ちるのは
+    階調のなだらかな絵で、色数が多く隣との差が小さいと「波形」になる。
+    合成した階調の絵は縦の相関 0.73 (しきい値 0.82 より小さい = 絵の条件を
+    満たす) なのに、測る前に落ちている。
+
+    これは直さずに**文書に書く**ことにした (緩めると音声が軒並み絵として出る)。
+    その代わり、書いた数字が本当かをここで見張る。
+    """
+
+    #: docs/07 の表と同じ形の絵を作る種。noise が隣どうしの差を決める
+    @staticmethod
+    def gradient(noise: int, seed: int = 7) -> list:
+        r = seed & 0xFFFFFFFF
+        out = []
+        for y in range(256):
+            for x in range(64):
+                r = (r * 1103515245 + 12345) & 0xFFFFFFFF
+                out.append(((x * 4 + y * 3) + ((r >> 16) & 0xFF) % (noise + 1)) & 0xFF)
+        return out
+
+    @staticmethod
+    def probe(byte_list) -> dict:
+        """web/app.js の blockStats / classifyStats / lagRatio / tileScore を動かす."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('const SJIS_LEAD'),e=s.indexOf('function guessTileShape');"
+            "if(a<0||e<0){console.error('no funcs');process.exit(2);}"
+            "const m=new Function(s.slice(a,e)+"
+            "'\\nreturn {blockStats,classifyStats,lagRatio,tileScore};')();"
+            f"const v=new Uint8Array({json.dumps(byte_list)});"
+            "const st=m.blockStats(v.subarray(0,4096));"
+            "console.log(JSON.stringify({cls:m.classifyStats(st),meanDiff:st.meanDiff,"
+            "ratio:m.lagRatio(v.subarray(0,4096),64),found:!!m.tileScore(v,0,4096)}));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("測れない: " + res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    def doc_rows(self) -> list:
+        """docs/07 の「取りこぼす絵」の表を (平均差, 分類, 相関 or None) で返す."""
+        import re
+
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        self.assertIn("この見つけ方が取りこぼす絵", doc, "docs/07 に取りこぼしの節が無い")
+        body = doc.split("この見つけ方が取りこぼす絵", 1)[1].split("\n###", 1)[0]
+        rows = []
+        for line in body.split("\n"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) == 4 and re.match(r"^[\d.]+", cells[0]):
+                ratio = re.search(r"(\d\.\d\d)", cells[2])
+                rows.append((float(re.match(r"^([\d.]+)", cells[0]).group(1)),
+                             cells[1], float(ratio.group(1)) if ratio else None))
+        return rows
+
+    def test_the_smooth_image_is_dropped_before_the_correlation_is_used(self):
+        """表の 1 行目。相関はしきい値より小さいのに、分類で落ちている."""
+        got = self.probe(self.gradient(0))
+        rows = self.doc_rows()
+        self.assertTrue(rows, "docs/07 の表を読めない")
+        want_diff, want_cls, want_ratio = rows[0]
+        self.assertEqual(want_cls, "波形",
+                         f"docs/07 の 1 行目の分類が「{want_cls}」になっている")
+        self.assertEqual(got["cls"], "wave", f"なだらかな絵の分類が {got['cls']}")
+        self.assertEqual(round(got["meanDiff"], 1), want_diff,
+                         f"隣どうしの平均差が {got['meanDiff']:.1f} (docs/07 は {want_diff})")
+        self.assertEqual(round(got["ratio"], 2), want_ratio,
+                         f"縦の相関が {got['ratio']:.2f} (docs/07 は {want_ratio})")
+        # 表の主張の核: 相関はしきい値より小さいのに、絵として拾われない
+        import re
+
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            cut = float(re.search(r"const TILE_RATIO_MAX = ([\d.]+);", fh.read()).group(1))
+        self.assertLess(got["ratio"], cut, "相関がしきい値より大きい (表の前提が崩れている)")
+        self.assertFalse(got["found"], "拾われないはずの絵が拾われた (表を書き換えること)")
+
+    def test_a_sharp_image_is_still_found(self):
+        """輪郭のある絵 (ドット絵・フォント) は今までどおり拾えること."""
+        problem = ensure_practice("work/FONT.BIN", "make_sample.py")
+        if problem:
+            self.skipTest(problem)
+        with open(os.path.join(REPO, "work", "FONT.BIN"), "rb") as fh:
+            got = self.probe(list(fh.read(8192)))
+        self.assertEqual(got["cls"], "tile", f"フォントの分類が {got['cls']}")
+        self.assertTrue(got["found"], "フォントが絵として拾われなくなった")
+
+
 class TestShortFilesAreNotCalledZeroFill(unittest.TestCase):
     """ゼロが 1 バイトも無いものを「ほとんどがゼロ埋め」と言わないこと (#113).
 
