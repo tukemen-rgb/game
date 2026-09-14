@@ -4494,7 +4494,8 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
         if ensure_practice("work/SCRIPT.BIN", "make_sample.py"):
             raise unittest.SkipTest("練習データ (SCRIPT.BIN) が作れない")
         cls.tmp = tempfile.TemporaryDirectory()
-        cls.corpus = cls.build_corpus(cls.tmp.name)
+        cls.ran_tools = set()
+        cls.corpus = cls.build_corpus(cls.tmp.name, cls.ran_tools)
         with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
             cls.doc = fh.read()
         with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
@@ -4505,11 +4506,16 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
         cls.tmp.cleanup()
 
     @staticmethod
-    def build_corpus(tmp: str) -> str:
-        """道具を一通り走らせて、出た文字を全部つなげる (正常系も異常系も)."""
+    def build_corpus(tmp: str, ran: set) -> str:
+        """道具を一通り走らせて、出た文字を全部つなげる (正常系も異常系も).
+
+        `ran` に**実際に呼んだ**道具の名前を入れる。ソースを読んで数えると
+        `if False:` で囲っただけの呼び出しまで数えてしまう (壊して確かめて気づいた #133)。
+        """
         import subprocess
 
         def run(*args):
+            ran.add(os.path.basename(args[0]))
             r = subprocess.run([sys.executable, *args], capture_output=True, text=True, cwd=REPO)
             return r.stdout + r.stderr
 
@@ -4551,15 +4557,30 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
                 fh.write("id\toriginal\ttranslation\n")
         open(at("blank.txt"), "w").close()
         qa = os.path.join(REPO, "exercises", "qa_target.tsv")
+        enc = os.path.join(REPO, "work", "MSG_ENC.BIN")
         out += [
             run(tool("proofread.py"), qa),
             run(tool("proofread.py"), at("h.tsv")),
             run(tool("proofread.py"), qa, "--font-chars", at("blank.txt")),
             run(tool("compare_tsv.py"), at("h.tsv"), at("h2.tsv")),
+            # うまくいった側も要る。失敗の道しか走らせないと「全部一致しました」が
+            # 山に入らず、そこを引用した文書が**通らない**ことに気づけない (#133)
+            run(tool("compare_tsv.py"), qa, qa),
             run(tool("dump_text.py"), os.path.join(sample, "BOKU2.IDX")),
             run(tool("insert_text.py"), at("a.tsv"), "-o", at("z.bin"),
                 "--original", os.path.join(REPO, "work", "SCRIPT.BIN")),
         ]
+        if os.path.isfile(enc):                      # 課題 1・3 の道具 (docs/10 が名指しする)
+            tbl = os.path.join(REPO, "answers", "custom.tbl")
+            with open(at("part.tbl"), "w", encoding="utf-8") as fh:
+                with open(tbl, encoding="utf-8") as src:
+                    lines = src.read().splitlines()
+                fh.write("\n".join(l for i, l in enumerate(lines) if i % 3))
+            out += [
+                run(tool("hexdump.py"), enc, "--struct"),
+                run(tool("hexdump.py"), enc, "--table", tbl),
+                run(tool("hexdump.py"), enc, "--table", at("part.tbl"), "--message", "0"),
+            ]
         return "\n".join(out)
 
     def quoted(self) -> list[tuple[str, str]]:
@@ -4608,6 +4629,34 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
         self.assertEqual(missing, [],
                          "docs/10 が引用しているのに、道具も画面も言わない文言: "
                          + " / ".join(f"[{w}]「{q}」" for w, q in missing))
+
+    def test_the_corpus_runs_every_tool_the_doc_names(self):
+        """docs/10 がコマンドで名指しする道具は、全部この山で走らせること (#133).
+
+        山に無い道具の文言は、引用しても**当たらない**。それは落ちる向きなので
+        安全だが、「当たらない = 文書が古い」と読み違える (#131 で一度読み違えた)。
+        もっと悪いのは、山が薄いまま「21 個とも当たった」を裏付けだと思うこと。
+        **docs/10 に新しい道具のコマンドを書いたら、山にも足す**を機械で縛る。
+        """
+        import re
+
+        named = set(re.findall(r"tools/(\w+\.py)", self.doc))
+        self.assertGreaterEqual(len(named), 3,
+                                f"docs/10 から道具名を {len(named)} 個しか拾えない (拾い方が壊れた)")
+        # **実際に呼んだ**名前で見る。ソースを読むと `if False:` で囲った呼び出しも数える
+        self.assertEqual(named - self.ran_tools, set(),
+                         f"docs/10 が名指しするのに山で走らせていない道具: "
+                         f"{sorted(named - self.ran_tools)}")
+
+    def test_the_success_paths_are_in_the_corpus_too(self):
+        """うまくいった側の文言も山に入っていること.
+
+        異常系だけ走らせた山は、正常系の引用を「無い」と言ってしまう。
+        `exercises/README.md` が引用している 2 つで確かめる。
+        """
+        for phrase in ("全部一致しました", "足すのは 1 行ではなく"):
+            self.assertIn(phrase, self.corpus,
+                          f"うまくいった側の「{phrase}」が山に入っていない")
 
     def test_a_phrase_nobody_prints_is_caught(self):
         """この検査自体が効くこと。実在しない文言は見つからないと言うこと."""
