@@ -5064,6 +5064,77 @@ class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
         self.assertTrue("行ごとの指摘にしていません" in self.doc,
                         "「原文と同じ」を行ごとに出さない旨が書いていない")
 
+    #: docs/04 の一覧が「これを見ている」と言っている条件を、1 つずつ作ったもの。
+    #: **書いてある条件で、書いてある検査が出る**ことを見る (#140)
+    PROBES = {
+        "placeholder": ("<VAR:00>さん、こんにちは。", "さん、こんにちは。"),
+        "control": ("はい。<WAIT>", "はい。"),
+        "line_width": ("みじかい。", "あ" * 25 + "。"),
+        "line_count": ("みじかい。", "あ<BR>い<BR>う<BR>え"),
+        "kinsoku": ("あいう<BR>えお。", "あいう<BR>。えお"),
+        "halfwidth": ("３００ギル", "300ギル"),
+        "font": ("とびら。", "薔薇。"),
+        "glossary": ("薬草をつかう。", "やくそうをつかう。"),
+        "notation": ("……そっか。", "また来てね〜"),      # 〜 は U+301C (禁止)
+
+        "empty": ("セーブしますか？<WAIT>", "<WAIT>"),
+        "untranslated": ("セーブしますか？", ""),
+        "number": ("８５０ギル", "８５ギル"),
+    }
+
+    def test_each_rule_fires_on_the_condition_the_table_describes(self):
+        """一覧の「何を見ているか」どおりの入力で、その検査が出ること (#140).
+
+        #139 で入れたのは「13 個がどれも出せること」までで、
+        **書いてある条件で出るか**は見ていなかった。実際、`empty` の欄には
+        「訳文が空」と書いてあったが、空欄で出るのは `untranslated` のほう。
+        `empty` は**タグしか残っていない**ときに出る。
+        """
+        gloss = self.pf.load_glossary(os.path.join(REPO, "data", "glossary.tsv"))
+        chars = self.pf.load_font_chars(os.path.join(REPO, "data", "font_chars.txt"))
+        tw = self.pf.tag_widths_of(self.rules, 0.0)
+        for rule, (original, translation) in self.PROBES.items():
+            row = {"id": "0", "original": original, "translation": translation}
+            got = {f.rule for f in self.pf.check_row(row, self.rules, gloss, chars, tw)}
+            self.assertIn(rule, got,
+                          f"一覧が言う条件で {rule} が出ない (出たのは {sorted(got)})")
+
+    def test_the_line_break_tag_is_not_compared_and_the_table_says_so(self):
+        """`<BR>` は照合しないこと。一覧がそう書いてあること (#140).
+
+        一覧の `control` の欄は「`<BR>` `<WAIT:xx>` などの制御タグが原文と
+        一致するか」と、**`<BR>` を先頭に挙げていた**。実際は `BR` / `CLEAR` / `LT`
+        は照合から外してある (行の折り返しは校正者の仕事で、結果は
+        `line_width` / `line_count` が見る)。読んだ人は `<BR>` を消したら
+        出ると思うが、出ない。
+        """
+        gloss = self.pf.load_glossary(os.path.join(REPO, "data", "glossary.tsv"))
+        tw = self.pf.tag_widths_of(self.rules, 0.0)
+
+        def fired(original, translation):
+            row = {"id": "0", "original": original, "translation": translation}
+            return {f.rule for f in self.pf.check_row(row, self.rules, gloss, None, tw)}
+
+        self.assertNotIn("control", fired("あいう<BR>えお。", "あいうえお。"),
+                         "<BR> を消したのに control が出る (一覧の元の書き方が正しくなる)")
+        self.assertNotIn("control", fired("あいうえお。", "あい<BR>うえお。"),
+                         "<BR> を増やしたのに control が出る")
+        # 見ている側は出ること (照合そのものが死んでいない)
+        self.assertIn("control", fired("はい。<WAIT>", "はい。"),
+                      "<WAIT> を消しても control が出ない (照合が働いていない)")
+        # 同じ名前の行が要約の表にもある。**一覧のほう** (5 列) だけを見る (#139 で踏んだ)
+        rows = [ln for ln in self.doc.splitlines()
+                if ln.startswith("| `control` | WARN |") and "変数と文字数" in ln]
+        self.assertEqual(len(rows), 1, f"docs/04 の一覧に control の行が {len(rows)} 本")
+        self.assertIn("は見ません", rows[0], f"見ないタグがあると書いていない: {rows[0]}")
+
+    def test_the_empty_row_describes_tags_only(self):
+        """`empty` の欄が「タグしか残っていない」と書いてあること."""
+        rows = [ln for ln in self.doc.splitlines()
+                if ln.startswith("| `empty` | ERROR |") and "手作業に残る部分" in ln]
+        self.assertEqual(len(rows), 1, f"docs/04 の一覧に empty の行が {len(rows)} 本")
+        self.assertIn("タグしか残っていない", rows[0], f"条件が違う: {rows[0]}")
+
     def test_every_rule_in_the_table_can_actually_fire(self):
         """一覧に載っている 13 個が、どれも出せること (出ない検査を載せない).
 
