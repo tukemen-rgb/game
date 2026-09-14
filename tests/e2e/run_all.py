@@ -55,7 +55,13 @@ def main() -> int:
     try:
         import playwright  # noqa: F401
     except ImportError:
-        print("skip: playwright がありません (pip install playwright && python3 -m playwright install chromium)")
+        # **何件確かめていないのか**を出す。1 行の「skip:」だけだと、
+        # 終了コード 0 と合わせて「全部通った」に見える (#135)。
+        # tests/run_tests.py の飛ばし方の報告 (#134) と同じ書き方に揃える
+        print(f"\n飛ばした検査 {len(CHECKS)} 件 (この分は確かめていません):")
+        for name in CHECKS:
+            print(f"  - {name}: playwright がありません")
+        print("  入れ方: pip install playwright && python3 -m playwright install chromium")
         return 0
     problem = build_fixtures()
     if problem:

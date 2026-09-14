@@ -6249,6 +6249,61 @@ class TestWhatIsConfirmedHasOneAnswer(unittest.TestCase):
                         "表が記録欄より後ろにある")
 
 
+class TestTheHeadlessSuiteSaysWhatItSkipped(unittest.TestCase):
+    """ヘッドレス側も「何件確かめていないか」を言うこと (#135).
+
+    `tests/e2e/run_all.py` は playwright が無ければ
+
+        skip: playwright がありません (…)
+
+    と 1 行出して**終了コード 0** で終わっていた。件数もどの検査かも言わない。
+    #134 で Python 側を直したのと同じ型が、こちらに残っていた。
+    しかもこちらは 11 件まるごと (画面の検査が全部) で、割合はもっと悪い。
+    """
+
+    def run_without_playwright(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # playwright を import した瞬間に落ちる偽物を、探索パスの先頭に置く
+            with open(os.path.join(tmp, "playwright.py"), "w", encoding="utf-8") as fh:
+                fh.write('raise ImportError("playwright は無いことにする")\n')
+            env = dict(os.environ, PYTHONPATH=tmp)
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tests", "e2e", "run_all.py")],
+                capture_output=True, text=True, cwd=REPO, env=env, timeout=120)
+        return res
+
+    def test_it_reports_how_many_checks_did_not_run(self):
+        res = self.run_without_playwright()
+        out = res.stdout + res.stderr
+        self.assertNotIn("OK ", out, f"playwright が無いのに検査が走っている:\n{out[:400]}")
+        m = re.search(r"飛ばした検査 (\d+) 件", out)
+        self.assertTrue(m, f"飛ばした件数を言っていない:\n{out[:400]}")
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "e2e_run_all", os.path.join(REPO, "tests", "e2e", "run_all.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(int(m.group(1)), len(mod.CHECKS),
+                         f"報告 {m.group(1)} 件 / 実際にある検査 {len(mod.CHECKS)} 件")
+        for name in mod.CHECKS:
+            self.assertIn(f"- {name}:", out, f"{name} を飛ばしたと言っていない")
+
+    def test_the_wording_matches_the_python_side(self):
+        """2 つの報告で言い方を揃える。読む人が同じものだと分かるように."""
+        with open(os.path.join(REPO, "tests", "e2e", "run_all.py"), encoding="utf-8") as fh:
+            e2e = fh.read()
+        with open(os.path.join(REPO, "tests", "run_tests.py"), encoding="utf-8") as fh:
+            py = fh.read()
+        phrase = "飛ばした検査 {} 件 (この分は確かめていません)"
+        for name, src in (("run_all.py", e2e), ("run_tests.py", py)):
+            self.assertTrue(phrase.replace("{}", "{total}") in src
+                            or phrase.replace("{}", "{len(CHECKS)}") in src,
+                            f"{name} の言い回しが揃っていない")
+
+
 class TestTheSkipCountIsHonest(unittest.TestCase):
     """飛ばした検査の数が、本当に走らなかった数と合うこと (#134).
 
