@@ -6342,8 +6342,15 @@ class TestTheBlindSpotOfTheImageFinderIsDocumented(unittest.TestCase):
     合成した階調の絵は縦の相関 0.73 (しきい値 0.82 より小さい = 絵の条件を
     満たす) なのに、測る前に落ちている。
 
-    これは直さずに**文書に書く**ことにした (緩めると音声が軒並み絵として出る)。
-    その代わり、書いた数字が本当かをここで見張る。
+    これは直さずに**文書に書く**ことにした。その代わり、書いた数字が本当かを
+    ここで見張る。
+
+    #147 で表の見張り方そのものを点検したら、**3 行のうち 1 行目しか見ていなかった**。
+    2 行目・3 行目は「合成データで測ると」と書いてあるのに**作り方がどこにも無く**、
+    誰にも再現できない数字だった。実際 2 行目の「平均差 23.2 / 相関 0.91」は、
+    上の `gradient` で 23.2 を出す粒 (36) では相関 0.98 で、種 64 通り ×
+    粒 256 通りを総当たりしても 23.2 と 0.91 が揃う組は 1 つも無かった。
+    docs/07 に粒の値を書き、3 行すべてをここで測り直すようにした。
     """
 
     #: docs/07 の表と同じ形の絵を作る種。noise が隣どうしの差を決める
@@ -6383,8 +6390,15 @@ class TestTheBlindSpotOfTheImageFinderIsDocumented(unittest.TestCase):
             raise AssertionError("測れない: " + res.stdout + res.stderr)
         return json.loads(res.stdout)
 
+    #: docs/07 の表の分類の欄と、classifyStats の返り値の対応
+    CLS_WORDS = {"波形": "wave", "高エントロピー": "high", "タイル": "tile"}
+
     def doc_rows(self) -> list:
-        """docs/07 の「取りこぼす絵」の表を (平均差, 分類, 相関 or None) で返す."""
+        """docs/07 の「取りこぼす絵」の表を (粒, 平均差, 分類, 相関) で返す.
+
+        粒 (ざらつき) の欄は #147 で足した。**作り方が書いていない数字は
+        誰にも確かめられない**ので、この欄が無ければ読み取りごと失敗させる。
+        """
         import re
 
         with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
@@ -6394,32 +6408,58 @@ class TestTheBlindSpotOfTheImageFinderIsDocumented(unittest.TestCase):
         rows = []
         for line in body.split("\n"):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if len(cells) == 4 and re.match(r"^[\d.]+", cells[0]):
-                ratio = re.search(r"(\d\.\d\d)", cells[2])
-                rows.append((float(re.match(r"^([\d.]+)", cells[0]).group(1)),
-                             cells[1], float(ratio.group(1)) if ratio else None))
+            if len(cells) == 5 and re.match(r"^\d+", cells[0]):
+                ratio = re.search(r"(\d\.\d\d)", cells[3])
+                rows.append((int(re.match(r"^(\d+)", cells[0]).group(1)),
+                             float(re.match(r"^([\d.]+)", cells[1]).group(1)),
+                             cells[2], float(ratio.group(1)) if ratio else None))
         return rows
 
-    def test_the_smooth_image_is_dropped_before_the_correlation_is_used(self):
-        """表の 1 行目。相関はしきい値より小さいのに、分類で落ちている."""
-        got = self.probe(self.gradient(0))
-        rows = self.doc_rows()
-        self.assertTrue(rows, "docs/07 の表を読めない")
-        want_diff, want_cls, want_ratio = rows[0]
-        self.assertEqual(want_cls, "波形",
-                         f"docs/07 の 1 行目の分類が「{want_cls}」になっている")
-        self.assertEqual(got["cls"], "wave", f"なだらかな絵の分類が {got['cls']}")
-        self.assertEqual(round(got["meanDiff"], 1), want_diff,
-                         f"隣どうしの平均差が {got['meanDiff']:.1f} (docs/07 は {want_diff})")
-        self.assertEqual(round(got["ratio"], 2), want_ratio,
-                         f"縦の相関が {got['ratio']:.2f} (docs/07 は {want_ratio})")
-        # 表の主張の核: 相関はしきい値より小さいのに、絵として拾われない
+    def threshold(self) -> float:
         import re
 
         with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
-            cut = float(re.search(r"const TILE_RATIO_MAX = ([\d.]+);", fh.read()).group(1))
-        self.assertLess(got["ratio"], cut, "相関がしきい値より大きい (表の前提が崩れている)")
-        self.assertFalse(got["found"], "拾われないはずの絵が拾われた (表を書き換えること)")
+            return float(re.search(r"const TILE_RATIO_MAX = ([\d.]+);", fh.read()).group(1))
+
+    def test_every_row_of_the_table_is_measured(self):
+        """表の**全行**を測り直す (#147 まで 1 行目しか見ていなかった).
+
+        書いてある粒でそのまま作り直せること自体が、この検査の値打ち。
+        """
+        rows = self.doc_rows()
+        self.assertEqual(len(rows), 3, f"docs/07 の表から {len(rows)} 行しか読めない")
+        for noise, want_diff, want_cls, want_ratio in rows:
+            got = self.probe(self.gradient(noise))
+            self.assertIn(want_cls, self.CLS_WORDS, f"知らない分類「{want_cls}」")
+            self.assertEqual(got["cls"], self.CLS_WORDS[want_cls],
+                             f"ざらつき {noise}: 分類が {got['cls']} (docs/07 は {want_cls})")
+            self.assertEqual(round(got["meanDiff"], 1), want_diff,
+                             f"ざらつき {noise}: 平均差が {got['meanDiff']:.1f} "
+                             f"(docs/07 は {want_diff})")
+            self.assertEqual(round(got["ratio"], 2), want_ratio,
+                             f"ざらつき {noise}: 縦の相関が {got['ratio']:.2f} "
+                             f"(docs/07 は {want_ratio})")
+            self.assertFalse(got["found"],
+                             f"ざらつき {noise}: 出ないはずの絵が拾われた (表を書き換えること)")
+
+    def test_only_the_first_row_is_a_real_blind_spot(self):
+        """1 行目だけが「分類さえ緩めれば拾える」絵であること (#147).
+
+        表の主張の核はここ。2・3 行目は相関もしきい値を超えているので、
+        分類を緩めても拾えない —— **取りこぼしと呼べるのは 1 行目だけ**。
+        docs/07 にそう書いたので、その言い分をここで支える。
+        """
+        rows = self.doc_rows()
+        cut = self.threshold()
+        first = self.probe(self.gradient(rows[0][0]))
+        self.assertLess(first["ratio"], cut,
+                        "1 行目の相関がしきい値より大きい (表の前提が崩れている)")
+        for noise, _diff, _cls, _ratio in rows[1:]:
+            got = self.probe(self.gradient(noise))
+            self.assertGreater(got["ratio"], cut,
+                               f"ざらつき {noise} の相関がしきい値より小さい。"
+                               f"分類を緩めれば拾えるので、docs/07 の"
+                               f"「本当の取りこぼしは 1 行目だけ」が嘘になる")
 
     def test_a_sharp_image_is_still_found(self):
         """輪郭のある絵 (ドット絵・フォント) は今までどおり拾えること."""
@@ -6430,6 +6470,148 @@ class TestTheBlindSpotOfTheImageFinderIsDocumented(unittest.TestCase):
             got = self.probe(list(fh.read(8192)))
         self.assertEqual(got["cls"], "tile", f"フォントの分類が {got['cls']}")
         self.assertTrue(got["found"], "フォントが絵として拾われなくなった")
+
+
+class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
+    """docs/07 の「緩めたら音声が軒並み絵になる」を測る (#147).
+
+    取りこぼし (なだらかな絵) を直さない**理由**として、docs/07 は
+    「ここを緩めて波形も測りにいくと、今度は音声ファイルが軒並み『絵』として
+    出てきます」と書いていた。設計判断の根拠なのに、一度も測っていなかった。
+
+    測ったら**練習データの音 (`BGM.ADP`) はいちばん小さい相関でも 7.94** で、
+    しきい値 0.82 の 10 倍近く離れていた。緩めても絵にはならない。
+    危ないのは**周期が候補の刻み (8・16・24・32・64・128) と合う音だけ**で、
+    23 バイト周期の音は 1.02 で出てこない。
+
+    理由もはっきりしている。なめらかな波は局所的にはただの坂なので、
+    間隔を空けた差は**間隔に比例して**大きくなる。だから相関は間隔そのもの
+    (いちばん短い候補なら 8) に近づく。低い音ほど安全側。
+
+    「軒並み」を測った事実に書き換えたので、その事実をここで見張る。
+    """
+
+    #: 表のうち、練習データから作るもの。それ以外は周期を指定した合成音
+    SAMPLE_ROW = "`BGM.ADP`"
+
+    @staticmethod
+    def sine(period: int, size: int = 4096) -> list:
+        """docs/07 の表と同じ合成音。`pseudo_wave` と同じ形で周期だけ変える.
+
+        JS の `Math.round` は常に大きいほうへ丸めるので `floor(x + 0.5)` で揃える
+        (Python の `round` は偶数丸めで、境目の値がずれる)。
+        """
+        import math
+
+        out = []
+        for i in range(size):
+            v = (math.sin(i / period * 2 * math.pi) * 0.6
+                 + math.sin(i / 1331 * 2 * math.pi) * 0.4)
+            out.append(math.floor((v + 1) * 127.5 + 0.5) & 0xFF)
+        return out
+
+    @staticmethod
+    def measure(byte_list) -> dict:
+        """web/app.js の classifyStats と lagRatio をそのまま動かし、最小の相関を返す."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('const SJIS_LEAD'),e=s.indexOf('function guessTileShape');"
+            "if(a<0||e<0){console.error('no funcs');process.exit(2);}"
+            "const m=new Function(s.slice(a,e)+"
+            "'\\nreturn {blockStats,classifyStats,lagRatio,TILE_LAGS,TILE_RATIO_MAX};')();"
+            # 48KB を丸ごと渡すと argv の上限に当たる。測るのは先頭の窓だけ
+            f"const v=new Uint8Array({json.dumps(list(byte_list[:4096]))});"
+            "let best=9;for(const l of m.TILE_LAGS){const r=m.lagRatio(v,l);if(r<best)best=r;}"
+            "console.log(JSON.stringify({cls:m.classifyStats(m.blockStats(v)),"
+            "ratio:best,cut:m.TILE_RATIO_MAX}));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("測れない: " + res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    def doc_rows(self) -> list:
+        """docs/07 の「緩めたら何が起きるのか」の表を (見出し, 分類, 相関, 出るか) で返す."""
+        import re
+
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        self.assertIn("では、緩めたら何が起きるのか", doc,
+                      "docs/07 に「緩めたら何が起きるのか」の節が無い")
+        body = doc.split("では、緩めたら何が起きるのか", 1)[1].split("\n###", 1)[0]
+        rows = []
+        for line in body.split("\n"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            # 分類の欄が分類の言葉になっている行だけを拾う。見出しに数字がある行だけを
+            # 拾うと、`BGM.ADP` の行が黙って抜け落ちる (#147 で一度そうなった)
+            if len(cells) == 4 and cells[1].strip("*") in ("波形", "高エントロピー", "タイル"):
+                ratio = re.search(r"(\d+\.\d\d)", cells[2])
+                self.assertTrue(ratio, f"相関を読めない行: {line!r}")
+                rows.append((cells[0], cells[1].strip("*"), float(ratio.group(1)),
+                             "出る" in cells[3].replace("出ない", "")))
+        return rows
+
+    def bytes_for(self, label: str) -> list:
+        """表の見出しから、測る相手のバイト列を作る."""
+        import re
+
+        if self.SAMPLE_ROW in label:
+            import make_iso
+
+            return list(make_iso.pseudo_wave(48 * 1024))
+        m = re.match(r"^(\d+) バイト", label)
+        self.assertTrue(m, f"表の見出しから周期を読めない: {label!r}")
+        return self.sine(int(m.group(1)))
+
+    def test_every_row_of_the_loosening_table_is_measured(self):
+        rows = self.doc_rows()
+        self.assertEqual(len(rows), 6, f"表から {len(rows)} 行しか読めない")
+        self.assertTrue(any(self.SAMPLE_ROW in r[0] for r in rows),
+                        "練習データの音の行が表から読めていない (この節の中心)")
+        for label, want_cls, want_ratio, want_found in rows:
+            got = self.measure(self.bytes_for(label))
+            self.assertEqual(got["cls"], "wave",
+                             f"{label}: 分類が {got['cls']} (音として扱えていない)")
+            self.assertEqual(want_cls, "波形", f"{label}: docs/07 の分類が「{want_cls}」")
+            self.assertEqual(round(got["ratio"], 2), want_ratio,
+                             f"{label}: 相関が {got['ratio']:.2f} (docs/07 は {want_ratio})")
+            self.assertEqual(got["ratio"] < got["cut"], want_found,
+                             f"{label}: 分類を外したときに絵として出るかが docs/07 と逆")
+
+    def test_the_practice_audio_would_not_become_a_picture(self):
+        """節の中心。練習データの音は、緩めても絵にならない (しきい値の何倍も離れている)."""
+        import make_iso
+
+        got = self.measure(list(make_iso.pseudo_wave(48 * 1024)))
+        self.assertEqual(got["cls"], "wave")
+        self.assertGreater(got["ratio"], got["cut"] * 5,
+                           f"練習データの音の相関が {got['ratio']:.2f} まで下がった。"
+                           f"docs/07 の「しきい値の 10 倍近く離れています」を書き直すこと")
+
+    def test_a_lag_matched_tone_really_would_slip_through(self):
+        """逆側。刻みに合う音は本当にすり抜ける (だから波形の分類には値打ちがある).
+
+        ここが落ちるなら、波形の分類は**何も守っていない**ことになり、
+        なだらかな絵の取りこぼしを我慢する理由が無くなる。
+        """
+        got = self.measure(self.sine(16))
+        self.assertLess(got["ratio"], got["cut"],
+                        "刻みに合う音もすり抜けない。波形の分類が守っている相手が"
+                        "いなくなったので、docs/07 の判断ごと考え直すこと")
+
+    def test_a_smooth_wave_lands_near_the_shortest_lag(self):
+        """なめらかな波の相関が「間隔そのもの」に近づくという説明が本当であること."""
+        got = self.measure(self.sine(128))
+        self.assertGreater(got["ratio"], 6,
+                           f"なめらかな波の相関が {got['ratio']:.2f}。"
+                           f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
 
 
 class TestShortFilesAreNotCalledZeroFill(unittest.TestCase):
