@@ -6249,18 +6249,117 @@ class TestWhatIsConfirmedHasOneAnswer(unittest.TestCase):
                         "表が記録欄より後ろにある")
 
 
+class TestTheSkipCountIsHonest(unittest.TestCase):
+    """飛ばした検査の数が、本当に走らなかった数と合うこと (#134).
+
+    `setUpClass` が飛ぶとクラスの検査は 1 件も走らないのに、unittest は
+    skip を **1 件**としか数えない。公開ソースの無い環境で走らせると
+    「飛ばした検査 2 件」と出ていたが、実際に走らなかったのは **12 件**だった
+    (`Ran 277` が `Ran 266` に減る)。
+
+    しかもその 11 件は `TestAgainstThePublicSource` — 向こうのコードを実際に
+    走らせて突き合わせる、**この一式でいちばん強い裏付け**。
+    少なく見せると「ほぼ全部確かめた」と読めてしまう。道具に対して
+    #123〜#125 で直したのと同じ型が、検査の側に残っていた。
+    """
+
+    class Holder:
+        def __init__(self, ident):
+            self._id = ident
+
+        def id(self):
+            return self._id
+
+    def test_a_class_level_skip_counts_every_test_in_the_class(self):
+        n = class_test_count("__main__.TestAgainstThePublicSource")
+        self.assertGreater(n, 5, f"数え方が壊れている ({n} 件)")
+        total, lines = skip_report([(self.Holder("setUpClass (__main__.TestAgainstThePublicSource)"),
+                                     "公開ソースが無い")])
+        self.assertEqual(total, n, "クラスごと飛んだのに 1 件としか数えていない")
+        self.assertIn(f"{n} 件すべて", lines[0], lines[0])
+
+    def test_a_single_skip_still_counts_one(self):
+        total, lines = skip_report([(self.Holder("__main__.TestX.test_y"), "理由")])
+        self.assertEqual(total, 1, "1 件の skip を数え違えている")
+        self.assertIn("TestX.test_y", lines[0], lines[0])
+
+    def test_an_unknown_class_does_not_crash_the_report(self):
+        """知らないクラス名でも報告そのものは出ること (数は 1 に倒す)."""
+        total, lines = skip_report([(self.Holder("setUpClass (__main__.NoSuchClass)"), "理由")])
+        self.assertEqual(total, 1, "知らないクラスで数がおかしくなる")
+        self.assertEqual(len(lines), 1, lines)
+
+    def test_the_count_matches_the_tests_that_disappear(self):
+        """クラスを飛ばしたときに減る `Ran N` の数と、報告の数が合うこと.
+
+        ここが本題。**実際に走らせて**、減った数と報告の数を突き合わせる。
+        """
+        import subprocess
+
+        env = dict(os.environ, BOKU2_PUBLIC_SRC="/nonexistent")
+        # `-k "A or B"` は unittest では効かず、**0 件走って緑**になる (#108 で踏んだ)。
+        # 絞りは 1 つだけにする。下の assertGreater がその見張りも兼ねる
+        args = [sys.executable, os.path.join(REPO, "tests", "run_tests.py"),
+                "-k", "AgainstThePublicSource"]
+        with_src = subprocess.run(args, capture_output=True, text=True, cwd=REPO)
+        without = subprocess.run(args, capture_output=True, text=True, cwd=REPO, env=env)
+        ran = lambda out: int(re.search(r"^Ran (\d+) tests", out, re.M).group(1))
+        a, b = ran(with_src.stdout + with_src.stderr), ran(without.stdout + without.stderr)
+        self.assertGreater(a, b, "公開ソースを外しても走る数が減らない (前提が崩れた)")
+        said = re.search(r"飛ばした検査 (\d+) 件", without.stdout + without.stderr)
+        self.assertTrue(said, "飛ばした件数を報告していない")
+        # 消えた分 + 個別に飛んだ分 = 報告の数
+        singles = len(re.findall(r"^  - \w+\.\w+:", without.stdout + without.stderr, re.M))
+        self.assertEqual(int(said.group(1)), (a - b) + singles,
+                         f"報告 {said.group(1)} 件 / 実際に走らなかったのは {(a - b) + singles} 件")
+
+
+def class_test_count(name: str) -> int:
+    """クラス名から、その中の検査の数を返す (分からなければ 1)."""
+    cls = getattr(sys.modules[__name__], name.rsplit(".", 1)[-1], None)
+    if cls is None or not isinstance(cls, type):
+        return 1
+    return sum(1 for n in dir(cls) if n.startswith("test"))
+
+
+def skip_report(skipped) -> tuple[int, list[str]]:
+    """飛ばした検査を (本当の件数, 行) にする (#134).
+
+    `setUpClass` が飛ぶと、**そのクラスの検査は 1 件も走らない**のに
+    unittest は skip を 1 件としか数えない。公開ソースが無い環境では
+    「飛ばした検査 2 件」と出ていたが、実際に走らなかったのは 12 件だった。
+    しかもその中身は外部の突き合わせ (#107・#108・#126) — この一式で
+    **いちばん強い裏付け**。少なく見せると「ほぼ全部確かめた」と読めてしまう。
+    """
+    total, lines = 0, []
+    for case, why in skipped:
+        ident = case.id()
+        m = re.match(r"setUpClass \((.+)\)", ident)
+        if m:
+            n = class_test_count(m.group(1))
+            total += n
+            lines.append(f"  - {m.group(1).rsplit('.', 1)[-1]} の {n} 件すべて: {why}")
+        else:
+            total += 1
+            lines.append(f"  - {ident.rsplit('.', 2)[-2]}.{ident.rsplit('.', 1)[-1]}: {why}")
+    return total, lines
+
+
 def main() -> int:
     """飛ばした検査を最後にまとめて出す (#82).
 
     unittest は skip を「OK」の行の括弧に小さく足すだけなので、練習データや node が
     無い環境では**何十件も確かめないまま緑に見える**。何を確かめていないのかは、
     結果と同じくらい大事なので、名前と理由を並べて出す。
+
+    数え方は `skip_report` を見ること。`setUpClass` が飛んだクラスは、
+    **中の検査の数だけ**数える (#134)。
     """
     result = unittest.main(verbosity=2, exit=False).result
     if result.skipped:
-        print(f"\n飛ばした検査 {len(result.skipped)} 件 (この分は確かめていません):")
-        for case, why in result.skipped:
-            print(f"  - {case.id().rsplit('.', 2)[-2]}.{case.id().rsplit('.', 1)[-1]}: {why}")
+        total, lines = skip_report(result.skipped)
+        print(f"\n飛ばした検査 {total} 件 (この分は確かめていません):")
+        print("\n".join(lines))
         print("  練習データが理由なら、先に python3 tools/make_sample.py などを実行してください")
     return 0 if result.wasSuccessful() else 1
 
