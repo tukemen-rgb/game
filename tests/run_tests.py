@@ -5053,8 +5053,8 @@ class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
         import re
 
         rows = [ln for ln in self.doc.splitlines()
-                if ln.startswith("| `untranslated` |")]
-        self.assertEqual(len(rows), 1, f"docs/04 に untranslated の行が {len(rows)} 本")
+                if ln.startswith("| `untranslated` |") and "手作業に残る部分" in ln]
+        self.assertEqual(len(rows), 1, f"docs/04 の一覧に untranslated の行が {len(rows)} 本")
         self.assertIn("空", rows[0], f"空欄のことだと書いていない: {rows[0]}")
         self.assertNotIn("原文と同じ", rows[0],
                          f"出ない条件を書いている: {rows[0]}")
@@ -5134,6 +5134,64 @@ class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
                 if ln.startswith("| `empty` | ERROR |") and "手作業に残る部分" in ln]
         self.assertEqual(len(rows), 1, f"docs/04 の一覧に empty の行が {len(rows)} 本")
         self.assertIn("タグしか残っていない", rows[0], f"条件が違う: {rows[0]}")
+
+    def rule_tables(self) -> tuple[dict, dict]:
+        """docs/04 の 2 つの表を {検査名: 行} で返す (要約は 3 列、一覧は 5 列)."""
+        import re
+
+        summary, detail = {}, {}
+        for line in self.doc.splitlines():
+            if not line.startswith("| `"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            m = re.match(r"`([a-z_]+)`$", cells[0])
+            if not m or m.group(1) == "rule":      # 一覧の見出し行
+                continue
+            if len(cells) == 3:
+                summary[m.group(1)] = cells
+            elif len(cells) == 5:
+                detail[m.group(1)] = cells
+        return summary, detail
+
+    def test_the_two_tables_list_the_same_rules_with_the_same_weight(self):
+        """要約の表と一覧の表が、同じ 13 個を同じ重さで挙げていること (#141).
+
+        同じ検査が 2 つの表に出てくるので、片方だけ直すと食い違う。
+        実際 `control` は一覧だけ `<BR>` を見ると書いてあり (#140)、
+        `halfwidth` は要約だけ半角カナに触れていた。
+        """
+        summary, detail = self.rule_tables()
+        self.assertEqual(sorted(summary), sorted(detail),
+                         f"2 つの表で挙げている検査が違う "
+                         f"(要約だけ: {sorted(set(summary) - set(detail))} / "
+                         f"一覧だけ: {sorted(set(detail) - set(summary))})")
+        self.assertEqual(len(detail), 13, f"一覧が {len(detail)} 個 (書き方が変わった)")
+        for name in sorted(detail):
+            s, d = summary[name][1], detail[name][1]
+            self.assertEqual(s.split(" (")[0].strip(), d.split(" (")[0].strip(),
+                             f"{name} の重さが違う: 要約「{s}」/ 一覧「{d}」")
+
+    def test_half_width_kana_is_caught_and_both_tables_say_so(self):
+        """半角カナも `halfwidth` で出ること。2 つの表とも触れていること (#141).
+
+        一覧は「半角の英数記号」としか書いていなかったが、道具は
+        **半角カナを別のメッセージで**拾う。しかも半角カナは課題 5 の
+        仕込み (id 16) そのもので、教材の中で一番出てくる型。
+        """
+        tw = self.pf.tag_widths_of(self.rules, 0.0)
+
+        def messages(translation):
+            row = {"id": "0", "original": "あ", "translation": translation}
+            return [f.message for f in self.pf.check_row(row, self.rules, [], None, tw)
+                    if f.rule == "halfwidth"]
+
+        kana, alnum = messages("ﾀﾁは回復した"), messages("300ギル")
+        self.assertTrue(kana, "半角カナで halfwidth が出ない")
+        self.assertTrue(alnum, "半角英数で halfwidth が出ない")
+        self.assertNotEqual(kana, alnum, "半角カナと半角英数のメッセージが同じ")
+        summary, detail = self.rule_tables()
+        for label, cells in (("要約", summary["halfwidth"]), ("一覧", detail["halfwidth"])):
+            self.assertIn("半角カナ", cells[2], f"{label}の表が半角カナに触れていない: {cells[2]}")
 
     def test_every_rule_in_the_table_can_actually_fire(self):
         """一覧に載っている 13 個が、どれも出せること (出ない検査を載せない).
