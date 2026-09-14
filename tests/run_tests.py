@@ -6403,8 +6403,11 @@ class TestTheBlindSpotOfTheImageFinderIsDocumented(unittest.TestCase):
 
         with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
             doc = fh.read()
-        self.assertIn("この見つけ方が取りこぼす絵", doc, "docs/07 に取りこぼしの節が無い")
-        body = doc.split("この見つけ方が取りこぼす絵", 1)[1].split("\n###", 1)[0]
+        # **見出しの形**で切る。素の言葉で切ると、本文中の同じ言葉 (節への
+        # 差し込みリンクなど) に当たって別の場所を読む (#149 で実際に踏んだ)
+        head = "### この見つけ方が取りこぼす絵"
+        self.assertIn(head, doc, "docs/07 に取りこぼしの節が無い")
+        body = doc.split(head, 1)[1].split("\n###", 1)[0]
         rows = []
         for line in body.split("\n"):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
@@ -6543,9 +6546,10 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
 
         with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
             doc = fh.read()
-        self.assertIn("では、緩めたら何が起きるのか", doc,
-                      "docs/07 に「緩めたら何が起きるのか」の節が無い")
-        body = doc.split("では、緩めたら何が起きるのか", 1)[1].split("\n###", 1)[0]
+        # 見出しの形で切る (素の言葉だと本文のリンクに当たる。#149)
+        head = "### では、緩めたら何が起きるのか"
+        self.assertIn(head, doc, "docs/07 に「緩めたら何が起きるのか」の節が無い")
+        body = doc.split(head, 1)[1].split("\n###", 1)[0]
         rows = []
         for line in body.split("\n"):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
@@ -6612,6 +6616,201 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
         self.assertGreater(got["ratio"], 6,
                            f"なめらかな波の相関が {got['ratio']:.2f}。"
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
+
+
+class TestTheMapLegendMatchesTheClassifier(unittest.TestCase):
+    """docs/07 の色の凡例が、実際に動く `classifyStats` と同じことを言うか (#149).
+
+    素人が構造探査台でいちばん最初に読む表なのに、**書いてある規則と順番が
+    どちらも実物と違っていた**。
+
+    - 順番: 文書は 灰・緑・水・藍・橙・桃 の順。実物は 灰・水・緑・橙・桃・**藍**。
+      **藍は最後の受け皿**で、独自の条件を持たない。文書は 4 番目に置いて
+      「上のどれでもなく、エントロピーが低い」と書いていたので、
+      **波形も圧縮も藍に入る**ように読めた。
+    - 橙: 文書は「隣のバイトとの平均差が小さい」だけ。実物は
+      **エントロピーが 4.5 を超え、かつ**平均差が 24 未満。
+      片側だけだと、ゼロに近い平べったいデータまで橙になる説明になる。
+    - 桃: 実物には「標本が 192 バイト以上」がある。短い区画は桃にならない。
+
+    書き写しでは追いつかないので、**行ごとに合成データを作って
+    `classifyStats` に通し、その色になることを確かめる**。
+    """
+
+    #: 文書の色と、classifyStats の返り値の対応
+    COLORS = {"灰": "zero", "水": "jp", "緑": "ascii",
+              "橙": "wave", "桃": "high", "藍": "tile"}
+
+    @staticmethod
+    def make(kind: str) -> list:
+        """その色になるはずの区画を作る。**素直な作り方だけを使う** (細工しない)."""
+        import math
+
+        if kind == "zero":
+            return [0] * 500 + [1, 2, 3, 4]
+        if kind == "ascii":
+            return [0x41 + (i % 26) for i in range(512)]
+        if kind == "jp":
+            out = []
+            for i in range(256):
+                out += [0x82, 0xA0 + (i % 40)]      # ひらがなの範囲
+            return out
+        if kind == "wave":
+            # 隣との差が小さく、値の種類は多い (エントロピーは高い)
+            return [math.floor((math.sin(i / 40) + 1) * 127.5 + 0.5) & 0xFF
+                    for i in range(2048)]
+        if kind == "high":
+            r, out = 12345, []
+            for _ in range(2048):
+                r = (r * 1103515245 + 12345) & 0xFFFFFFFF
+                out.append((r >> 16) & 0xFF)
+            return out
+        if kind == "tile":
+            # 輪郭のあるドット絵風。どの条件にも当てはまらない
+            return [(0xFF if ((i >> 3) ^ (i >> 6)) & 1 else 0x00) for i in range(2048)]
+        raise AssertionError(kind)
+
+    @staticmethod
+    def look(byte_list) -> dict:
+        """分類と、そのとき各条件が立っていたかを返す.
+
+        条件まで返すのは、**順番の検査が前提ごと崩れていないか**を見るため。
+        「橙が先だから橙になった」と言うには、桃の条件も立っている必要がある。
+        """
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('const SJIS_LEAD'),e=s.indexOf('function guessPeriods');"
+            "if(a<0||e<0){console.error('no funcs');process.exit(2);}"
+            "const m=new Function(s.slice(a,e)+'\\nreturn {blockStats,classifyStats};')();"
+            f"const v=new Uint8Array({json.dumps(byte_list)});"
+            "const st=m.blockStats(v);const exp=8-255/(2*st.n*Math.LN2);"
+            "console.log(JSON.stringify({cls:m.classifyStats(st),n:st.n,"
+            "wave:st.entropy>4.5&&st.meanDiff<24,"
+            "high:st.n>=192&&st.entropy>exp-0.3}));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("分類できない: " + res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    @classmethod
+    def classify(cls, byte_list) -> str:
+        return cls.look(byte_list)["cls"]
+
+    def rows(self) -> list:
+        """凡例を (順番, 色, 説明) で返す."""
+        import re
+
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            body = fh.read().split("## 全体マップの読み方", 1)[1].split("\n###", 1)[0]
+        out = []
+        for line in body.split("\n"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) == 4 and re.fullmatch(r"\d+", cells[0]):
+                out.append((int(cells[0]), cells[1], cells[3]))
+        return out
+
+    def test_every_colour_in_the_legend_really_comes_out(self):
+        """行ごとに区画を作って通す。書いた色にならなければ凡例が嘘."""
+        rows = self.rows()
+        self.assertEqual(len(rows), 6, f"凡例から {len(rows)} 行しか読めない")
+        for _order, color, _how in rows:
+            self.assertIn(color, self.COLORS, f"知らない色「{color}」")
+            got = self.classify(self.make(self.COLORS[color]))
+            self.assertEqual(got, self.COLORS[color],
+                             f"{color} のはずの区画が {got} になった")
+
+    def test_the_order_in_the_table_is_the_order_in_the_code(self):
+        """順番も凡例のとおりであること。**藍が最後**が要点."""
+        rows = self.rows()
+        self.assertEqual([r[0] for r in rows], [1, 2, 3, 4, 5, 6], "順の欄が連番でない")
+        self.assertEqual(rows[-1][1], "藍",
+                         f"凡例の最後が「{rows[-1][1]}」。藍は最後の受け皿なので最後に置く")
+        self.assertIn("上のどれにも当てはまらなかった", rows[-1][2],
+                      "藍に独自の条件が書いてある (実物は受け皿で、条件を持たない)")
+
+    def test_wave_wins_over_high_because_it_is_checked_first(self):
+        """橙が桃より先、という順番が本当に効くこと.
+
+        エントロピーは乱数並みなのに隣との差が小さい区画を作る。
+        順番が入れ替われば桃になるので、この 1 件で順番を押さえられる。
+        """
+        import math
+
+        smooth = [math.floor((math.sin(i / 9.0) + 1) * 127.5 + 0.5) & 0xFF
+                  for i in range(4096)]
+        got = self.look(smooth)
+        # 前提: 橙と桃の**両方**が立っていること。片方しか立っていなければ
+        # 「順番のおかげ」ではなく、ただ条件を満たしただけになる (素通しの検査)
+        self.assertTrue(got["wave"] and got["high"],
+                        f"この区画は橙と桃の両方には当てはまっていない ({got})。"
+                        f"順番を確かめたことにならないので、作る区画を直すこと")
+        self.assertEqual(got["cls"], "wave",
+                         f"橙と桃の両方に当てはまる区画が {got['cls']} になった。"
+                         f"橙より桃が先に見られている (凡例の順番を書き直すこと)")
+
+    def test_a_short_block_is_never_pink(self):
+        """桃には「標本が 192 バイト以上」が要る。短い乱数は桃にならない."""
+        r, out = 4242, []
+        for _ in range(160):
+            r = (r * 1103515245 + 12345) & 0xFFFFFFFF
+            out.append((r >> 16) & 0xFF)
+        got = self.classify(out)
+        self.assertNotEqual(got, "high",
+                            "160 バイトの区画が桃になった (標本数の条件が消えている)")
+        rows = self.rows()
+        pink = [r for r in rows if r[1] == "桃"]
+        self.assertEqual(len(pink), 1, "凡例に桃の行が 1 本無い")
+        self.assertIn("192", pink[0][2], "凡例が桃の標本数の条件を書いていない")
+
+    def test_the_practice_image_really_shows_all_six(self):
+        """「6 種類がそのまま帯になって見えます」と、添えた内訳を確かめる."""
+        import json
+        import re
+        import shutil
+        import subprocess
+
+        problem = ensure_practice("work/RINFOLT.iso", "make_iso.py")
+        if problem:
+            self.skipTest(problem)
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('const SJIS_LEAD'),e=s.indexOf('function guessPeriods');"
+            "const m=new Function(s.slice(a,e)+'\\nreturn {blockStats,classifyStats};')();"
+            "const C=parseInt(/const MAP_CELLS = (\\d+)/.exec(s)[1],10);"
+            "const b=new Uint8Array(fs.readFileSync('work/RINFOLT.iso'));"
+            "const bs=Math.max(64,Math.ceil(b.length/C/64)*64);"
+            "const n=Math.max(1,Math.ceil(b.length/bs)),sl=Math.max(256,bs);const t={};"
+            "for(let i=0;i<n;i++){const o=i*bs;"
+            "const c=m.classifyStats(m.blockStats(b.subarray(o,Math.min(b.length,o+sl))));"
+            "t[c]=(t[c]||0)+1;}console.log(JSON.stringify({n,t}));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, "数えられない: " + res.stdout + res.stderr)
+        got = json.loads(res.stdout)
+        self.assertEqual(sorted(got["t"]), sorted(self.COLORS.values()),
+                         f"6 種類そろっていない: {got['t']}")
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        m = re.search(r"全 ([\d,]+) 区画の内訳: ([^)]+)\)", doc)
+        self.assertTrue(m, "docs/07 に内訳が書いていない (数字だけの主張は確かめられない)")
+        self.assertEqual(int(m.group(1).replace(",", "")), got["n"],
+                         f"区画の数が {got['n']} (docs/07 は {m.group(1)})")
+        for part in m.group(2).split("・"):
+            color, said = part.split()
+            self.assertEqual(got["t"].get(self.COLORS[color], 0), int(said),
+                             f"{color} が {got['t'].get(self.COLORS[color], 0)} 区画 "
+                             f"(docs/07 は {said})")
 
 
 class TestHowManyFalsePositivesSurvive(unittest.TestCase):
