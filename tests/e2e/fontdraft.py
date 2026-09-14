@@ -118,6 +118,37 @@ def doc_says_the_same(shape_only: int, right: int, total: int) -> list[str]:
     return []
 
 
+def docs11_says_the_same(shape_only: int, right: int, total: int) -> list[str]:
+    """**同じ実測が docs/11 にも 3 か所ある**ので、そちらも突き合わせる (#138).
+
+    docs/10 の数字だけを見張っていた。書体が変われば docs/10 は
+    「こう書き換える」と言われて直るが、**docs/11 は黙って古くなる**。
+    同じ測定を 2 つの文書に書いた時点で、両方見張るか 1 か所に寄せるかの
+    どちらかが要る (#101 で確かめた表と同じ話)。
+    """
+    import re
+
+    path = REPO + "/docs/11-形式を突き止めるまで.md"
+    with open(path, encoding="utf-8") as fh:
+        doc = fh.read()
+    want = {"当たった字": (shape_only, total), "形だけ (#69)": (shape_only, total),
+            "並び順で直したあと (#70)": (right, total)}
+    out = []
+    for label, (num, den) in want.items():
+        rows = [ln for ln in doc.split("\n")
+                if ln.startswith("|") and ln.split("|")[1].strip() == label]
+        if len(rows) != 1:
+            out.append(f"docs/11 に「{label}」の行が {len(rows)} 本 (書き方が変わった)")
+            continue
+        got = re.findall(r"(\d+)\s*/\s*(\d+)", rows[0])
+        if len(got) != 1:
+            out.append(f"docs/11 の「{label}」から値を 1 つ読めない: {rows[0]}")
+        elif (int(got[0][0]), int(got[0][1])) != (num, den):
+            out.append(f"docs/11 の「{label}」が今と違う。{got[0][0]}/{got[0][1]} → "
+                       f"{num}/{den} に書き換える")
+    return out
+
+
 async def main():
     async with async_playwright() as p:
         b = await launch(p)
@@ -142,6 +173,7 @@ async def main():
         # 率が動いた日に**文書の数字だけがもっともらしく古くなる** (#102)。
         # 社長はその数字を目印に「合っているか」を判断するので、ここで突き合わせる。
         bad += doc_says_the_same(r["shapeOnly"], r["right"], r["total"])
+        bad += docs11_says_the_same(r["shapeOnly"], r["right"], r["total"])
         # 並び順で直す規則が、形だけより悪くしていないこと
         if r["right"] < r["shapeOnly"]:
             bad.append(f"並び順で直して悪くなった: {r['shapeOnly']} -> {r['right']}")
