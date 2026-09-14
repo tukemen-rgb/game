@@ -6618,6 +6618,158 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
 
 
+class TestTheBitDepthGuessIsCounted(unittest.TestCase):
+    """1 ドットのビット数の見当が、何通り当たるかを数える (#151).
+
+    docs/07 は「外れることもあるので」とだけ書いて、**一度も数えていなかった**。
+    数えたら 6 通り中 2 通りしか当たっていなかった。しかも外れ方が悪い。
+
+    - **背景が 0 で埋まった 8bpp のスプライト** (市販ゲームでいちばん多い形) が
+      平坦 85% で **1bpp** と判定され、1 辺まで倍に外れていた (16×16 → 32×32)。
+      「`0x00` と `0xFF` が 3 割超なら 1bpp」しか見ていなかったため。
+    - 疎なドット絵 (本物の 1bpp) は平坦 25% で条件を外し、色数 3 種から 4bpp に。
+
+    分かれ目は平坦さではなく**隣のバイトとの跳ね方**だった。1bpp はビットの模様
+    なので跳ねる (57.7 / 28.5)、絵は隣どうし似る (16.4 / 13.9 / 1.7 / 1.0)。
+    間がはっきり空いているので、そこを条件に足して 4/6 まで戻した。
+
+    **残る 2 つは直さない。** 4bpp を 2 画素ずつ詰めるとバイトの値は 256 種まで
+    広がるので、色数では 8bpp と区別できない。逆も同じ。
+    **バイトを見ただけでは決められない**ことを文書に書き、画面では見当だと
+    分かるように出した。ここでは「当たりが 4/6 のまま」を見張る。
+    """
+
+    #: (名前, 1 タイルのバイト数, 正解の bpp, その絵を作る JS)
+    CASES = [
+        ("`FONT.BIN` (実物のフォント)", 32, 1,
+         "new Uint8Array(fs.readFileSync('work/FONT.BIN'))"),
+        ("疎なドット絵", 32, 1,
+         "(()=>{const p=new Uint8Array(8192);for(let i=0;i<p.length;i++){"
+         "const y=(i/2)|0;p[i]=(y%16<2||y%16>13)?0x00:((i&1)?0x3C:0x18);}return p;})()"),
+        ("背景が 0 のスプライト", 256, 8,
+         "(()=>{const p=new Uint8Array(8192);for(let i=0;i<p.length;i++){"
+         "const x=i%64,y=(i/64)|0;p[i]=((x-32)**2+(y-32)**2<400)?"
+         "(40+((x*3+y*5)&0x7F)):0;}return p;})()"),
+        ("色数の多い絵", 256, 8,
+         "(()=>{const p=new Uint8Array(8192);for(let i=0;i<p.length;i++)"
+         "p[i]=(i*7+((i/64)|0)*13)&0xFF;return p;})()"),
+        ("16 色の絵 (2 画素/バイト)", 128, 4,
+         "(()=>{const p=new Uint8Array(8192);for(let i=0;i<p.length;i++){"
+         "const x=i%32,y=(i/32)|0;p[i]=((((x+y)>>1)&15)<<4)|(((x*2+y)>>1)&15);}return p;})()"),
+        ("32 色しか使っていない絵", 256, 8,
+         "(()=>{const p=new Uint8Array(8192);for(let i=0;i<p.length;i++)"
+         "p[i]=32+(((i%64)>>1)&31);return p;})()"),
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/FONT.BIN", "make_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+
+    @staticmethod
+    def measure(source: str, bytes_per_tile: int) -> dict:
+        """web/app.js の guessTileShape をそのまま動かし、隣の平均差も返す."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('const BPP1_JUMP'),e=s.indexOf('function refineRegion');"
+            "if(a<0||e<0){console.error('no shape funcs');process.exit(2);}"
+            "const m=new Function(s.slice(a,e)+'\\nreturn {guessTileShape};')();"
+            f"const v={source};"
+            f"console.log(JSON.stringify(m.guessTileShape(v,0,v.length,{bytes_per_tile})));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("見当を出せない: " + res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    def doc_table(self, heading: str, cols: int) -> list:
+        """見出しの直後にある最初の表を返す (見出しの形で切る。#149 の教訓)."""
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        self.assertTrue(heading in doc, f"docs/07 に「{heading}」が無い")
+        body = doc.split(heading, 1)[1].split("\n#", 1)[0]
+        out = []
+        for line in body.split("\n"):
+            if not line.startswith("|"):
+                if out:
+                    break            # 表が終わったら、その先の別の表は読まない
+                continue
+            cells = [c.strip().strip("*") for c in line.strip().strip("|").split("|")]
+            if len(cells) != cols or "---" in cells[1] or cells[0] == "絵":
+                continue
+            out.append(cells)
+        return out
+
+    def test_the_hit_rate_is_what_the_doc_says(self):
+        """当たり外れの表を、行ごとに測り直す."""
+        import re
+
+        rows = self.doc_table("### 1 ドットのビット数の見当", 3)
+        self.assertEqual(len(rows), 6, f"当たり外れの表から {len(rows)} 行しか読めない")
+        by_name = {c[0]: c for c in self.CASES}
+        hits = 0
+        for name, want, said in rows:
+            self.assertIn(name, by_name, f"docs/07 の「{name}」に対応する絵がこの検査に無い")
+            _n, per_tile, real_bpp, src = by_name[name]
+            self.assertEqual(f"{real_bpp}bpp", want,
+                             f"{name}: docs/07 の正解が {want} (この検査は {real_bpp}bpp)")
+            got = self.measure(src, per_tile)
+            self.assertEqual(f"{got['bpp']}bpp", said,
+                             f"{name}: 見当が {got['bpp']}bpp (docs/07 は {said})")
+            if got["bpp"] == real_bpp:
+                hits += 1
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        m = re.search(r"6 通りの絵で数えると (\d+) 通りしか当たりません", doc)
+        self.assertTrue(m, "docs/07 が当たりの数を書いていない")
+        self.assertEqual(hits, int(m.group(1)),
+                         f"当たりが {hits} 通り (docs/07 は {m.group(1)} 通り)")
+
+    def test_the_jump_numbers_in_the_doc_are_measured(self):
+        """隣のバイトとの平均差の表。1bpp とそれ以外の間が空いていること."""
+        rows = self.doc_table("#### 1bpp かどうかは、平坦さだけでは決められない", 2)
+        self.assertEqual(len(rows), 6, f"跳ねの表から {len(rows)} 行しか読めない")
+        by_name = {c[0]: c for c in self.CASES}
+        ones, others = [], []
+        for label, said in rows:
+            # 2 つの表の見出しは**同じ言葉**に揃えてある。揃っていなければ落とす
+            self.assertIn(label, by_name, f"「{label}」に対応する絵がこの検査に無い")
+            _n, per_tile, real_bpp, src = by_name[label]
+            got = self.measure(src, per_tile)
+            self.assertEqual(round(got["meanJump"], 1), float(said),
+                             f"{label}: 隣の平均差が {got['meanJump']:.1f} (docs/07 は {said})")
+            (ones if real_bpp == 1 else others).append(got["meanJump"])
+        self.assertGreater(min(ones), max(others),
+                           f"1bpp {ones} とそれ以外 {others} が重なった。"
+                           f"跳ねで分ける言い分が崩れたので docs/07 を書き直すこと")
+
+    def test_a_zero_filled_sprite_is_no_longer_called_one_bit(self):
+        """直した中心。背景で埋まった 8bpp が 1bpp にならず、1 辺も合うこと."""
+        _n, per_tile, _bpp, src = [c for c in self.CASES if c[0] == "背景が 0 のスプライト"][0]
+        got = self.measure(src, per_tile)
+        self.assertEqual(got["bpp"], 8, "背景が 0 のスプライトがまた 1bpp になった")
+        self.assertEqual((got["tw"], got["th"]), (16, 16),
+                         f"1 辺が {got['tw']}×{got['th']} (256 バイト / 8bpp なら 16×16)")
+
+    def test_the_doc_admits_four_and_eight_cannot_be_told_apart(self):
+        """直さないと決めたことを、文書が言っていること (黙って外すのが最悪)."""
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        # assertIn は落ちたとき docs/07 を丸ごと吐く (#129・#136 で 2 度踏んだ)。
+        # #151 でまた踏んだので、この形は使わない
+        for word in ("バイトを見ただけでは、この 2 つは分けきれません",
+                     "押せば「タイル」タブで手で切り替えられます"):
+            self.assertTrue(word in doc, f"docs/07 に「{word}」が無い")
+
+
 class TestPointerEvidenceIsNotCircular(unittest.TestCase):
     """ポインタ表の根拠が、当てはめた結果を数えていないこと (#150).
 
@@ -7128,7 +7280,7 @@ class TestHowManyFalsePositivesSurvive(unittest.TestCase):
         self.assertNotIn("次の 2 段で\n減らしています", doc,
                          "「2 段」の書き方に戻っている (実際は区画の除外 + 4 つの条件)")
         for word in ("そもそも見ない", "仮名の割合"):
-            self.assertIn(word, doc, f"docs/07 に「{word}」の説明が無い")
+            self.assertTrue(word in doc, f"docs/07 に「{word}」の説明が無い")
 
 
 class TestShortFilesAreNotCalledZeroFill(unittest.TestCase):

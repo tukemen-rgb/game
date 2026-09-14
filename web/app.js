@@ -604,19 +604,42 @@ function tileScore(b, off, len) {
 }
 
 /** 1 ドットのビット数と 1 タイルの大きさを見当をつける */
+/**
+ * 1 ドットのビット数と 1 タイルの大きさの見当 (当たり外れは docs/07 に数えてある)。
+ *
+ * **1bpp かどうかは、平坦さだけでは決められません** (#151)。
+ * 「`0x00` と `0xFF` が 3 割を超えれば 1bpp」とだけ見ていたので、
+ * **背景が 0 で埋まった 8bpp のスプライト** (市販ゲームでいちばん多い形) が
+ * 平坦 85% で 1bpp と判定され、1 辺まで倍に外れていました。
+ *
+ * 1bpp のバイトは**ビットの模様**なので、隣のバイトとの差が大きく跳ねます
+ * (実物のフォントで 57.7、疎なドット絵で 28.5)。背景で埋まった 8bpp は 1.7、
+ * なめらかな 8bpp は 1.0 で、はっきり分かれます。平坦さか色数の少なさに加えて、
+ * **この跳ね**を条件にします。
+ *
+ * 4bpp と 8bpp は、バイトを見ただけでは分けきれません (docs/07 に測った表)。
+ * 色数で当てにいって外れることがあるので、画面では見当だと分かるように出し、
+ * 「タイル」タブで手で切り替えられるようにしてあります。
+ */
+const BPP1_JUMP = 22;
+
 function guessTileShape(b, off, len, bytesPerTile) {
   const win = b.subarray(off, Math.min(b.length, off + Math.min(len, 8192)));
-  let flat = 0;
+  let flat = 0, jump = 0;
   const seen = new Set();
-  for (const v of win) {
+  for (let i = 0; i < win.length; i++) {
+    const v = win[i];
     if (v === 0x00 || v === 0xFF) flat++;
     seen.add(v);
+    if (i) jump += Math.abs(v - win[i - 1]);
   }
-  const bpp = flat / win.length > 0.3 ? 1 : (seen.size <= 64 ? 4 : 8);
+  const meanJump = win.length > 1 ? jump / (win.length - 1) : 0;
+  const patterned = (flat / win.length > 0.3 || seen.size <= 16) && meanJump > BPP1_JUMP;
+  const bpp = patterned ? 1 : (seen.size <= 64 ? 4 : 8);
   const side = Math.sqrt(bytesPerTile * 8 / bpp);
   const choices = [8, 16, 24, 32];
   const fit = choices.reduce((a, c) => Math.abs(c - side) < Math.abs(a - side) ? c : a);
-  return { bpp, tw: fit, th: fit };
+  return { bpp, tw: fit, th: fit, meanJump, colors: seen.size };
 }
 
 /**
@@ -2953,6 +2976,12 @@ function renderGallery() {
     at.textContent = hx(r.off);
     const shape = document.createElement("span");
     shape.textContent = `${r.bpp}bpp ${r.tw}×${r.th}`;
+    /* 4bpp と 8bpp はバイトだけでは分けきれない (#151)。当たったふりをせず、
+       押せば手で切り替えられることを添える */
+    shape.title = r.bpp === 1
+      ? `1bpp と見ました (隣のバイトの跳ねが ${r.meanJump.toFixed(0)}、色 ${r.colors} 種)`
+      : `${r.bpp}bpp は見当です (色 ${r.colors} 種から。`
+        + `4bpp と 8bpp はバイトだけでは決められません)。押すとタイルタブで切り替えられます`;
     const size = document.createElement("span");
     size.textContent = fmtSize(r.len);
     const conf = document.createElement("span");
