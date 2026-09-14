@@ -36,6 +36,70 @@ def doc_table():
     return out
 
 
+async def check_pointer_claim(page) -> list:
+    """docs/07 の「確度『高』はちょうど 2 件」を、ポインタ表タブで確かめる (#145).
+
+    この主張は**この道具でいちばん価値がある機能**の成績表なのに、
+    タブを開く検査すら #144 まで無かった。数と、その 2 つが
+    `SCRIPT.BIN` / `MSG_ENC.BIN` のものであることを見る。
+
+    期待値は docs/07 から読み取る。数が変わったら「こう書き換える」と言う。
+    """
+    import os
+
+    with open(DOC, encoding="utf-8") as fh:
+        doc = fh.read()
+    m = re.search(r"練習用イメージ \((\d+)KB\) を丸ごと読ませると、"
+                  r"\*\*確度「高」はちょうど (\d+) 件\*\*", doc)
+    if not m:
+        return ["docs/07 のポインタ表の主張が読み取れない (書き方が変わった)"]
+    said_kb, said_high = int(m.group(1)), int(m.group(2))
+
+    iso = os.path.join(WORK, "RINFOLT.iso")
+    real_kb = round(os.path.getsize(iso) / 1024)
+    out = []
+    if real_kb != said_kb:
+        out.append(f"docs/07 の大きさが今と違う。{said_kb}KB → {real_kb}KB に書き換える")
+
+    # 主張は**イメージ全体**を読ませたときの話。ファイルを 1 つ選んだままだと
+    # その中だけを走査するので、木の先頭の「(イメージ全体)」に戻してから開く
+    await select_file(page, "", "(イメージ全体)")
+    await page.click('[data-tab="pointers"]')
+    await page.wait_for_timeout(3000)
+    rows = await page.eval_on_selector_all(
+        "#tab-pointers table tr",
+        "els => els.map(e => Array.from(e.cells || []).map(c => c.innerText.trim()))")
+    rows = [r for r in rows if r]
+    if len(rows) < 5:
+        return out + [f"ポインタ表タブの行が {len(rows)} 本 (読み取り方が壊れた)"]
+    high = [r for r in rows if r[-1] == "高"]
+    if len(high) != said_high:
+        out.append(f"確度「高」が {len(high)} 件 (docs/07 は {said_high} 件)。"
+                   f"docs/07 をこう書き換える → 「確度「高」はちょうど {len(high)} 件」")
+
+    # docs/07 は「SCRIPT.BIN と MSG_ENC.BIN のポインタ表だけ」と名指しする。
+    # ISO のどこにその 2 つが入っているかを自分で探して、基準がそこを指すか見る
+    with open(iso, "rb") as fh:
+        data = fh.read()
+    starts, at = [], 0
+    while True:
+        at = data.find(b"SCRP", at)
+        if at < 0:
+            break
+        starts.append(at)
+        at += 1
+    if len(starts) != 2:
+        return out + [f"ISO の中の SCRP が {len(starts)} 個 (題材が変わった)"]
+    bases = {int(re.search(r"0x([0-9A-Fa-f]+)", r[3]).group(1), 16)
+             for r in high if re.search(r"0x([0-9A-Fa-f]+)", r[3])}
+    if bases != set(starts):
+        out.append(f"確度「高」の基準が {sorted(hex(b) for b in bases)} で、"
+                   f"SCRP の位置 {sorted(hex(s) for s in starts)} と違う")
+    print(f"  ポインタ表: 行 {len(rows)} / 確度「高」 {len(high)} 件 "
+          f"{sorted(hex(b) for b in bases)} / ISO {real_kb}KB")
+    return out
+
+
 async def main():
     errors = []
     want = doc_table()
@@ -88,6 +152,7 @@ async def main():
 
         if checked < 7:
             errors.append(f"確かめた行が {checked} 行しかない (素通りの疑い)")
+        errors += await check_pointer_claim(page)
         await b.close()
 
     print("errors:", errors)
