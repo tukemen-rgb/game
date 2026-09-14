@@ -56,6 +56,55 @@ for (const [cls, ext] of Object.entries(byClass)) {
 if (m.sniffKind(u32(1), undefined, 10000).ext !== "bin") fail("性質不明を bin にしない");
 if (m.sniffKind(new Uint8Array(2), "jp", 10000).ext !== "txt") fail("短すぎる先頭で落ちる");
 
+/* 3.5 入れ物と、前置きの後ろの TIM2 (#153) */
+const u32at = (b, p, n) => { b[p] = n & 255; b[p+1] = (n>>>8)&255; b[p+2] = (n>>>16)&255; b[p+3] = n>>>24; };
+/** 件数 + (位置, 長さ) の表を持つ入れ物を組み立てる */
+const container = (count, stride, pad, size = 4096) => {
+  const b = new Uint8Array(size);
+  u32at(b, 0, count);
+  const tableEnd = 4 + count * stride;
+  let off = pad ? Math.ceil(tableEnd / 16) * 16 : tableEnd;
+  for (let i = 0; i < count; i++) {
+    u32at(b, 4 + i * stride, off);
+    if (stride >= 8) u32at(b, 8 + i * stride, 16);
+    off += 16;
+  }
+  return b;
+};
+/* .msg の形 (詰めなし) は msg、入れ物の形 (16 バイト境界まで詰める) は parts */
+if (m.sniffKind(container(4, 8, false), "tile", 4096).ext !== "msg") fail("8 バイト刻みの .msg を見つけない");
+if (m.sniffKind(container(6, 4, false), "tile", 4096).ext !== "msg") fail("4 バイト刻みの .msg を見つけない");
+if (m.sniffKind(container(2, 12, true), "tile", 4096).ext !== "parts") fail("12 バイト刻みの入れ物を見つけない");
+if (m.sniffKind(container(3, 8, true), "tile", 4096).ext !== "parts") fail("8 バイト刻みの入れ物を見つけない");
+/* 見当であって確定ではない */
+if (m.sniffKind(container(4, 8, false), "tile", 4096).sure) fail("入れ物の見当を sure にした");
+/* 空き枠 (位置も長さも 0) があっても見つける */
+const withHole = container(3, 8, true);
+u32at(withHole, 4 + 2 * 8, 0); u32at(withHole, 8 + 2 * 8, 0);
+if (m.sniffKind(withHole, "tile", 4096).ext !== "parts") fail("空き枠のある入れ物を取りこぼす");
+/* 1 件目が表の直後でなければ入れ物と見ない (ここが当てはめでない根拠) */
+const shifted = container(4, 8, false);
+u32at(shifted, 4, 200);
+if (m.sniffKind(shifted, "tile", 4096).ext === "msg") fail("1 件目が表の直後でないのに msg にした");
+/* 位置が減る / はみ出すものも違う */
+const backwards = container(4, 8, false);
+u32at(backwards, 4 + 8, 8);
+if (m.sniffKind(backwards, "tile", 4096).ext === "msg") fail("位置が減るのに msg にした");
+const outside = container(4, 8, false);
+u32at(outside, 4 + 3 * 8, 9999);
+if (m.sniffKind(outside, "tile", 4096).ext === "msg") fail("ファイル外を指すのに msg にした");
+/* 前置きの後ろの TIM2 は見当で拾う。先頭の TIM2 は確定のまま */
+const behind = new Uint8Array(256);
+behind[0] = 0x54; behind[1] = 0x4D; behind[2] = 0x53;      /* "TMS" 風の前置き */
+for (let i = 0; i < 4; i++) behind[0x80 + i] = "TIM2".charCodeAt(i);
+const bg = m.sniffKind(behind, "zero", 256);
+if (bg.ext !== "tm2" || bg.sure) fail(`前置きの後ろの TIM2 → ${bg.ext} sure=${bg.sure}`);
+if (!m.sniffKind(bytes("TIM2"), "tile", 4096).sure) fail("先頭の TIM2 が確定でなくなった");
+/* 入れ物のほうが先。中に絵が 1 枚あるだけで「画像」と名づけない (#153) */
+const boxWithImage = container(2, 12, true);
+for (let i = 0; i < 4; i++) boxWithImage[0x50 + i] = "TIM2".charCodeAt(i);
+if (m.sniffKind(boxWithImage, "tile", 4096).ext !== "parts") fail("入れ物より埋まった TIM2 を優先した");
+
 /* 4. 集計は多い順 */
 const sum = m.sniffSummary([{ ext: "tm2" }, { ext: "packed" }, { ext: "tm2" }, { ext: "bin" }, { ext: "tm2" }, { ext: "packed" }]);
 if (sum !== "tm2 3 · packed 2 · bin 1") fail(`集計が違う: ${sum}`);
@@ -69,4 +118,4 @@ for (const mg of m.MAGICS) {
   seen.add(key);
 }
 
-console.log(`OK  魔法数 ${magicCases.length + 1} 種 · 圧縮の見当 6 件 · 性質からの見当 ${Object.keys(byClass).length + 2} 件 · 集計`);
+console.log(`OK  魔法数 ${magicCases.length + 1} 種 · 圧縮の見当 6 件 · 性質からの見当 ${Object.keys(byClass).length + 2} 件 · 入れ物と埋まった TIM2 12 件 · 集計`);

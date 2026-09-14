@@ -6620,6 +6620,183 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
 
 
+class TestTheKindGuessIsCountedOnKnownFiles(unittest.TestCase):
+    """名前の無いファイルへの見当を、**正解の分かる 20 件**で数える (#153).
+
+    `tests/test_sniff.mjs` は前からあったが、見ているのは
+    **「書いた規則のとおりに動くか」**だけで、**「その見当が当たっているか」**は
+    一度も見ていなかった。#151 と同じ形の穴。
+
+    練習用の `BOKU2SAMPLE` は `make_boku2_sample.py` が組み立てるので、
+    **どのファイルが何なのかが分かっている**。20 件で数えたら **11 件**しか
+    当たらなかった。外したのは、よりによって探している当のもの:
+
+    - `.msg` 4 件と入れ物 4 件 —— docs/07 が「1951 個の中から**テキストを探す**」
+      と書いている当の相手。**入れ物を指す呼び名が一つも無く**、
+      全部「不明 (タイル・表など)」に落ちていた。
+    - `bk_font.tms` —— 実物のフォントは 0x80 の前置きつき (docs/11) なのに、
+      魔法数を**先頭だけ**で見ていたので取りこぼしていた。英語化パッチの
+      公開ソースは `findTIM2s` でファイル全体から探している。向こうに倣った。
+
+    直して 20/20。入れ物の判定は**埋まった TIM2 より先**に見る ——
+    中に絵が 1 枚あるだけで「画像」と名づけると、
+    **同じ入れ物に入っている文章が見えなくなる**。
+
+    正解は**名前の拡張子ではなく、組み立て方**から取る。`diary.bin` の `.bin` は
+    種類を言っていない (中身は入れ物)。名前を信じると正解表のほうが間違う。
+    """
+
+    #: `make_boku2_sample.py` が `build_map` で組み立てたもの (= 入れ物)
+    CONTAINERS = {"diary.bin", "fish_on_mem.bin", "saveload.bin", "on_mem_event.bin"}
+    #: 中身がまるごとゼロのもの (名前は .bin だが「ゼロ埋め」が正しい)
+    ALL_ZERO = {"readme.bin", "system/sys_end.bin", "system/submenu/sub_readme.bin"}
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+
+    @classmethod
+    def entries(cls) -> list:
+        """(path, 正解, 先頭 4KB, 長さ) の一覧。先頭 4KB は画面と同じ量."""
+        import boku2
+
+        base = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        with open(os.path.join(base, "BOKU2.IDX"), "rb") as fh:
+            idx = fh.read()
+        with open(os.path.join(base, "BOKU2.IMG"), "rb") as fh:
+            img = fh.read()
+        out = []
+        for e in boku2.read_dfi(idx, len(img)):
+            path = e["path"]
+            if path in cls.CONTAINERS:
+                want = "parts"
+            elif path in cls.ALL_ZERO:
+                want = "zero"
+            else:
+                ext = path.rsplit(".", 1)[-1]
+                want = "tm2" if ext == "tms" else ext
+            head = img[e["at"]:e["at"] + min(e["len"], 4096)]
+            out.append((path, want, list(head), e["len"]))
+        return out
+
+    @staticmethod
+    def guess(entries) -> list:
+        """web/app.js の sniffKind を、画面と同じ渡し方で動かす."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        payload = [{"head": h, "size": n} for _p, _w, h, n in entries]
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(payload, fh)
+            tmp = fh.name
+        try:
+            prog = (
+                "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+                "const a=s.indexOf('/* @extract-start sniff */'),"
+                "b=s.indexOf('/* @extract-end sniff */');"
+                "if(a<0||b<0){console.error('sniff の目印が無い');process.exit(2);}"
+                "const m=new Function(s.slice(a,b)+'\\nreturn {sniffKind};')();"
+                "const c0=s.indexOf('const SJIS_LEAD'),c1=s.indexOf('function guessPeriods');"
+                "const c=new Function(s.slice(c0,c1)+"
+                "'\\nreturn {blockStats,classifyStats};')();"
+                f"const list=JSON.parse(fs.readFileSync({json.dumps(tmp)},'utf8'));"
+                "console.log(JSON.stringify(list.map(e=>{"
+                "const v=new Uint8Array(e.head);"
+                "return m.sniffKind(v,c.classifyStats(c.blockStats(v)),e.size);})));"
+            )
+            res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+            if res.returncode != 0:
+                raise AssertionError("見当を出せない: " + res.stdout + res.stderr)
+            return json.loads(res.stdout)
+        finally:
+            os.unlink(tmp)
+
+    def test_every_known_file_is_named_correctly(self):
+        rows = self.entries()
+        self.assertEqual(len(rows), 20, f"練習データが {len(rows)} 件 (題材が変わった)")
+        got = self.guess(rows)
+        wrong = [f"{p}: 正解 {w} / 見当 {g['ext']}"
+                 for (p, w, _h, _n), g in zip(rows, got) if g["ext"] != w]
+        self.assertEqual(wrong, [], "見当が外れている:\n  " + "\n  ".join(wrong))
+
+    def test_the_text_containers_are_findable_by_name(self):
+        """要点。**テキストを探している人が、絞り込み欄で見つけられること**.
+
+        docs/07 は「絞り込み欄に `msg` と入れると、それだけが並びます」と書いて
+        いるのに、名前の無いファイルには `msg` が一つも付かなかった。
+        """
+        rows = self.entries()
+        got = self.guess(rows)
+        named = [p for (p, _w, _h, _n), g in zip(rows, got) if g["ext"] == "msg"]
+        self.assertEqual(len(named), 4, f"msg と名づけたのが {len(named)} 件: {named}")
+        for path in named:
+            self.assertTrue(path.endswith(".msg"), f"{path} を msg と名づけた (中身が違う)")
+
+    def test_a_box_holding_one_picture_is_not_called_a_picture(self):
+        """`diary.bin` は中に TIM2 を 1 枚抱えた入れ物。画像と名づけないこと.
+
+        ここを取り違えると、**同じ入れ物に入っている日記の文章が見えなくなる**。
+        """
+        rows = [r for r in self.entries() if r[0] == "diary.bin"]
+        self.assertEqual(len(rows), 1, "diary.bin が見つからない (題材が変わった)")
+        self.assertTrue(bytes(rows[0][2]).find(b"TIM2") > 0,
+                        "diary.bin に TIM2 が入っていない (この検査の前提が崩れた)")
+        self.assertEqual(self.guess(rows)[0]["ext"], "parts",
+                         "中に絵が 1 枚あるだけで画像と名づけている")
+
+    def test_the_guess_is_never_marked_certain(self):
+        """魔法数で決まったものだけが `sure`。見当に確定の顔をさせない."""
+        rows = self.entries()
+        got = self.guess(rows)
+        for (path, _w, _h, _n), g in zip(rows, got):
+            if g["sure"]:
+                self.assertTrue(path.endswith(".tm2"),
+                                f"{path} を確定扱いにした ({g['label']})")
+
+    def test_the_new_rules_do_not_fire_on_other_data(self):
+        """入れ物の判定が、関係ないデータに付かないこと (緩めた代償を測る)."""
+        problem = ensure_practice("work/RINFOLT.iso", "make_iso.py")
+        if problem:
+            self.skipTest(problem)
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('/* @extract-start sniff */'),"
+            "b=s.indexOf('/* @extract-end sniff */');"
+            "const m=new Function(s.slice(a,b)+'\\nreturn {looksLikeParts};')();"
+            "const iso=new Uint8Array(fs.readFileSync('work/RINFOLT.iso'));"
+            "let tries=0,hits=0;"
+            "for(let o=0;o+4096<=iso.length;o+=512){tries++;"
+            "if(m.looksLikeParts(iso.subarray(o,o+4096),4096))hits++;}"
+            "let r=12345>>>0;const rnd=new Uint8Array(4096*200);"
+            "for(let i=0;i<rnd.length;i++){r=(Math.imul(r,1103515245)+12345)>>>0;"
+            "rnd[i]=(r>>>16)&0xFF;}"
+            "let rh=0,rt=0;for(let o=0;o+4096<=rnd.length;o+=4096){rt++;"
+            "if(m.looksLikeParts(rnd.subarray(o,o+4096),4096))rh++;}"
+            "console.log(JSON.stringify({tries,hits,rt,rh}));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, "測れない: " + res.stdout + res.stderr)
+        got = json.loads(res.stdout)
+        self.assertGreater(got["tries"], 300, "走査した窓が少なすぎる (前提が崩れた)")
+        self.assertEqual(got["hits"], 0,
+                         f"ISO の {got['tries']} 窓のうち {got['hits']} 窓を入れ物と見た")
+        self.assertEqual(got["rh"], 0,
+                         f"乱数の {got['rt']} 窓のうち {got['rh']} 窓を入れ物と見た")
+
+
 class TestTheBitDepthGuessIsCounted(unittest.TestCase):
     """1 ドットのビット数の見当が、何通り当たるかを数える (#151).
 

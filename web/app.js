@@ -992,6 +992,9 @@ const MAGICS = [
   { ext: "png",  label: "画像 (PNG)",            bytes: [0x89, 0x50, 0x4E, 0x47] },
 ];
 
+/** 切り出して単体で動かせるように、この塊の中で完結させる読み取り */
+const sniffU32 = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
+
 const SNIFF_BY_CLASS = {
   jp:    { ext: "txt",    label: "日本語テキストらしい" },
   ascii: { ext: "txt",    label: "ASCII テキストらしい" },
@@ -1007,12 +1010,93 @@ const SNIFF_BY_CLASS = {
  * @param size  ファイル全体の長さ (圧縮の見当に使う)
  * @returns {{ext, label, sure}}  sure は魔法数で決まったときだけ true
  */
+/**
+ * 先頭ではない位置にある TIM2 を探す (#153)。
+ *
+ * 魔法数を**先頭だけ**で見ていたので、`bk_font.tms` のように
+ * **前置きの後ろに TIM2 が入っている**ファイルを取りこぼしていました。
+ * 実物のフォントは 0x80 の前置きつき (docs/11)。英語化パッチの公開ソースも
+ * `findTIM2s` でファイル全体から `TIM2` の 4 バイトを**探して**います
+ * —— 先頭決め打ちではないのが向こうの実装。こちらも探します。
+ *
+ * 先頭で当たったものは `sure`、途中で見つけたものは見当 (`sure: false`) に分けます。
+ */
+function findEmbeddedTim2(head) {
+  for (let i = 4; i + 4 <= head.length; i++) {
+    if (head[i] === 0x54 && head[i + 1] === 0x49
+        && head[i + 2] === 0x4D && head[i + 3] === 0x32) return i;
+  }
+  return -1;
+}
+
+/**
+ * 「件数 + 位置表 + 本文」の入れ物かを見る (#153)。
+ *
+ * この道具で名前の無いファイルに見当を付ける目的は、docs/07 いわく
+ * **「1951 個の中からテキストを探す」**ことなのに、**入れ物を指す呼び名が
+ * 一つも無く**、`.msg` も日記の入れ物も軒並み「不明 (タイル・表など)」に
+ * 落ちていました。探す相手そのものに名前が無かった、ということです。
+ *
+ * 形は 2 つあります。どちらも u32 の件数で始まり、位置が増えていき、
+ * どれもファイル内に収まります。**1 件目の位置が表の直後**なのが決め手で、
+ * これは当てはめではなく読み取った値そのものなので根拠になります (#150)。
+ *
+ *   - `.msg` の形 —— 表の直後がそのまま本文 (刻み 8 は「位置と長さ」、刻み 4 は位置だけ)
+ *   - 入れ物の形 —— 表の後ろを **16 バイト境界まで詰めて**から部品が始まる
+ *     (刻み 8 と 12。日記・保存画面がこれ)
+ *
+ * @returns {{ext, stride}} か null
+ */
+function looksLikeParts(head, size) {
+  if (!size || head.length < 12) return null;
+  const n = sniffU32(head, 0);
+  if (n < 1 || n > 4096) return null;
+  for (const [ext, stride, pad] of [["msg", 8, false], ["msg", 4, false],
+                                    ["parts", 8, true], ["parts", 12, true]]) {
+    const tableEnd = 4 + n * stride;
+    const wantFirst = pad ? Math.ceil(tableEnd / 16) * 16 : tableEnd;
+    if (wantFirst > size || tableEnd > head.length) continue;
+    if (sniffU32(head, 4) !== wantFirst) continue;
+    let prev = -1, ok = true, real = 0;
+    for (let i = 0; i < n; i++) {
+      const off = sniffU32(head, 4 + i * stride);
+      const len = stride >= 8 ? sniffU32(head, 8 + i * stride) : 1;
+      /* 空き枠 (位置も長さも 0) は飛ばす。入れ物は枠を空けたまま作られることがある
+         —— これを弾いていたので fish_on_mem.bin を取りこぼしていた (#153) */
+      if (off === 0 && len === 0) continue;
+      if (off <= prev || off >= size) { ok = false; break; }
+      if (stride >= 8 && (len <= 0 || off + len > size)) { ok = false; break; }
+      prev = off;
+      real++;
+    }
+    if (ok && real >= 1) return { ext, stride };
+  }
+  return null;
+}
+
 function sniffKind(head, cls, size) {
   for (const m of MAGICS) {
     if (head.length < m.bytes.length) continue;
     let hit = true;
     for (let i = 0; i < m.bytes.length; i++) if (head[i] !== m.bytes[i]) { hit = false; break; }
     if (hit) return { ext: m.ext, label: m.label, sure: true };
+  }
+  /* 入れ物かどうかを、埋まっている TIM2 より先に見る。中に絵が 1 枚あるだけで
+     「画像」と名づけると、**同じ入れ物に入っている文章が見えなくなる** (#153) */
+  const parts = looksLikeParts(head, size);
+  if (parts) {
+    return {
+      ext: parts.ext,
+      label: parts.ext === "msg"
+        ? `テキストの入れ物らしい (件数 + ${parts.stride} バイト刻みの位置表)`
+        : `入れ物らしい (件数 + ${parts.stride} バイト刻みの位置表。中に部品が並ぶ)`,
+      sure: false,
+    };
+  }
+  const tim2At = findEmbeddedTim2(head);
+  if (tim2At > 0) {
+    return { ext: "tm2", label: `画像 (TIM2。前置きの後ろ、${tim2At} バイト目から)`,
+             sure: false };
   }
   if (size && head.length >= 8) {
     const n = (head[0] | (head[1] << 8) | (head[2] << 16) | (head[3] << 24)) >>> 0;
