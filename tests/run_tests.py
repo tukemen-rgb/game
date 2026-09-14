@@ -5012,6 +5012,83 @@ class TestTheQaAnswerKeyIsTrue(unittest.TestCase):
         self.assertIn(f"{both:,} バイト", self.doc, f"全部直すと {both:,} バイト")
 
 
+class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
+    """docs/04 の検査一覧が、実際の動きと合っていること (#139).
+
+    `untranslated` の欄には「**訳文が原文と同じ (未訳の疑い)**」と書いてあった。
+    ところが実際に出るのは「**訳文の欄が空**」のときだけで、
+    原文と同じ行では**何も出ない**。読んだ人は、取り出したままの 19 行に
+    WARN が並ぶと思って待つが、いつまでも来ない。
+
+    行ごとに出さないのは正しい判断 (取り出し直後は全行がそうなので、
+    同じ WARN が何十件も並んで本当の指摘が埋もれる)。まとめて注意書き 1 つに
+    してある。**間違っていたのは文書のほう**なので文書を直した。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import proofread
+
+        cls.pf = proofread
+        cls.rules = proofread.load_rules(os.path.join(REPO, "data", "rules.json"), "ja")
+        with open(os.path.join(REPO, "docs", "04-校正とQA.md"), encoding="utf-8") as fh:
+            cls.doc = fh.read()
+
+    def fired(self, original: str, translation: str) -> set:
+        row = {"id": "0", "original": original, "translation": translation}
+        found = self.pf.check_row(row, self.rules, [], None,
+                                  self.pf.tag_widths_of(self.rules, 0.0))
+        return {f.rule for f in found}
+
+    def test_untranslated_fires_on_an_empty_cell_not_on_a_copy(self):
+        self.assertIn("untranslated", self.fired("こんにちは。", ""),
+                      "訳文が空なのに untranslated が出ない")
+        self.assertNotIn("untranslated", self.fired("こんにちは。", "こんにちは。"),
+                         "原文と同じだけで untranslated を出している (文書の言い分が正しくなる)")
+        self.assertNotIn("untranslated", self.fired("こんにちは。", "やあ。"),
+                         "訳してあるのに untranslated が出ている")
+
+    def test_the_table_describes_the_real_condition(self):
+        """一覧の `untranslated` の欄が、空欄のことだと分かる書き方であること."""
+        import re
+
+        rows = [ln for ln in self.doc.splitlines()
+                if ln.startswith("| `untranslated` |")]
+        self.assertEqual(len(rows), 1, f"docs/04 に untranslated の行が {len(rows)} 本")
+        self.assertIn("空", rows[0], f"空欄のことだと書いていない: {rows[0]}")
+        self.assertNotIn("原文と同じ", rows[0],
+                         f"出ない条件を書いている: {rows[0]}")
+
+    def test_the_doc_says_where_the_copy_case_is_reported_instead(self):
+        """「原文と同じ」がどこに出るのかを書いてあること (読者の期待を宙に浮かせない)."""
+        self.assertTrue("行ごとの指摘にしていません" in self.doc,
+                        "「原文と同じ」を行ごとに出さない旨が書いていない")
+
+    def test_every_rule_in_the_table_can_actually_fire(self):
+        """一覧に載っている 13 個が、どれも出せること (出ない検査を載せない).
+
+        `untranslated` は題材では一度も出ないので、表にあって実際は
+        死んでいる、ということが起こりうる。1 つずつ出させて確かめる。
+        """
+        import re
+
+        table = self.doc.split("| `rule` | 重さ |")[1].split("\n\n")[0]
+        listed = re.findall(r"^\| `([a-z_]+)` \|", table, re.M)
+        self.assertEqual(len(listed), 13, f"一覧が {len(listed)} 個 (書き方が変わった)")
+        rows = scrp.read_tsv(os.path.join(REPO, "exercises", "qa_target.tsv"))
+        gloss = self.pf.load_glossary(os.path.join(REPO, "data", "glossary.tsv"))
+        chars = self.pf.load_font_chars(os.path.join(REPO, "data", "font_chars.txt"))
+        tw = self.pf.tag_widths_of(self.rules, 0.0)
+        seen = set()
+        for row in rows:
+            seen |= {f.rule for f in self.pf.check_row(row, self.rules, gloss, chars, tw)}
+        seen |= {f.rule for f in self.pf.check_consistency(rows, lambda rid: None)}
+        # 題材で出ないものは、その場で条件を作って出させる
+        seen |= self.fired("こんにちは。", "")                      # untranslated
+        missing = [r for r in listed if r not in seen]
+        self.assertEqual(missing, [], f"一覧にあるのに出せない検査: {missing}")
+
+
 class TestKanjiHidingInKatakana(unittest.TestCase):
     """カタカナに紛れた形の似た漢字を拾う検査 (#127).
 
