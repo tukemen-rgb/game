@@ -3695,12 +3695,58 @@ class TestNothingIsQuietlyLeftOut(unittest.TestCase):
         self.assertEqual(found, set(run_all.CHECKS),
                          "tests/e2e/ にあるのに CHECKS に無い (または逆)")
 
+    @staticmethod
+    def code_strings(path: str) -> set:
+        """その Python の**説明文でない**文字列だけを集める (#136).
+
+        「名前がファイルの中に出てくるか」で見ていたので、`.mjs` の名前が
+        説明文に出てくるだけで通っていた。実際に呼んでいる所を消しても、
+        説明文が残っていれば緑のまま (壊して確かめて分かった)。
+        `ast` で読んで、docstring は除き、それ以外の文字列だけを見る。
+        """
+        import ast
+
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        docs = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                first = node.body[0] if node.body else None
+                if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                        and isinstance(first.value.value, str)):
+                    docs.add(id(first.value))
+        return {n.value for n in ast.walk(tree)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs}
+
+    def test_the_docstring_trap_is_actually_closed(self):
+        """説明文の中の名前を拾わないこと (この検査の土台) (#136).
+
+        ここが緩いと上の検査が空振りする。実際、直す前は
+        `test_fuzz.mjs` を呼ぶ行を消して**説明文だけ残しても通った**。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.py")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('"""説明文の中の only_in_doc.mjs"""\n'
+                         "def f():\n"
+                         '    """ここも説明文 also_doc.mjs"""\n'
+                         '    return run("real_call.mjs")  # ここは本物\n')
+            got = type(self).code_strings(path)
+        self.assertIn("real_call.mjs", got, "本物の呼び出しを拾えていない")
+        self.assertNotIn("説明文の中の only_in_doc.mjs", got, "module の説明文を拾っている")
+        self.assertNotIn("ここも説明文 also_doc.mjs", got, "関数の説明文を拾っている")
+
     def test_every_node_test_is_called_from_here(self):
+        """`.mjs` を**呼んでいる**こと。説明文に名前があるだけでは通さない."""
         tests_dir = os.path.join(REPO, "tests")
-        with open(os.path.join(tests_dir, "run_tests.py"), encoding="utf-8") as fh:
-            me = fh.read()
-        for name in sorted(n for n in os.listdir(tests_dir) if n.endswith(".mjs")):
-            self.assertIn(name, me, f"tests/{name} を run_tests.py から呼んでいない")
+        strings = self.code_strings(os.path.join(tests_dir, "run_tests.py"))
+        names = sorted(n for n in os.listdir(tests_dir) if n.endswith(".mjs"))
+        self.assertGreaterEqual(len(names), 5, f"node の検査が {len(names)} 件しか見つからない")
+        for name in names:
+            # assertIn は落ちると**文字列を全部**吐く (44KB 出た)。#96・#115・#129 と同じ形
+            self.assertTrue(name in strings,
+                            f"tests/{name} を run_tests.py が呼んでいない "
+                            f"(説明文に名前があるだけでは通しません)")
 
 
 class TestE2eFixturesFromAScratchTree(unittest.TestCase):
