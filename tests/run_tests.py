@@ -5012,6 +5012,95 @@ class TestTheQaAnswerKeyIsTrue(unittest.TestCase):
         self.assertIn(f"{both:,} バイト", self.doc, f"全部直すと {both:,} バイト")
 
 
+class TestExerciseNineSendsYouToTheRightTable(unittest.TestCase):
+    """課題 9 が引けと言う表に、出る `→` の行が本当に載っていること (#142).
+
+    課題 9 は 5 通りに壊して `→` の行を読む課題で、手順 2 が
+    「docs/10 の**『困ったとき』**の表で対応する症状を探す」と言っていた。
+    ところが `→` の行は**1 本もそこに無い**。載っているのは、その少し下の
+    **「診断の `→` の行の読み方」** のほう。「困ったとき」は
+    `→` **以外**で道具が言うこと (「候補なし」「1 行もありません」など) を引く表。
+
+    課題のとおりにすると、19 行の表を端から見て自分の行が見つからず、
+    「documented されていない」か「壊し方を間違えた」と思うことになる。
+    5 通りとも実際に走らせて、名指しの表に載っていることを確かめる。
+    """
+
+    BREAKS = ("idx", "name", "msg", "font", "map")
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        cls.trouble = doc.split("## 困ったとき")[1].split("### 診断の")[0]
+        cls.arrows = doc.split("### 診断の `→` の行の読み方")[1]
+        with open(os.path.join(REPO, "exercises", "README.md"), encoding="utf-8") as fh:
+            cls.ex = fh.read().split("## 課題 9")[1]
+
+    def arrows_for(self, how: str) -> tuple[list, str]:
+        """1 通り壊して `check` を走らせ、(→ の行, 結果の行) を返す."""
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, how)
+            made = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "make_boku2_sample.py"),
+                 "--break", how, "--out", folder], capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "boku2.py"), "check", folder],
+                capture_output=True, text=True, cwd=REPO)
+        lines = [l for l in res.stdout.splitlines() if l.startswith("→")]
+        verdict = next((l for l in res.stdout.splitlines() if l.startswith("== 結果")), "")
+        self.assertEqual(res.returncode, 1, f"{how}: 終了コードが 1 でない\n{res.stdout[-300:]}")
+        return lines, verdict
+
+    @staticmethod
+    def looks_up(line: str, table: str) -> bool:
+        """`→` の行が表に載っているか.
+
+        表の側は具体名を `…` で省いて書く (「[フォント] … は TIM2 として読めません」)。
+        **表の見出しを型にして**行に当てる。行の側を切り刻むと、
+        省略された所で当たらない (最初そう書いて font の行だけ外した)。
+        """
+        body = line[2:].strip()
+        for row in table.splitlines():
+            if not row.startswith("|"):
+                continue
+            head = row.strip().strip("|").split("|")[0].strip()
+            if len(head) < 8 or set(head) <= set("-: "):
+                continue
+            pattern = ".*".join(re.escape(p) for p in head.split("…") if p.strip())
+            if pattern and re.search(pattern, body):
+                return True
+        return False
+
+    def test_the_exercise_names_the_table_that_has_the_lines(self):
+        """課題が名指しする表の名前が、`→` の行を載せているほうであること."""
+        self.assertIn("診断の `→` の行の読み方", self.ex,
+                      "課題 9 が `→` の表を名指ししていない")
+
+    def test_every_arrow_line_is_in_that_table_and_not_the_other(self):
+        found = 0
+        for how in self.BREAKS:
+            lines, verdict = self.arrows_for(how)
+            self.assertTrue(lines, f"{how}: → の行が 1 本も出ない (課題の確認が崩れる)")
+            self.assertIn("確認事項", verdict, f"{how}: 結果が確認事項になっていない ({verdict})")
+            for line in lines:
+                self.assertTrue(self.looks_up(line, self.arrows),
+                                f"{how}: 「診断の → の行の読み方」に無い行: {line[:60]}")
+                self.assertFalse(self.looks_up(line, self.trouble),
+                                 f"{how}: 「困ったとき」にも載っている (表の役割が混ざった): {line[:60]}")
+                found += 1
+        self.assertGreaterEqual(found, 5, f"確かめた → の行が {found} 本しかない")
+
+    def test_the_index_break_stops_the_diagnosis_as_the_exercise_says(self):
+        """課題が言う「idx だけはそこで止まる」が本当であること."""
+        _, verdict = self.arrows_for("idx")
+        self.assertIn("ここで止めました", verdict, f"止まると言っていない: {verdict}")
+        self.assertIn("そこで診断が止まる", self.ex, "課題が「止まる」と書いていない")
+
+
 class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
     """docs/04 の検査一覧が、実際の動きと合っていること (#139).
 
