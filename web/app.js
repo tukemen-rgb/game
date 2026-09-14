@@ -407,12 +407,37 @@ function scoreTable(b, t) {
     const prevByte = b[target - 1];
     if (prevByte === 0x00 || prevByte === 0xFF) terminated++;
   }
+  /* 自分の表の中を指している項目の数。ポインタは表より後ろを指すはずなので、
+     これが多い読み方は形として間違っています。先頭の件数フィールドを
+     1 件目のポインタとして飲み込んだときにここが増えます (#150) */
+  let inside = 0;
+  for (let i = 0; i < n; i++) {
+    if (t.base + read(b, t.off + i * t.stride) < t.tableEnd) inside++;
+  }
+
   const termRatio = checked ? terminated / checked : 0;
   const evidence = [];
-  if (t.gap <= 64) evidence.push("表の直後から本文");
+  const notes = [];
+
+  /* 「表の直後から本文」を根拠にしてよいのは、基準を**そこに合わせていない**
+     ときだけです (#150)。基準の候補には「1 件目が表の直後を指すような値」が
+     入っているので、それが選ばれた候補では一致はいつも完全 —— 当てはめた結果を
+     証拠として数えることになります。実際、練習用イメージの 40 件のうち 38 件が
+     この形で、**ずれが 1〜64 の候補は 1 件も無い** (0 か、まるで外れているか)。
+     数えないかわりに、当てはめれば合うことは注記として残します。 */
+  const fitted = t.base !== 0 && t.base !== t.tableEnd;
+  if (t.gap <= 64) {
+    if (fitted) notes.push("基準を当てはめれば表の直後から本文 (当てはめた結果)");
+    else evidence.push("表の直後から本文");
+  }
   if (termRatio >= 0.7) evidence.push("行き先の直前が区切りバイト");
+  /* 基準が読み込み単位に乗っているか。当てはめた基準でも、それが偶然
+     2048 の倍数になるのは珍しいので、こちらは当てはめと独立した証拠になります。
+     基準 0 は「絶対値」という既定の仮説そのものなので数えません。 */
+  if (t.base !== 0 && t.base % 2048 === 0) evidence.push("基準がセクタ境界");
+
   const confidence = evidence.length >= 2 ? "high" : evidence.length === 1 ? "mid" : "low";
-  return Object.assign({}, t, { termRatio, evidence, confidence });
+  return Object.assign({}, t, { termRatio, inside, evidence, notes, confidence });
 }
 
 /**
@@ -474,9 +499,16 @@ function findPointerTables(b, fileSize, opt = {}) {
             }));
           }
         }
-        cands.sort((a, c) => c.evidence.length - a.evidence.length || c.count - a.count);
-        /* 根拠がひとつも無い並びは偶然とみて報告しない */
-        if (cands.length && cands[0].evidence.length >= 1) out.push(cands[0]);
+        /* 根拠の数 → **自分の表の中を指していない** → 件数、の順に選ぶ。
+           件数だけで選ぶと、先頭の件数フィールドを 1 件目のポインタとして
+           飲み込んだ読み方が「1 件多い」だけで勝ってしまう (#150) */
+        cands.sort((a, c) => c.evidence.length - a.evidence.length
+          || a.inside - c.inside || c.count - a.count);
+        /* 根拠も注記もひとつも無い並びは偶然とみて報告しない。注記だけのものは
+           確度「低」で残す ── 未知の形式を探す道具なので、**黙って捨てない** */
+        if (cands.length && (cands[0].evidence.length >= 1 || cands[0].notes.length >= 1)) {
+          out.push(cands[0]);
+        }
         start = -1; count = 0; zeroDeltas = 0;
       };
       for (let p = phase; p + stride <= b.length; p += stride) {
@@ -2703,7 +2735,8 @@ function renderPointers() {
     const span = document.createElement("span");
     span.className = "conf " + t.confidence;
     span.textContent = { high: "高", mid: "中", low: "低" }[t.confidence];
-    span.title = t.evidence.length ? t.evidence.join(" / ") : "根拠なし";
+    span.title = [...(t.evidence.length ? t.evidence : ["根拠なし"]),
+                  ...(t.notes || []).map((n) => "(" + n + ")")].join(" / ");
     td.append(span);
     tr.append(td);
     tr.addEventListener("click", () => { highlightPointer(t); gotoOffset(t.off); });

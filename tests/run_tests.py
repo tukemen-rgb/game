@@ -6618,6 +6618,171 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
 
 
+class TestPointerEvidenceIsNotCircular(unittest.TestCase):
+    """ポインタ表の根拠が、当てはめた結果を数えていないこと (#150).
+
+    docs/07 が「このツールでいちばん価値がある」と書いている機能の採点。
+    根拠は 2 つあると書いてあり、そのひとつが **「表の直後から本文が始まっている」**。
+    ところが基準の候補には**「1 件目がちょうど表の直後を指すような値」**が
+    入っている。それが選ばれた候補では、ずれは必ず 0 ——
+    **当てはめた結果を証拠として数えていた**。
+
+    練習用イメージで数えたら、直す前は 40 件のうち 39 件にこの印が付き、
+    そのうち 38 件が当てはめたものだった。**ほぼ全部に付く印は印ではない。**
+    決定的なのは「ずれが 1〜64 の候補が 1 件も無い」こと。
+    合わせていないのに惜しい、が一度も起きていない = ずれ 0 は作られた 0。
+
+    直したこと: 合わせた基準では根拠に数えず注記に回し、代わりに
+    **基準がセクタ境界 (2048 の倍数、0 は除く)** を根拠に足した。
+    当てはめと独立なので印になる (40 件中 3 件)。
+    確度「高」はちょうど 2 件のまま (#145) で、中身は
+    「区切りバイト + セクタ境界」という**独立した 2 つ**に変わった。
+    """
+
+    @staticmethod
+    def tables(source: str) -> list:
+        """web/app.js の findPointerTables をそのまま動かす.
+
+        `source` は JS の式で、`Uint8Array` を返すもの。
+        """
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('const u32le');"
+            "const e=s.indexOf('/* ======================= タイル領域の自動検出');"
+            "if(a<0||e<0){console.error('no pointer funcs');process.exit(2);}"
+            "let src=s.slice(a,e).replace("
+            "/\\/\\*\\* 範囲を絞って文字列を集める \\*\\/[\\s\\S]*?\\n}\\n/,'');"
+            "const m=new Function('state',src+'\\nreturn {findPointerTables};')({});"
+            f"const v={source};"
+            "console.log(JSON.stringify(m.findPointerTables(v,v.length).map("
+            "c=>({off:c.off,base:c.base,count:c.count,gap:c.gap,tableEnd:c.tableEnd,"
+            "confidence:c.confidence,evidence:c.evidence,notes:c.notes}))));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("走らせられない: " + res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    #: docs/07 と同じ合成音 (make_iso.py の pseudo_wave と同じ式)
+    WAVE_JS = ("(()=>{const w=new Uint8Array(48*1024);for(let i=0;i<w.length;i++){"
+               "const v=Math.sin(i/23.0)*0.6+Math.sin(i/331.0)*0.4;"
+               "w[i]=Math.trunc((v+1)*127.5)&0xFF;}return w;})()")
+    ISO_JS = "new Uint8Array(fs.readFileSync('work/RINFOLT.iso'))"
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/RINFOLT.iso", "make_iso.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+
+    def section(self) -> str:
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        head = "### 当てはめた結果は証拠にならない"
+        self.assertIn(head, doc, "docs/07 に「当てはめた結果は証拠にならない」の節が無い")
+        return doc.split(head, 1)[1].split("\n###", 1)[0]
+
+    def doc_counts(self) -> dict:
+        """節の表を {説明の一部: 件数} で返す."""
+        import re
+
+        out = {}
+        for line in self.section().split("\n"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) == 2 and cells[1] and "---" not in cells[1]:
+                m = re.search(r"\*?\*?(\d+)\*?\*?$", cells[1])
+                if m:
+                    out[cells[0].replace("*", "")] = int(m.group(1))
+        return out
+
+    def test_the_gap_is_never_merely_close(self):
+        """要の一手。ずれが 1〜64 の候補が 1 件も無いこと.
+
+        1 件でもあれば「ずれ 0 は当てはめて作った 0」という言い分が弱まる。
+        逆にここが 0 のままなら、ずれという印は**当てはめの副産物**でしかない。
+        """
+        got = self.tables(self.ISO_JS)
+        between = [c for c in got if 1 <= c["gap"] <= 64]
+        self.assertEqual(between, [],
+                         f"ずれが 1〜64 の候補が {len(between)} 件出た。"
+                         f"docs/07 の表 (0 件) を書き直し、言い分も見直すこと")
+
+    def test_a_fitted_base_never_earns_the_gap_evidence(self):
+        """基準を当てはめた候補は、根拠ではなく注記になること."""
+        got = self.tables(self.ISO_JS)
+        fitted = [c for c in got if c["base"] not in (0, c["tableEnd"])]
+        self.assertTrue(fitted, "当てはめた基準の候補が 1 件も無い (題材が変わった)")
+        for c in fitted:
+            self.assertEqual(c["gap"], 0, f"当てはめたのにずれが {c['gap']} (作りが変わった)")
+            self.assertNotIn("表の直後から本文", c["evidence"],
+                             f"0x{c['off']:x}: 当てはめた結果を根拠に数えている")
+            self.assertTrue(any("当てはめた結果" in n for n in c["notes"]),
+                            f"0x{c['off']:x}: 注記に残していない ({c['notes']})")
+
+    def test_the_counts_in_the_doc_are_measured(self):
+        got = self.tables(self.ISO_JS)
+        said = self.doc_counts()
+        self.assertEqual(len(said), 4, f"docs/07 の表から {len(said)} 行しか読めない")
+        real = {
+            "候補の総数": len(got),
+            "ずれが 64 以下 (「表の直後から本文」の条件)": len([c for c in got if c["gap"] <= 64]),
+            "そのうち、基準をそこに合わせた候補 (ずれは必ず 0)":
+                len([c for c in got if c["gap"] <= 64 and c["base"] not in (0, c["tableEnd"])]),
+            "ずれが 1〜64 の候補 (合わせていないのに惜しい)":
+                len([c for c in got if 1 <= c["gap"] <= 64]),
+        }
+        self.assertEqual(said, real, "docs/07 の表と実測が違う")
+
+    def test_the_sector_rule_is_the_discriminating_one(self):
+        """セクタ境界が「40 件中 3 件」であること (効く印は、めったに付かない)."""
+        import re
+
+        got = self.tables(self.ISO_JS)
+        aligned = [c for c in got if c["base"] and c["base"] % 2048 == 0]
+        m = re.search(r"これが付くのは \*\*(\d+) 件\*\*だけです", self.section())
+        self.assertTrue(m, "docs/07 がセクタ境界の件数を書いていない")
+        self.assertEqual(len(aligned), int(m.group(1)),
+                         f"セクタ境界が {len(aligned)} 件 (docs/07 は {m.group(1)} 件)")
+        for c in aligned:
+            self.assertIn("基準がセクタ境界", c["evidence"],
+                          f"0x{c['off']:x}: セクタ境界なのに根拠に入っていない")
+
+    def test_the_two_real_tables_stand_on_independent_evidence(self):
+        """確度「高」は 2 件のまま、中身が独立した 2 つに変わったこと."""
+        got = self.tables(self.ISO_JS)
+        high = [c for c in got if c["confidence"] == "high"]
+        self.assertEqual(len(high), 2, f"確度「高」が {len(high)} 件 (#145 の主張が崩れた)")
+        for c in high:
+            self.assertEqual(sorted(c["evidence"]),
+                             sorted(["行き先の直前が区切りバイト", "基準がセクタ境界"]),
+                             f"0x{c['off']:x} の根拠が {c['evidence']}")
+            # 先頭の件数フィールドを 1 件目として飲み込んでいないこと (#150 の直し)
+            self.assertEqual(c["count"], 39,
+                             f"0x{c['off']:x} の件数が {c['count']} (39 件のはず)。"
+                             f"件数だけで選ぶと header を 1 件多く飲み込む")
+
+    def test_wave_data_never_gets_the_separator_evidence(self):
+        """docs/07 の「波形は 1 番目の根拠を満たさない」を測る."""
+        import re
+
+        got = self.tables(self.WAVE_JS)
+        sep = [c for c in got if "行き先の直前が区切りバイト" in c["evidence"]]
+        self.assertEqual(sep, [], f"波形に区切りバイトの根拠が {len(sep)} 件付いた")
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        m = re.search(r"合成した音 48KB を読ませると候補は (\d+) 件出ます", doc)
+        self.assertTrue(m, "docs/07 が波形の候補数を書いていない")
+        self.assertEqual(len(got), int(m.group(1)),
+                         f"波形の候補が {len(got)} 件 (docs/07 は {m.group(1)} 件)")
+
+
 class TestTheMapLegendMatchesTheClassifier(unittest.TestCase):
     """docs/07 の色の凡例が、実際に動く `classifyStats` と同じことを言うか (#149).
 
