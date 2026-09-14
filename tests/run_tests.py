@@ -266,7 +266,8 @@ class TestPracticeDocsAreRunnable(unittest.TestCase):
             "08-コードを読む.md", "../README.md")
 
     #: この引数の次に来る名前は、入力ではなくその行が作るもの
-    OUT_FLAGS = ("-o", "--out", "--derive", "--report")
+    #: `--outdir` は #143 で足した。docs/03 が題材を別の場所に作るのに使う
+    OUT_FLAGS = ("-o", "--out", "--outdir", "--derive", "--report")
 
     #: 旗ではなく**位置**で出力先が決まるコマンド (末尾の引数が出力先)
     OUT_TAIL = ("boku2.py unpack",)
@@ -5010,6 +5011,131 @@ class TestTheQaAnswerKeyIsTrue(unittest.TestCase):
                          "全部直したのに WARN が残る (前提が崩れた)")
         self.assertIsNotNone(both, "全部直しても容量に入らない")
         self.assertIn(f"{both:,} バイト", self.doc, f"全部直すと {both:,} バイト")
+
+
+class TestTheLessonDocsRunTopToBottom(unittest.TestCase):
+    """docs/01・02・03・06・08 のコマンドを、**書いてある順に本当に打って**通ること (#143).
+
+    今まで見張っていたのは 3 つ:
+    README の「3 分で一周する」(実際に走らせる)、docs/10 と課題 8 の僕夏 2 の部分
+    (実際に走らせる)、そして全文書の**書き方**の検査 (#80・#81。穴埋めが残っていないか、
+    使うファイルの作り方が前に書いてあるか)。
+
+    抜けていたのが**この 5 つの本文のコマンドを実際に走らせること**。
+    書き方の検査は「入力を作る行が前にあるか」しか見ないので、
+    **前の行が後の行の題材を書き換えてしまう**型は素通りする。実際そうなっていた:
+    docs/03 の「同じ場所を指すポインタ」の実演が `make_sample.py --pool-duplicates` で
+    `work/SCRIPT.BIN` を共有ありの形に置き換え、その下の
+    「入れ直すと元とバイト単位で一致する」が**容量オーバーで落ちていた**。
+    """
+
+    DOCS = ("01-文字テーブル.md", "02-相対検索.md", "03-ポインタテーブル.md",
+            "06-画面で確かめる.md", "08-コードを読む.md")
+
+    #: 走らせない行 (外の道具を入れる、検査そのもの、比較のための shell)
+    SKIP = ("pip ", "node ", "python3 tests/")
+
+    @staticmethod
+    def commands(path: str) -> list:
+        """(コマンド, 空振りしてよいか) を、書いてある順に返す.
+
+        「空振りしてよい」は**文書がそう書いているとき**だけ認める。
+        相対検索は仮定を変えて何度も回す道具なので、`docs/02` には
+        **わざと当たらない**例がある。文書が「ヒット 0 件」と断っていれば、
+        終了コード 1 は書いてあるとおりの結果。断りが消えたら落ちる。
+        """
+        import re
+
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        out = []
+        # 後ろは**先読み**で見る。取り込むと次のブロックを飲んでしまう
+        # 最初のブロックより前の**地の文**に書いてある下ごしらえも拾う。
+        # docs/02 は「先に `python3 tools/make_sample.py`」を引用の形で書いていて、
+        # ```bash の中だけ見ていると前提を落とす (最初そう書いて、この文書だけ落ちた)
+        for pre in re.findall(r"`(python3 tools/[\w./ -]+)`", text.split("```", 1)[0]):
+            out.append((pre.strip(), False))
+        for m in re.finditer(r"```bash\n(.*?)```(?=(.{0,400}))", text, re.S):
+            block, after = m.group(1), m.group(2)
+            # **文書が結果を見せている**ときだけ、終了コード 1 を認める。
+            # 「ヒット 0 件」と断っている行 (docs/02 の外れる仮定) と、
+            # すぐ下にエラーを引用している行 (docs/03 の容量オーバーの実演)。
+            shown = after.split("```")[1] if after.count("```") >= 2 else ""
+            may_miss = ("ヒット 0 件" in after.split("```")[0]
+                        or shown.lstrip().startswith("エラー:"))
+            cur = ""
+            for line in block.splitlines():
+                line = line.split("#", 1)[0].rstrip()
+                if not line.strip():
+                    continue
+                cur += line.rstrip("\\") + (" " if line.endswith("\\") else "")
+                if not line.endswith("\\"):
+                    out.append((cur.strip(), may_miss))
+                    cur = ""
+        return out
+
+    def test_each_doc_runs_in_order_in_a_clean_tree(self):
+        """1 文書ずつ、取得したままの木で頭から流す.
+
+        文書ごとに木を作り直す。**前の文書の後片付けに頼らない**ためで、
+        読む人が 1 つの文書だけ開いても同じことが起きる。
+        """
+        import shlex
+        import shutil
+        import subprocess
+
+        ran = 0
+        for name in self.DOCS:
+            path = os.path.join(REPO, "docs", name)
+            cmds = [(c, miss) for c, miss in self.commands(path)
+                    if not any(c.startswith(s) for s in self.SKIP)]
+            self.assertGreaterEqual(len(cmds), 3,
+                                    f"{name} からコマンドを {len(cmds)} 本しか拾えない")
+            with tempfile.TemporaryDirectory() as tmp:
+                tree = os.path.join(tmp, "t")
+                shutil.copytree(REPO, tree, ignore=shutil.ignore_patterns(
+                    "work", ".git", "__pycache__", "*.pyc"))
+                for cmd, may_miss in cmds:
+                    if not cmd.startswith(("python3 ", "cp ", "cmp ")):
+                        continue
+                    shell = cmd.replace("python3 ", shlex.quote(sys.executable) + " ", 1)
+                    res = subprocess.run(shell, shell=True, capture_output=True,
+                                         text=True, cwd=tree)
+                    if may_miss and res.returncode == 1:
+                        ran += 1                        # 文書が「0 件」と断っている行
+                        continue
+                    self.assertEqual(res.returncode, 0,
+                                     f"docs/{name} を上から打つと止まる:\n  {cmd}\n"
+                                     f"{(res.stdout + res.stderr)[-500:]}")
+                    ran += 1
+        self.assertGreaterEqual(ran, 25, f"走らせたコマンドが {ran} 本しかない")
+
+    def test_the_capacity_error_docs_quote_is_the_real_one(self):
+        """docs/03 が引用している容量エラーの数字を、その場で測り直す (#143).
+
+        引用は「2,128 バイトで、上限 2,120 バイトを 8 バイト超えています」だったが、
+        実際は 2,124 / 4 バイト。題材が変われば動く数なので、走らせて突き合わせる。
+        """
+        import shutil
+        import subprocess
+
+        with open(os.path.join(REPO, "docs", "03-ポインタテーブル.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = os.path.join(tmp, "t")
+            shutil.copytree(REPO, tree, ignore=shutil.ignore_patterns(
+                "work", ".git", "__pycache__", "*.pyc"))
+            subprocess.run([sys.executable, "tools/make_sample.py"],
+                           capture_output=True, cwd=tree, check=True)
+            res = subprocess.run(
+                [sys.executable, "tools/insert_text.py", "exercises/qa_target.tsv",
+                 "-o", "work/BAD.BIN", "--original", "work/SCRIPT.BIN"],
+                capture_output=True, text=True, cwd=tree)
+        out = res.stdout + res.stderr
+        line = next((l.strip() for l in out.splitlines() if l.startswith("エラー:")), "")
+        self.assertTrue(line, f"容量エラーが出ない (前提が崩れた):\n{out[-300:]}")
+        self.assertTrue(line in doc,
+                        f"docs/03 の引用が今と違う。この行に書き換える → 「{line}」")
 
 
 class TestExerciseNineSendsYouToTheRightTable(unittest.TestCase):
