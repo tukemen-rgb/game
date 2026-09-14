@@ -2607,9 +2607,40 @@ $("hexnext").addEventListener("click", () => {
 });
 
 /* ---------- 文字列 ---------- */
+
+/**
+ * 「探さなかった範囲」の報告 (#148).
+ *
+ * この道具でいちばん強い誤検出よけは `scannableRanges` の**そもそも見ない**で、
+ * 圧縮や乱数と分類された区画は走査しません。ところが画面にはその跡が
+ * どこにも出ず、丸ごと飛ばした結果が「該当する文字列はありません。」とだけ
+ * 出ていました。**道具が壊れているのと見分けが付きません。**
+ * 何割を見ていないのかを言います。
+ */
+function scanSkipReport() {
+  if (!state.buf || !state.buf.length) return "";
+  const total = state.buf.length;
+  let seen = 0;
+  for (const [from, to] of scannableRanges()) seen += Math.min(to, total) - from;
+  if (seen >= total) return "";
+  /* 100% と言ってよいのは、本当に 1 バイトも見ていないときだけ。四捨五入すると
+     99.7% を「100%」と言いながら表に 2 件並ぶ、という矛盾が出る (#148 で実際に出た) */
+  const pct = seen === 0 ? 100
+    : Math.min(99, Math.max(1, Math.floor((1 - seen / total) * 100)));
+  return `このファイルの ${pct}% は「圧縮・乱数」か「波形」と判定されたので、`
+       + "その部分では文字列を探していません (偶然読めるだけの並びが大量に出るため)。"
+       + "16 進タブではそのまま見られます。";
+}
+
 function renderStrings() {
   const body = $("strbody");
   body.textContent = "";
+  const note = $("strskip");
+  if (note) {
+    const said = scanSkipReport();
+    note.textContent = said;
+    note.hidden = !said;
+  }
   const rows = state.strings.filter((s) =>
     state.strFilter === "all" ? true
       : state.strFilter === "ascii" ? s.kind === "ascii" : s.kind !== "ascii");
@@ -2630,7 +2661,9 @@ function renderStrings() {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
     td.colSpan = 4;
-    td.textContent = "該当する文字列はありません。";
+    td.textContent = scanSkipReport()
+      ? "該当する文字列はありません (上の理由で、ほとんど探していません)。"
+      : "該当する文字列はありません。";
     tr.append(td);
     body.append(tr);
   }

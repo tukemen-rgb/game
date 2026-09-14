@@ -6614,6 +6614,159 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
 
 
+class TestHowManyFalsePositivesSurvive(unittest.TestCase):
+    """docs/07 の「誤検出について」の数字を測る (#148).
+
+    節はこう書いていた —— 「このツールでは次の **2 段**で減らしています」
+    (U+FFFD を含む並びを捨てる / よく使う範囲が 60% 未満なら捨てる)、
+    「それでも 96KB の乱数から**数百件**は残ります」。測ったら 3 つとも外れていた。
+
+    1. **段の数が違う。** 文字列側の条件は 4 つあり、その前に
+       「圧縮・乱数・波形と分類された区画は走査しない」がある。
+    2. **名指しした 2 つがほとんど効いていない。** 乱数に対して U+FFFD は
+       20 件、よく使う範囲 60% は **1 件**しか落としていない。効いているのは
+       節が書いていなかった**仮名の割合** (208 件)。
+    3. **数が違う。** 既定の最低文字数 6 では**およそ 1,100 件**残る。
+       「数百件」になるのは最低文字数を 8 にしたとき。
+
+    そして画面のほうがもっと大事だった。乱数は区画ごと飛ばされるので
+    **実際には 0 件**なのに、その跡がどこにも出ず「該当する文字列はありません。」
+    とだけ出ていた (#148 で理由を出すようにした。画面側は tests/e2e/strings.py)。
+    """
+
+    #: 乱数の作り方。**書いた数字は作り方ごと残す** (#147 で踏んだ穴)。
+    #: 96KB を JSON にして渡すと argv の上限に当たるので、node の側で作る
+    NOISE_JS = (
+        "function noise(size,seed){let r=seed>>>0;const o=new Uint8Array(size);"
+        "for(let i=0;i<size;i++){r=(Math.imul(r,1103515245)+12345)>>>0;o[i]=(r>>>16)&0xFF;}"
+        "return o;}"
+    )
+    NOISE_SIZE = 96 * 1024
+
+    #: 文字列を捨てる条件。app.js の 1 行を、条件を 1 つ抜いた形に差し替える
+    FULL = 'text.includes("\\uFFFD") || q.plaus < 0.6 || noKana || tooLatin'
+    WITHOUT = {
+        "仮名の割合": 'text.includes("\\uFFFD") || q.plaus < 0.6 || tooLatin',
+        "U+FFFD": "q.plaus < 0.6 || noKana || tooLatin",
+        "よく使う範囲": 'text.includes("\\uFFFD") || noKana || tooLatin',
+        "英字の偏り": 'text.includes("\\uFFFD") || q.plaus < 0.6 || noKana',
+    }
+
+    @classmethod
+    def run_js(cls, body: str, cond, seed: int = 12345) -> object:
+        """web/app.js から文字列まわりを切り出して動かす (書き写さない)."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('const SJIS_LEAD');"
+            "const e=s.indexOf('\\n}\\n',s.indexOf('function scanUtf8'))+3;"
+            "if(a<0||e<3){console.error('no string funcs');process.exit(2);}"
+            # collectStrings は state を触るので外す (ここでは範囲を絞らずに測る)
+            "let src=s.slice(a,e).replace("
+            "/\\/\\*\\* 範囲を絞って文字列を集める \\*\\/[\\s\\S]*?\\n}\\n/,'');"
+            f"const DROP={json.dumps(cls.FULL)};"
+            f"const COND={json.dumps(cond)};"
+            "if(!src.includes(DROP)){console.error('捨てる条件が見つからない');process.exit(3);}"
+            "if(COND!==null)src=src.replace(DROP,COND);"
+            "const m=new Function('state',src+"
+            "'\\nreturn {scanStrings,scanUtf8,blockStats,classifyStats,jpQuality};')({});"
+            + cls.NOISE_JS
+            + f"const v=noise({cls.NOISE_SIZE},{seed});"
+            + body
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("測れない: " + res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    @classmethod
+    def count(cls, cond, min_chars: int = 6, seed: int = 12345) -> int:
+        return cls.run_js(
+            f"console.log(JSON.stringify(m.scanStrings(v,{min_chars}).length"
+            f"+m.scanUtf8(v,{min_chars}).length));", cond, seed)
+
+    def doc(self) -> str:
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            return fh.read().split("## 誤検出について", 1)[1].split("\n## ", 1)[0]
+
+    def test_random_data_is_never_scanned_at_all(self):
+        """1 段目。乱数は区画ごと「高エントロピー」になり、走査されない."""
+        got = self.run_js(
+            "const BS=1024,t={};"
+            "for(let o=0;o<v.length;o+=BS)"
+            "{const c=m.classifyStats(m.blockStats(v.subarray(o,o+BS)));t[c]=(t[c]||0)+1;}"
+            "console.log(JSON.stringify(t));", None)
+        self.assertEqual(list(got), ["high"],
+                         f"乱数の区画の分類が {got} (「そもそも見ない」が効かなくなった)")
+        self.assertEqual(got["high"], 96, f"96 区画のはずが {got['high']}")
+        self.assertIn("96 区画すべてが「高エントロピー」", self.doc(),
+                      "docs/07 が 1 段目を説明していない")
+
+    def test_each_filter_drops_what_the_doc_says(self):
+        """2 段目の表。条件を 1 つ抜いて、その条件だけが落としている件数を測る."""
+        import re
+
+        doc = self.doc()
+        base = self.count(None)
+        for name, without in self.WITHOUT.items():
+            alone = self.count(without) - base
+            rows = [ln for ln in doc.split("\n")
+                    if ln.startswith("|") and name in ln]
+            self.assertEqual(len(rows), 1, f"docs/07 に「{name}」の行が {len(rows)} 本")
+            said = re.search(r"\*?\*?([\d,]+) 件\*?\*?", rows[0])
+            self.assertTrue(said, f"件数を読めない行: {rows[0]}")
+            self.assertEqual(alone, int(said.group(1).replace(",", "")),
+                             f"「{name}」だけが落とす件数が {alone} 件 "
+                             f"(docs/07 は {said.group(1)} 件)")
+
+    def test_the_kana_rule_is_the_one_doing_the_work(self):
+        """節の言い分「効いているのは仮名の割合だけ」を支える.
+
+        ここが崩れたら表の並び順ごと書き直すことになるので、別建てで見る。
+        """
+        base = self.count(None)
+        alone = {name: self.count(w) - base for name, w in self.WITHOUT.items()}
+        best = max(alone, key=alone.get)
+        self.assertEqual(best, "仮名の割合",
+                         f"いちばん効いている条件が「{best}」になった。"
+                         f"内訳 {alone}。docs/07 の説明を書き直すこと")
+        self.assertGreater(alone["仮名の割合"], 5 * max(
+            v for k, v in alone.items() if k != "仮名の割合"),
+            f"仮名の割合の効きが他と並んだ。内訳 {alone}")
+
+    def test_the_total_matches_the_doc(self):
+        """「全部外すと 1,686 件、全部入れておよそ 1,100 件」を測り直す."""
+        import re
+
+        doc = self.doc()
+        m = re.search(r"4 つ全部を外すと ([\d,]+) 件、全部入れて \*\*およそ ([\d,]+) 件", doc)
+        self.assertTrue(m, "docs/07 から合計の主張を読めない (書き方が変わった)")
+        said_off = int(m.group(1).replace(",", ""))
+        said_on = int(m.group(2).replace(",", ""))
+        self.assertEqual(self.count("false"), said_off,
+                         f"全部外したときが {self.count('false')} 件 (docs/07 は {said_off})")
+        # 「およそ」なので種を変えても持つ幅で見る。1 つの種に貼り付けない
+        got = [self.count(None, seed=s) for s in (1, 12345, 20260914)]
+        for n in got:
+            self.assertLess(abs(n - said_on), said_on * 0.15,
+                            f"乱数から残るのが {n} 件 (docs/07 は およそ {said_on} 件)。"
+                            f"種を変えた結果は {got}")
+
+    def test_the_doc_no_longer_claims_only_two_stages(self):
+        """#148 の直しが戻っていないこと (「次の 2 段で減らしています」の形)."""
+        doc = self.doc()
+        self.assertNotIn("次の 2 段で\n減らしています", doc,
+                         "「2 段」の書き方に戻っている (実際は区画の除外 + 4 つの条件)")
+        for word in ("そもそも見ない", "仮名の割合"):
+            self.assertIn(word, doc, f"docs/07 に「{word}」の説明が無い")
+
+
 class TestShortFilesAreNotCalledZeroFill(unittest.TestCase):
     """ゼロが 1 バイトも無いものを「ほとんどがゼロ埋め」と言わないこと (#113).
 

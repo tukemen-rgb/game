@@ -16,7 +16,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 CHECKS = ["split", "msg", "map", "tim2", "fontdraft", "sample", "build", "broken", "viewer",
-          "docs07", "miss", "tabs"]
+          "docs07", "miss", "tabs", "strings"]
 
 #: (これができていれば作らなくてよい印, 作る道具). **上から順に** 実行する。
 #: make_archive.py は make_sample.py の出力 (SCRIPT.BIN など) を材料にするので、
