@@ -2140,7 +2140,8 @@ class TestWebBuild(unittest.TestCase):
                 continue
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
-            self.assertNotIn("\ufffd", text, f"{os.path.relpath(path, REPO)} に生の置換文字があります")
+            self.assertTrue("\ufffd" not in text,
+                            f"{os.path.relpath(path, REPO)} に生の置換文字があります")
         self.assertNotIn("\ufffd", self._build(), "組み立てた HTML に置換文字があります")
 
 
@@ -2612,7 +2613,7 @@ class TestBoku2Cli(unittest.TestCase):
             with open(tsv, "rb") as fh:
                 raw = fh.read()
             self.assertTrue(raw.startswith(codecs.BOM_UTF8 + b"id\t"), raw[:12])
-            self.assertNotIn(b"\r\n", raw)
+            self.assertTrue(b"\r\n" not in raw, "TSV に CRLF が混ざっている")
             base = scrp.read_tsv(tsv)
             self.assertIn("config:0", [r["id"] for r in base])
 
@@ -3045,14 +3046,14 @@ class TestDocs(unittest.TestCase):
         """
         howto = open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8").read()
         readme = open(os.path.join(REPO, "README.md"), encoding="utf-8").read()
-        self.assertIn("## 4. ここで終わり", howto, "docs/10 に道の終わりの節が無い")
+        self.assertTrue("## 4. ここで終わり" in howto, "docs/10 に道の終わりの節が無い")
         self.assertIn("入れ直す手順は\n用意していません", howto.replace("\r", ""),
                       "docs/10 が「入れ直しは無い」と言い切っていない")
         self.assertIn("docs/05", howto.split("## 4. ここで終わり")[1].split("## ")[0],
                       "終わりの節から権利面 (docs/05) に繋がっていない")
         # README の「入れ直し」は、必ず自作の練習データ限定だと分かる形で書くこと
-        self.assertIn("入れ直しができるのは自作の練習データに対してだけ", readme,
-                      "README の冒頭が実物への入れ直しがあるように読める")
+        self.assertTrue("入れ直しができるのは自作の練習データに対してだけ" in readme,
+                        "README の冒頭が実物への入れ直しがあるように読める")
         for line in readme.splitlines():
             if "入れ直す" in line and "insert_text.py" in line:
                 nearby = readme[max(0, readme.index(line) - 200):readme.index(line) + 400]
@@ -5636,7 +5637,8 @@ class TestNothingIsNotAPass(unittest.TestCase):
             with open(os.path.join(tmp, "o.tsv"), encoding="utf-8-sig") as fh:
                 got = fh.read()
         self.assertEqual(rc, 0, out)
-        self.assertIn("セーブしますか？", got, "Shift-JIS の行が取り出せていない (前提が崩れた)")
+        self.assertTrue("セーブしますか？" in got,
+                        "Shift-JIS の行が取り出せていない (前提が崩れた)")
         self.assertNotIn("文字表で全部読めました", out,
                          "文字表を一度も引いていないのに「全部読めました」と言っている")
         self.assertIn("試せていません", out, out)
@@ -6406,7 +6408,7 @@ class TestTheBlindSpotOfTheImageFinderIsDocumented(unittest.TestCase):
         # **見出しの形**で切る。素の言葉で切ると、本文中の同じ言葉 (節への
         # 差し込みリンクなど) に当たって別の場所を読む (#149 で実際に踏んだ)
         head = "### この見つけ方が取りこぼす絵"
-        self.assertIn(head, doc, "docs/07 に取りこぼしの節が無い")
+        self.assertTrue(head in doc, "docs/07 に取りこぼしの節が無い")
         body = doc.split(head, 1)[1].split("\n###", 1)[0]
         rows = []
         for line in body.split("\n"):
@@ -6548,7 +6550,7 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
             doc = fh.read()
         # 見出しの形で切る (素の言葉だと本文のリンクに当たる。#149)
         head = "### では、緩めたら何が起きるのか"
-        self.assertIn(head, doc, "docs/07 に「緩めたら何が起きるのか」の節が無い")
+        self.assertTrue(head in doc, "docs/07 に「緩めたら何が起きるのか」の節が無い")
         body = doc.split(head, 1)[1].split("\n###", 1)[0]
         rows = []
         for line in body.split("\n"):
@@ -6838,7 +6840,7 @@ class TestPointerEvidenceIsNotCircular(unittest.TestCase):
         with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
             doc = fh.read()
         head = "### 当てはめた結果は証拠にならない"
-        self.assertIn(head, doc, "docs/07 に「当てはめた結果は証拠にならない」の節が無い")
+        self.assertTrue(head in doc, "docs/07 に「当てはめた結果は証拠にならない」の節が無い")
         return doc.split(head, 1)[1].split("\n###", 1)[0]
 
     def doc_counts(self) -> dict:
@@ -7622,6 +7624,106 @@ class TestWhatIsConfirmedHasOneAnswer(unittest.TestCase):
         """記録欄 (1900 行超) の後ろに置かれたら、誰も辿り着かない."""
         self.assertLess(self.start, self.log.find("自走ループの記録欄"),
                         "表が記録欄より後ろにある")
+
+
+class TestTheSuiteDoesNotDumpWholeFilesOnFailure(unittest.TestCase):
+    """検査が落ちたときに、ファイルを丸ごと吐かないこと (#152).
+
+    `assertIn(なにか, doc)` は、落ちると **haystack を丸ごと**メッセージに載せる。
+    `doc` が `docs/07` の全文なら、画面は数万字で埋まり、
+    **何が足りなかったのかが読めない**。壊して確かめる作業が毎回それで潰れる。
+
+    #129 (docs/10 の全文)・#136 (44KB の文字列集合)・#151 (docs/07 の全文) と
+    **3 回踏んだ**。そのたびに踏んだ場所だけ直していたが、#151 で
+    「その都度直すだけでは足りない」と書いた。書いたなら仕掛けにする。
+
+    直し方はいつも同じ: `assertTrue(なにか in doc, "自分の言葉")`。
+    メッセージを自分で書くので、落ちたときに出るのは 1 行だけになる。
+
+    見つけ方: **`.read()` の結果を受けた変数**を haystack にしている
+    `assertIn` / `assertNotIn` を探す。名前で当てにいくと (`doc` など)
+    取りこぼすし、短い変数まで巻き込む。**どこから来た値か**で見る。
+    """
+
+    #: 見る相手。検査そのものだけでなく、画面の検査も同じ穴を持ちうる
+    TARGETS = ["tests/run_tests.py", "tests/e2e"]
+
+    @staticmethod
+    def offenders(path: str) -> list:
+        """(行, 関数名, haystack の名前) を返す."""
+        import ast
+
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=path)
+        out = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            big = set()
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+                    continue
+                called = node.value.func
+                if isinstance(called, ast.Attribute) and called.attr == "read":
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            big.add(target.id)
+            if not big:
+                continue
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ("assertIn", "assertNotIn")
+                        and len(node.args) >= 2
+                        and isinstance(node.args[1], ast.Name)
+                        and node.args[1].id in big):
+                    out.append((node.lineno, fn.name, node.args[1].id))
+        return out
+
+    def files(self) -> list:
+        out = []
+        for rel in self.TARGETS:
+            path = os.path.join(REPO, rel)
+            if os.path.isdir(path):
+                out += [os.path.join(path, n) for n in sorted(os.listdir(path))
+                        if n.endswith(".py")]
+            elif os.path.isfile(path):
+                out.append(path)
+        return out
+
+    def test_no_assertion_uses_a_whole_file_as_its_haystack(self):
+        found = []
+        for path in self.files():
+            for lineno, fn, name in self.offenders(path):
+                rel = os.path.relpath(path, REPO)
+                found.append(f"{rel}:{lineno} {fn}() が {name} を haystack にしている")
+        self.assertEqual(found, [], "落ちるとファイルを丸ごと吐く検査がある。"
+                                    "assertTrue(x in y, \"自分の言葉\") に直すこと:\n  "
+                                    + "\n  ".join(found))
+
+    def test_the_finder_actually_finds_this_shape(self):
+        """見つけ方そのものが働いていること (0 件を見て緑になっていない).
+
+        上の検査は「0 件であること」を見るので、**探し方が壊れても緑**になる。
+        わざとその形を書いたファイルを作って、拾えることを確かめる。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "sample.py")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "import unittest\n"
+                    "class T(unittest.TestCase):\n"
+                    "    def test_bad(self):\n"
+                    "        with open('x') as fh:\n"
+                    "            doc = fh.read()\n"
+                    "        self.assertIn('a', doc)\n"
+                    "    def test_ok(self):\n"
+                    "        with open('x') as fh:\n"
+                    "            doc = fh.read()\n"
+                    "        self.assertTrue('a' in doc, 'あ')\n")
+            got = self.offenders(path)
+        self.assertEqual([(g[0], g[1], g[2]) for g in got], [(6, "test_bad", "doc")],
+                         f"見つけ方が働いていない: {got}")
 
 
 class TestTheHeadlessSuiteSaysWhatItSkipped(unittest.TestCase):
