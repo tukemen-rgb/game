@@ -4458,6 +4458,157 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
+    """docs/10 が「道具がこう言う」と引用した文言を、**全部まとめて**確かめる (#130).
+
+    docs/10 は「見る 1 点」の表の下でこう約束している:
+
+        表の「見る 1 点」は、**道具が実際にその言葉で出力する**ものだけにしてあります
+
+    ところが #123・#127・#129 と 3 回続けて、引用のほうが古くなっていた。
+    そのたびに 1 件ずつ検査を足してきたが、**足したものしか守られない**。
+    ここでは表と「困ったとき」から引用を全部拾い出し、道具を実際に走らせて作った
+    出力の山に、1 つずつ当てる。新しく引用を書けば、その場で守りが付く。
+
+    `N` は数、`…` は途中の省略として当てる。画面だけが出す文言 (索引の「候補なし」など)
+    は走らせずに `web/app.js` の**コメントを除いたコード**に当てる。
+    """
+
+    #: 「N 個中 M 個」のような引用は数を当てはめて探す
+    PLACEHOLDER = ((r"N", r"\d[\d,]*"), (r"…", r".{0,60}"))
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        if ensure_practice("work/SCRIPT.BIN", "make_sample.py"):
+            raise unittest.SkipTest("練習データ (SCRIPT.BIN) が作れない")
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.corpus = cls.build_corpus(cls.tmp.name)
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            cls.doc = fh.read()
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            cls.app = TestDocs.code_only(fh.read())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @staticmethod
+    def build_corpus(tmp: str) -> str:
+        """道具を一通り走らせて、出た文字を全部つなげる (正常系も異常系も)."""
+        import subprocess
+
+        def run(*args):
+            r = subprocess.run([sys.executable, *args], capture_output=True, text=True, cwd=REPO)
+            return r.stdout + r.stderr
+
+        tool = lambda n: os.path.join(REPO, "tools", n)
+        at = lambda *p: os.path.join(tmp, *p)
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        font = os.path.join(sample, "font.txt")
+        out = [run(tool("boku2.py"), "check", sample)]
+        for how in ("idx", "name", "msg", "font", "map"):     # 課題 9 の 5 通り
+            run(tool("make_boku2_sample.py"), "--break", how, "--out", at("BR" + how))
+            out.append(run(tool("boku2.py"), "check", at("BR" + how)))
+        os.makedirs(at("void"), exist_ok=True)
+        out += [
+            run(tool("boku2.py"), "check", at("void")),
+            run(tool("boku2.py"), "unpack", os.path.join(sample, "BOKU2.IDX"),
+                os.path.join(sample, "BOKU2.IMG"), at("OUT")),
+            run(tool("boku2.py"), "maps", os.path.join(sample, "MAP"), "-o", at("OUT", "maps")),
+            run(tool("boku2.py"), "maps", at("void"), "-o", at("m0")),
+            run(tool("boku2.py"), "maps", at("nosuch") + "/*.BIN", "-o", at("m2")),
+        ]
+        with open(at("void", "X.BIN"), "wb") as fh:            # 入れ物でないファイル
+            fh.write(bytes(range(256)) * 2)
+        out.append(run(tool("boku2.py"), "maps", at("void"), "-o", at("m1")))
+        with open(at("part.txt"), "w", encoding="utf-8") as fh:
+            fh.write("あい\n")
+        os.makedirs(at("sj"), exist_ok=True)
+        with open(at("sj", "x.msg"), "wb") as fh:
+            fh.write("\0".join(["はい", "いいえ"]).encode("cp932") + b"\0")
+        os.makedirs(at("nofiles"), exist_ok=True)
+        out += [
+            run(tool("boku2.py"), "text", at("OUT"), "-f", font, "-o", at("a.tsv")),
+            run(tool("boku2.py"), "text", at("OUT"), "-f", at("part.txt"), "-o", at("b.tsv")),
+            run(tool("boku2.py"), "text", at("sj"), "-f", font, "-o", at("c.tsv")),
+            run(tool("boku2.py"), "text", at("nofiles"), "-o", at("d.tsv")),
+            run(tool("boku2.py"), "used", at("nofiles")),
+        ]
+        for name in ("h.tsv", "h2.tsv"):
+            with open(at(name), "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+        open(at("blank.txt"), "w").close()
+        qa = os.path.join(REPO, "exercises", "qa_target.tsv")
+        out += [
+            run(tool("proofread.py"), qa),
+            run(tool("proofread.py"), at("h.tsv")),
+            run(tool("proofread.py"), qa, "--font-chars", at("blank.txt")),
+            run(tool("compare_tsv.py"), at("h.tsv"), at("h2.tsv")),
+            run(tool("dump_text.py"), os.path.join(sample, "BOKU2.IDX")),
+            run(tool("insert_text.py"), at("a.tsv"), "-o", at("z.bin"),
+                "--original", os.path.join(REPO, "work", "SCRIPT.BIN")),
+        ]
+        return "\n".join(out)
+
+    def quoted(self) -> list[tuple[str, str]]:
+        """docs/10 の 2 つの表から、引用した文言を (どの表, 文言) で拾う."""
+        import re
+
+        got = []
+        head = self.doc.split("| | やること | 見る 1 点")[1].split("\n\n")[0]
+        for line in head.splitlines():
+            cells = [c.strip() for c in line.split("|")]
+            if len(cells) > 4 and cells[1] not in ("", "---"):
+                got += [("見る 1 点", q) for q in re.findall(r"「([^」]+)」", cells[3])]
+        table = self.doc.split("## 困ったとき")[1].split("###")[0]
+        for line in table.splitlines():
+            cells = [c.strip() for c in line.split("|")]
+            if len(cells) > 2 and cells[1] not in ("", "---", "症状"):
+                got += [("困ったとき", q) for q in re.findall(r"「([^」]+)」", cells[1])]
+        return got
+
+    def where(self, phrase: str) -> str | None:
+        import re
+
+        pattern = re.escape(phrase)
+        for mark, sub in self.PLACEHOLDER:
+            pattern = pattern.replace(mark, sub)
+        if re.search(pattern, self.corpus):
+            return "CLI"
+        return "画面" if re.search(pattern, self.app) else None
+
+    def test_the_corpus_really_contains_output(self):
+        """前提の確認: 走らせた結果がちゃんと集まっていること.
+
+        道具が全部こけていると山が空になり、下の検査は「見つからない」だらけで
+        落ちる**が**、逆に山が巨大なゴミだと何にでも当たってしまう。
+        目印になる行がいくつか入っているかを見る。
+        """
+        self.assertGreater(len(self.corpus), 3000, "走らせた結果が少なすぎる")
+        for mark in ("== 診断:", "== 結果:", "使った設定"):
+            self.assertIn(mark, self.corpus, f"山に「{mark}」が無い (道具が動いていない)")
+
+    def test_every_quoted_phrase_is_something_a_tool_prints(self):
+        quotes = self.quoted()
+        self.assertGreaterEqual(len(quotes), 15,
+                                f"引用を {len(quotes)} 個しか拾えていない (拾い方が壊れた)")
+        missing = [(where, q) for where, q in quotes if self.where(q) is None]
+        self.assertEqual(missing, [],
+                         "docs/10 が引用しているのに、道具も画面も言わない文言: "
+                         + " / ".join(f"[{w}]「{q}」" for w, q in missing))
+
+    def test_a_phrase_nobody_prints_is_caught(self):
+        """この検査自体が効くこと。実在しない文言は見つからないと言うこと."""
+        self.assertIsNone(self.where("そんなことは誰も言いません"),
+                          "実在しない文言まで「ある」と言っている")
+        self.assertEqual(self.where("問題なし"), "CLI", "実在する文言を見つけられない")
+
+
 class TestTheHeaderIsNotText(unittest.TestCase):
     """見出しとポインタ表のバイトを「文字表に足せ」と言わないこと (#129).
 
