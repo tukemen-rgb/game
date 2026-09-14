@@ -603,6 +603,17 @@ function refineRegion(b, r) {
   let end = r.off + r.len;
   while (start + PROBE < end && !looksTile(start)) start += STEP;
   while (end - PROBE > start && !looksTile(end - PROBE)) end -= STEP;
+  /* 端に残った詰め物 (まるごとゼロ) を落とす (#146)。
+     上の判定は 1024 バイトの窓で見るのに 512 バイトずつ寄せるので、
+     **窓が境目をまたぐ**と半分が本物の絵になり、詰め物 512 バイトが通ってしまう。
+     ゼロ埋めは絵ではないので、刻みと同じ幅で見て落とす。
+     (これが残ると、報告される位置が実際のファイルより 1 刻み手前になる) */
+  const allZero = (o) => {
+    const w = b.subarray(o, Math.min(b.length, o + STEP));
+    return w.length > 0 && w.every((v) => v === 0);
+  };
+  while (start + STEP <= end && allZero(start)) start += STEP;
+  while (end - STEP >= start && allZero(end - STEP)) end -= STEP;
   r.off = start;
   r.len = Math.max(PROBE, end - start);
 }

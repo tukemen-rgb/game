@@ -100,6 +100,61 @@ async def check_pointer_claim(page) -> list:
     return out
 
 
+async def check_picture_claim(page) -> list:
+    """docs/07 の「見つけた絵は 0xE800 から」を画面で確かめる (#146).
+
+    docs/07 は「ゼロ同士の組を数えない」の節で、**直したあとはこう出る**と
+    位置と大きさを書いている。ところが実際は **0xE600 から 10.5 KB** で、
+    先頭に 512 バイトの詰め物 (まるごとゼロ) を巻き込んでいた。
+    節が「直した」と言っている症状そのものが、端で残っていた。
+
+    位置は `FONT.BIN` の中身を ISO から探して突き合わせる。文書の数字が
+    動いたら「こう書き換える」と言う。
+    """
+    import os
+
+    with open(DOC, encoding="utf-8") as fh:
+        doc = fh.read()
+    m = re.search(r"修正後: (0x[0-9A-Fa-f]+) から ([\d.]+) ?KB", doc)
+    if not m:
+        return ["docs/07 の「見つけた絵」の主張が読み取れない (書き方が変わった)"]
+    said_at, said_kb = int(m.group(1), 16), float(m.group(2))
+
+    iso_path = os.path.join(WORK, "RINFOLT.iso")
+    font_path = os.path.join(WORK, "FONT.BIN")
+    if not os.path.isfile(font_path):
+        return ["work/FONT.BIN が無い (make_sample.py を先に)"]
+    with open(iso_path, "rb") as fh:
+        iso = fh.read()
+    with open(font_path, "rb") as fh:
+        font = fh.read()
+    real_at = iso.find(font)
+    if real_at < 0:
+        return ["ISO の中に FONT.BIN が見つからない (題材が変わった)"]
+
+    out = []
+    if said_at != real_at:
+        out.append(f"docs/07 の位置が FONT.BIN の実際の位置と違う。"
+                   f"{hex(said_at)} → {hex(real_at)} に書き換える")
+
+    await select_file(page, "", "(イメージ全体)")
+    await page.click('[data-tab="gallery"]')
+    await page.wait_for_timeout(4000)
+    text = await page.eval_on_selector("#tab-gallery", "el => el.innerText")
+    found = re.findall(r"(0x[0-9A-Fa-f]+)\n[^\n]*\n([\d.]+) KB", text)
+    if not found:
+        return out + [f"見つけた絵タブから位置を読めない: {text[-200:]!r}"]
+    at, kb = int(found[0][0], 16), float(found[0][1])
+    print(f"  見つけた絵: {hex(at)} から {kb} KB (FONT.BIN は {hex(real_at)}, {len(font):,} バイト)")
+    if at != real_at:
+        out.append(f"見つけた絵が {hex(at)} から始まる。FONT.BIN は {hex(real_at)} から "
+                   f"({(real_at - at) // 512} 刻みぶん手前を巻き込んでいる)")
+    if abs(kb - said_kb) > 0.05:
+        out.append(f"見つけた絵の大きさが {kb} KB (docs/07 は {said_kb} KB)。"
+                   f"docs/07 をこう書き換える → 「{hex(real_at)} から {kb} KB」")
+    return out
+
+
 async def main():
     errors = []
     want = doc_table()
@@ -153,6 +208,7 @@ async def main():
         if checked < 7:
             errors.append(f"確かめた行が {checked} 行しかない (素通りの疑い)")
         errors += await check_pointer_claim(page)
+        errors += await check_picture_claim(page)
         await b.close()
 
     print("errors:", errors)
