@@ -470,18 +470,47 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         位置表の長さの欄が合わないとき、報告してほしいと書いておきながら
         problems に数えていなかったので、最後の行は「問題なし」のままだった。
         **報告してほしい = 問題**。言葉と判定が食い違っていた。
+
+        **この検査は元々ソースを読んでいた** (「`位置表の長さの欄` の 600 文字以内に
+        `problems += 1` があるか」)。数える行が**通らない枝**にあっても通るし、
+        最後の行が実際に何と出るかは見ていない。#133・#136 と同じ形なので、
+        **実際に壊して走らせる**形に変えた (#137)。
         """
-        sys.path.insert(0, os.path.join(REPO, "tools"))
-        try:
-            import boku2
-        finally:
-            sys.path.remove(os.path.join(REPO, "tools"))
-        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
-            src = fh.read()
-        head = src.index("位置表の長さの欄")
-        tail = src[head:head + 600]
-        self.assertIn("problems += 1", tail, "合わないのに確認事項に数えていない")
-        self.assertIn("→ 位置表の長さの欄", tail, "→ の行が出ていない")
+        import shutil
+        import struct
+        import subprocess
+
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "LENBAD")
+            shutil.copytree(sample, folder)
+            with open(os.path.join(folder, "BOKU2.IDX"), "rb") as fh:
+                idx = fh.read()
+            size = os.path.getsize(os.path.join(folder, "BOKU2.IMG"))
+            entry = next(e for e in boku2.read_dfi(idx, size, "flag")
+                         if e["path"].endswith("system.msg"))
+            with open(os.path.join(folder, "BOKU2.IMG"), "rb") as fh:
+                img = bytearray(fh.read())
+            # 8 バイト刻みの 1 件目の**長さの欄だけ**をずらす (位置はそのまま)
+            length = struct.unpack_from("<I", img, entry["at"] + 8)[0]
+            self.assertGreater(length, 0, "長さの欄が 0 の題材では壊せない (前提が崩れた)")
+            struct.pack_into("<I", img, entry["at"] + 8, length + 7)
+            with open(os.path.join(folder, "BOKU2.IMG"), "wb") as fh:
+                fh.write(bytes(img))
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "boku2.py"), "check", folder],
+                capture_output=True, text=True, cwd=REPO)
+        out = res.stdout + res.stderr
+        self.assertIn("合わない 1 件", out, out[-600:])
+        self.assertTrue(any(l.startswith("→") and "位置表の長さの欄" in l
+                            for l in out.splitlines()), f"→ の行が出ていない:\n{out[-600:]}")
+        # ここが本題。「報告してほしい」と言うなら、最後の行も問題ありでなければならない
+        self.assertIn("確認事項", out, f"→ を出しておいて「問題なし」で終わっている:\n{out[-300:]}")
+        self.assertNotIn("問題なし", out, out[-300:])
+        self.assertEqual(res.returncode, 1, f"終了コードが 0 のまま:\n{out[-300:]}")
 
     def test_no_conversation_found_is_reported(self):
         """入れ物は読めたのに会話が 0 件なら、→ を出すこと (#97)."""
@@ -4049,15 +4078,43 @@ class TestAgainstThePublicSource(unittest.TestCase):
                            "それでは「flag と一致」に意味が無い (形の作り方を見直す)")
 
     def test_the_default_rule_is_the_one_with_evidence(self):
-        """既定は flag。実物で動いている実装と同じ側にしておく (#108)."""
+        """既定は flag。実物で動いている実装と同じ側にしておく (#108).
+
+        画面側は `tests/test_index.mjs` が **2 通りで答えの違う索引を読ませて**
+        確かめる。ここで `rule = rule || "flag"` の字を探していたが、
+        それはソースを見ているだけで、通らない枝でも通る (#137)。
+        こちら (CLI) は既定値そのものを見るので、字ではなく本物。
+        """
         import inspect
 
         sig = inspect.signature(boku2.read_dfi)
         self.assertEqual(sig.parameters["rule"].default, "flag",
                          "CLI の既定が flag でない")
-        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
-            self.assertIn('rule = rule || "flag"', fh.read(),
-                          "画面の既定が flag でない")
+        # 既定で呼んだときに flag と同じ答えになること (署名だけでなく中身も見る)
+        idx = self.mismatching_index()
+        default = [e["path"] for e in boku2.read_dfi(idx, 40 * 2048)]
+        as_flag = [e["path"] for e in boku2.read_dfi(idx, 40 * 2048, "flag")]
+        as_stack = [e["path"] for e in boku2.read_dfi(idx, 40 * 2048, "stack")]
+        self.assertNotEqual(as_flag, as_stack, "この索引では 2 通りが同じ答え (検査にならない)")
+        self.assertEqual(default, as_flag, "既定が flag の答えになっていない")
+
+    @staticmethod
+    def mismatching_index() -> bytes:
+        """stack と flag で道筋の変わる索引 (A の中に B と C。#108 の形)."""
+        import struct
+
+        recs = [(1, 1, "/"), (1, 0, "A"), (1, 1, "B"), (0, 0, "b0.bin"),
+                (1, 0, "C"), (0, 0, "c0.bin")]
+        recs += [(0, 0 if i == 7 else 1, f"r{i}.bin") for i in range(8)]
+        body, lba = b"", 0
+        for is_dir, more, _ in recs:
+            if is_dir:
+                body += struct.pack("<HHIII", 1, more, 0, 0, 0)
+            else:
+                body += struct.pack("<HHIII", 0, more, 0, lba, 2048)
+                lba += 1
+        names = b"".join(n.encode("ascii") + b"\0" for _, _, n in recs)
+        return b"DFI\0" + struct.pack("<III", len(recs), 0, 0) + body + names
 
     def their_clut_order(self, n: int, image_format: int, linear: bool = False) -> dict:
         """公開ソース TIM2.py のパレット並び替えの式を**そのまま動かして**、置換を取り出す.

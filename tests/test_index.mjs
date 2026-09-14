@@ -318,6 +318,20 @@ const odd = encodeRecs([
 const mism = named.dfiRuleMismatch(odd.buf, odd.dataSize);
 if (!mism.length || mism[0][0] !== "A/C/c0.bin" || mism[0][1] !== "C/c0.bin") fail(`食い違いが検出されない: ${JSON.stringify(mism.slice(0, 2))}`);
 
+/* 既定の規則は flag (#108)。実物で動いている実装と同じ側に寄せた決定なので、
+   **読ませて確かめる**。app.js に `rule = rule || "flag"` があるかを探していたが、
+   それはソースの文字を見ているだけで、通らない枝でも通る (#137) */
+{
+  const byDefault = named.readDfi(odd.buf, odd.dataSize);
+  const asFlag = named.readDfi(odd.buf, odd.dataSize, "flag");
+  const asStack = named.readDfi(odd.buf, odd.dataSize, "stack");
+  const names = (r) => named.namedEntries(odd.buf, r, odd.dataSize, 4096).map((e) => e.name);
+  const [d, f, s] = [names(byDefault), names(asFlag), names(asStack)];
+  if (JSON.stringify(d) !== JSON.stringify(f)) fail(`既定が flag と違う: ${JSON.stringify(d.slice(0, 4))}`);
+  if (JSON.stringify(f) === JSON.stringify(s)) fail("この索引では 2 通りが同じ答え (検査にならない)");
+  if (!d.includes("C/c0.bin")) fail(`既定が stack 寄りに読んでいる: ${JSON.stringify(d)}`);
+}
+
 /* 「一致」に分母を付ける (#125)。入れ子が無ければ 2 通りは必ず同じ答えを出すので、
    そこで「一致」と言うと**何も試していない**のに規則が裏付いたように読める。
    数を数えるのは web/app.js の dfiRuleTested。本物を動かして確かめる */
