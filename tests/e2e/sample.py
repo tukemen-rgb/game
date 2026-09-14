@@ -4,6 +4,45 @@ from playwright.async_api import async_playwright
 
 from common import REPO, WORK, launch, select_file
 S = os.path.join(REPO, "work", "BOKU2SAMPLE")
+HOWTO = os.path.join(REPO, "docs", "10-僕夏2の手順.md")
+
+
+def screen_quotes(after: str) -> list:
+    """docs/10 の「1. 画面で確かめる」から、**画面にこう出ると言っている**引用を拾う (#131).
+
+    `tests/run_tests.py` の突き合わせは **ソースを検索する**ので、
+    `候補 ${n} 件` + ` (${top.known} 形式として読みました)` のように
+    組み立てて出す文字列は見つけられない。組み上がった形は画面でしか見られないので、
+    そこだけこちらで持つ。期待値は文書から読み取るので、文書を直せば追いかける。
+
+    かぎ括弧は押すボタンの名前にも使うので、**「…と出れば」「…と出ます」**が
+    後ろに付いているものだけを「画面に出る文字」として採る。
+    """
+    import re
+
+    with open(HOWTO, encoding="utf-8") as fh:
+        body = fh.read().split("## 1. 画面で確かめる", 1)[1].split("\nここまでで", 1)[0]
+    for step in re.split(r"\n(?=\d+\. )", body):
+        if after in step:
+            flat = " ".join(step.split())
+            return re.findall(r"「([^」]+)」\s*と出(?:れば|ます|る)", flat)
+    return []
+
+
+def screen_quote_missing(shown: str, after: str, where: str) -> list:
+    """引用が描かれた文字の中にあるか。無ければ何が出ていたかを添えて返す."""
+    import re
+
+    quotes = screen_quotes(after)
+    if not quotes:
+        return [f"docs/10 の「{after}」の手順から「…と出れば」の引用を拾えない (拾い方が壊れた)"]
+    out = []
+    for q in quotes:
+        # 文書は数を N / K と書く。「候補 1 件」のように実数で書いてある所も数として当てる
+        rx = re.escape(q).replace(r"1\ 件", r"\d+ 件").replace("N", r"\d+").replace("K", r"\d+")
+        if not re.search(rx, shown or ""):
+            out.append(f"{where} に docs/10 の「{q}」が出ていない (実際: {(shown or '')[:120]!r})")
+    return out
 
 async def main():
     async with async_playwright() as p:
@@ -24,6 +63,10 @@ async def main():
         await page.click("#idxrun")
         await page.wait_for_selector("#idxpreview button.btn.primary")
         note = await page.text_content("#idxnote")
+        # docs/10 の手順 2 が「こう出れば正解」と書いている文字列を、**描かれた文字**で確かめる (#131)。
+        # app.js の中では `候補 ${n} 件` と ` (${top.known} 形式として読みました)` に分かれていて、
+        # ソースを検索しても出てこない。組み上がった形は画面でしか見られない
+        errors += screen_quote_missing(note, "解析する", "#idxnote")
         # 2.5 報告用の要約 (boku2.py check と同じ項目)
         await page.click("#idxreport")
         await page.wait_for_function("document.querySelector('#idxreporttext').value.includes('== 結果')", timeout=20000)
@@ -65,6 +108,14 @@ async def main():
         font = open(os.path.join(S, "font.txt"), encoding="utf-8").read()
         await select_file(page, "system.msg", "system.msg")
         await page.click('[data-tab="format"]')
+        # 6.0 まず**足りない**文字表で貼る。docs/10 の手順 6 が「文字表に無い番号 K 種と出る」と
+        #     書いている形を、描かれた文字で確かめる (#131)。足りている表では出ない枝
+        await page.fill("#msgglyphs", font[:20])
+        await page.click("#msgparse")
+        await page.wait_for_timeout(200)
+        short_note = await page.text_content("#msgnote")
+        print("short note:", short_note)
+        errors += screen_quote_missing(short_note, "番号 0 から順に", "#msgnote (足りない文字表)")
         await page.fill("#msgglyphs", font)
         await page.click("#msgparse")
         await page.wait_for_timeout(200)
