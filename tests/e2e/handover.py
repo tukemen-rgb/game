@@ -57,6 +57,53 @@ def doc_commands(steps: str) -> list:
     return re.findall(r"`(python3 tools/[^`]+)`", steps)
 
 
+#: 画面と CLI で**書き方が違ってよい**行。ここに挙げたものだけが例外で、
+#: それ以外は 1 字も違ってはいけない。「差は無視」ではなく「この差だけ許す」
+KNOWN_DIFFS = [
+    # 見出しは入口の名前が入る (CLI はフォルダ、画面は 2 つのファイル)
+    ("== 診断", "== 診断"),
+    # 文字表の出どころだけが違う。数字は同じでなければいけない
+    ("[文字表] font.txt: ", "[文字表] 貼ってある文字表: "),
+]
+
+
+def compare_reports(cli: str, screen: str) -> list:
+    """報告用の要約を、画面と CLI で 1 行ずつ突き合わせる.
+
+    docs/07 の「どちらで作っても報告に使える」を支える検査。
+    許すのは `KNOWN_DIFFS` に書いた**出どころの言い換えだけ**で、
+    数字や判定が 1 つでも違えば落とす。
+    """
+    def norm(text: str) -> list:
+        return [ln.rstrip() for ln in text.strip().split("\n") if ln.strip()]
+
+    a, b = norm(cli), norm(screen)
+    # CLI にだけある「BOKU2.IDX: あり / …」は、フォルダを渡したときの確認行
+    a = [ln for ln in a if not ln.startswith("BOKU2.IDX: あり")]
+    out = []
+    # **何行突き合わせたか**を出す。0 行でも「差が無い」で緑になるので (#134 と同じ形)
+    print(f"  手順 0: 報告を {len(a)} 行 (CLI) 対 {len(b)} 行 (画面) で突き合わせる")
+    if len(a) < 8:
+        return [f"CLI の報告が {len(a)} 行しかない (突き合わせになっていない)"]
+    if len(a) != len(b):
+        return [f"報告の行数が違う: CLI {len(a)} 行 / 画面 {len(b)} 行\n"
+                f"    CLI にだけ: {[x for x in a if x not in b][:3]}\n"
+                f"    画面にだけ: {[x for x in b if x not in a][:3]}"]
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x == y:
+            continue
+        ok = False
+        for pa, pb in KNOWN_DIFFS:
+            if x.startswith(pa) and y.startswith(pb):
+                # 見出しは前置きだけ、それ以外は前置きを外した残りが一致すること
+                ok = (pa == "== 診断") or (x[len(pa):] == y[len(pb):])
+                break
+        if not ok:
+            out.append(f"報告の {i + 1} 行目が画面と CLI で違う\n"
+                       f"    CLI : {x!r}\n    画面: {y!r}")
+    return out
+
+
 def answers() -> dict:
     """練習データの正解 (id → 本文)."""
     path = os.path.join(SAMPLE, "answer.tsv")
@@ -193,6 +240,23 @@ async def main() -> int:
                     if miss:
                         errors.append(f"手順 4: 読めない会話がある {miss[:2]} "
                                       f"(画面: {talk[-160:]!r})")
+
+        # --- 手順 0: 報告用の要約。画面と CLI が同じ行を出すこと ---
+        # docs/07 が「`tools/boku2.py check` と同じ行が出るので、どちらで作っても
+        # 報告に使える」と書いている。社長がいちばん最初に打つものなのに、
+        # **2 つの出力を突き合わせたことが一度も無かった** (#157)。
+        # 文字表は手順 3 で貼ってあるので、CLI に font.txt を渡すのと同じ条件
+        await page.click('[data-tab="index"]')
+        await page.click("#idxreport")
+        await page.wait_for_timeout(3000)
+        screen = await page.eval_on_selector("#idxreporttext", "el => el.value") or ""
+        cli = subprocess.run([sys.executable, "tools/boku2.py", "check", SAMPLE],
+                             capture_output=True, text=True, cwd=REPO)
+        if cli.returncode != 0:
+            errors.append(f"手順 0: boku2.py check が落ちた ({cli.returncode}) "
+                          f"{(cli.stdout + cli.stderr)[-200:]!r}")
+        else:
+            errors += compare_reports(cli.stdout, screen)
 
         # --- 手順 5: 校正用の TSV をコピーして proofread.py にかける ---
         # 画面が組み立てた TSV を、そのまま CLI が読めること。
