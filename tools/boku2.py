@@ -642,6 +642,31 @@ def expand_patterns(paths: list[str], folder_files: bool = False) -> list[str]:
     return out
 
 
+def unpicked_nearby(given: list[str]) -> list[str]:
+    """渡されたファイルの**すぐ近く**にある、読めるのに渡されなかったファイル (#160).
+
+    #159 で踏んだ穴: `text OUT/system/*.msg OUT/maps/*/1.bin` のように**並べて**
+    渡すと、`system/` より深い `.msg` と入れ物 4 つが丸ごと落ちる。
+    練習データでは 31 行のうち 12 行しか出ないのに、最後は
+    「文字表で全部読めました」で終わる —— **足りないことに気づけない**。
+
+    渡されたのがファイルばかりのときだけ、その**共通の親フォルダ**を辿って、
+    拾えたはずのものを数える。フォルダを渡したときは `expand_inputs` が
+    全部辿るので、ここは何も言わない。
+    """
+    files = [p for p in given if os.path.isfile(p)]
+    if not files or len(files) != len(given):
+        return []                      # フォルダ指定が混じっていれば黙る
+    # **共通の親より上には登らない。** 1 段上げると関係ないフォルダまで数えてしまう
+    root = os.path.commonpath([os.path.abspath(f) for f in files])
+    if not os.path.isdir(root):
+        root = os.path.dirname(root)
+    if not root or not os.path.isdir(root):
+        return []
+    had = {os.path.abspath(f) for f in files}
+    return [p for p in expand_inputs([root]) if os.path.abspath(p) not in had]
+
+
 def expand_inputs(paths: list[str]) -> list[str]:
     """引数のフォルダを中まで辿り、会話の入ったファイルだけを拾う.
 
@@ -1026,9 +1051,14 @@ def run(args) -> int:
     elif args.cmd == "text":
         glyphs = load_font(args.font)
         rows = []
-        files = expand_inputs(expand_patterns(args.files))
+        given = expand_patterns(args.files)
+        files = expand_inputs(given)
+        empty = []
         for f in files:
-            rows += text_rows(f, glyphs, args.keep_voice)
+            got = text_rows(f, glyphs, args.keep_voice)
+            if not got:
+                empty.append(f)        # 読めたはずの形なのに 1 行も出なかった
+            rows += got
         if not rows:
             # 0 行の TSV を黙って作ると、開くまで何も起きていないことに気づけない。
             # 素人が踏むのは「unpack / maps を先に回していない」か「場所違い」(#77)
@@ -1077,6 +1107,19 @@ def run(args) -> int:
                       "(この範囲は Shift-JIS です)", file=sys.stderr)
             else:
                 print(f"文字表で全部読めました (使われている番号 {len(used)} 種)", file=sys.stderr)
+        # **出なかったものを言う。** 上の行は文字表の話しかしていないのに、
+        # 仕事が終わったように読める (#160)。足りない疑いは必ず添える
+        if empty:
+            names = ", ".join(os.path.basename(f) for f in empty[:5])
+            print(f"→ 読めるはずの形なのに 1 行も出なかったファイル {len(empty)} 個 "
+                  f"({names}{' …' if len(empty) > 5 else ''})。"
+                  f"その名前ごと報告してください", file=sys.stderr)
+        missed = unpicked_nearby(given)
+        if missed:
+            names = ", ".join(os.path.basename(f) for f in missed[:5])
+            print(f"→ 同じ場所に、**渡されなかった**読めるファイルが {len(missed)} 個 "
+                  f"あります ({names}{' …' if len(missed) > 5 else ''})。"
+                  f"ファイルを並べるより、**フォルダごと渡す**と全部拾います", file=sys.stderr)
     elif args.cmd == "used":
         used = used_codes(expand_patterns(args.files))
         if not used:

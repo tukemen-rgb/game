@@ -6620,6 +6620,170 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
 
 
+class TestTextSaysWhatItDidNotTake(unittest.TestCase):
+    """`text` が「出なかったもの」を言うこと (#160).
+
+    #159 で踏んだ穴: ファイルを**並べて**渡すと、渡し損ねた分は当然出ないのに、
+    最後の行は「文字表で全部読めました」。文字表の話しかしていないので嘘では
+    ないが、**12 行しか出ていない画面と 31 行出ている画面が同じ顔をしている。**
+
+    道具は渡されなかったファイルを知らない —— **知ろうとしていなかっただけ**。
+    渡されたのがファイルばかりなら、その共通の親を辿れば「拾えたはずのもの」が
+    数えられる。フォルダを渡したときは全部辿るので、何も言わない。
+
+    もう 1 つ、**読める形なのに 1 行も出なかったファイル**も名前ごと言う。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        cls.sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+
+    def unpacked(self, tmp: str) -> str:
+        """練習データを切り分けた OUT/ を作る (手順 6 と同じ形)."""
+        import subprocess
+
+        out = os.path.join(tmp, "OUT")
+        for argv in ([sys.executable, "tools/boku2.py", "unpack",
+                      os.path.join(self.sample, "BOKU2.IDX"),
+                      os.path.join(self.sample, "BOKU2.IMG"), out],
+                     [sys.executable, "tools/boku2.py", "maps",
+                      os.path.join(self.sample, "MAP"), "-o", os.path.join(out, "maps")]):
+            res = subprocess.run(argv, capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 0, f"下ごしらえで落ちた: {res.stderr[-200:]}")
+        return out
+
+    def run_text(self, args: list, tmp: str):
+        import subprocess
+
+        argv = [sys.executable, "tools/boku2.py", "text", *args,
+                "-f", os.path.join(self.sample, "font.txt"),
+                "-o", os.path.join(tmp, "all.tsv")]
+        return subprocess.run(argv, capture_output=True, text=True, cwd=REPO)
+
+    def test_listing_files_warns_about_the_ones_left_out(self):
+        """#159 そのもの。並べて渡すと、渡し損ねた分を名前ごと知らせる."""
+        import glob
+        import re
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.unpacked(tmp)
+            listed = sorted(glob.glob(os.path.join(out, "system", "*.msg")))
+            listed += sorted(glob.glob(os.path.join(out, "maps", "*", "1.bin")))
+            self.assertGreater(len(listed), 3, "並べる材料が足りない (題材が変わった)")
+            res = self.run_text(listed, tmp)
+            self.assertEqual(res.returncode, 0, res.stderr[-300:])
+            self.assertTrue("渡されなかった" in res.stderr,
+                            f"渡し損ねを知らせていない: {res.stderr[-300:]!r}")
+            # 名前まで出ること。数だけだと、何を足せばよいか分からない
+            for name in ("diary.bin", "namemsg.msg"):
+                self.assertTrue(name in res.stderr,
+                                f"{name} が知らせに出ていない: {res.stderr[-300:]!r}")
+            # **数も見る。** 数を見ないと、探す範囲が広がりすぎても気づけない
+            # (関係ないフォルダまで数えて「50 個あります」と言っても緑になる)
+            m = re.search(r"読めるファイルが (\d+) 個", res.stderr)
+            self.assertTrue(m, f"知らせに数が入っていない: {res.stderr[-300:]!r}")
+            self.assertEqual(int(m.group(1)), 6,
+                             f"渡し損ねが {m.group(1)} 個 (OUT の中では 6 個のはず)")
+
+    def test_passing_the_folder_says_nothing(self):
+        """正しい渡し方では黙ること (毎回言うと、言葉が効かなくなる).
+
+        フォルダだけのときと、**フォルダとファイルが混じった**ときの両方を見る。
+        混じったときも黙るのが決まりで、ここを見ないと
+        「ファイルばかりのときだけ」という条件が外れても気づけない。
+        """
+        import glob
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.unpacked(tmp)
+            one = sorted(glob.glob(os.path.join(out, "system", "*.msg")))[0]
+            for args, what in (([out], "フォルダだけ"), ([out, one], "フォルダとファイル")):
+                res = self.run_text(args, tmp)
+                self.assertEqual(res.returncode, 0, res.stderr[-300:])
+                self.assertFalse("渡されなかった" in res.stderr,
+                                 f"{what}を渡したのに知らせが出た: {res.stderr[-300:]!r}")
+
+    def test_the_search_does_not_wander_outside(self):
+        """探す範囲が、渡したファイルの共通の親より**上に登らない**こと.
+
+        1 段上げると、隣に置いてある関係ないデータまで「拾い漏れ」に数える。
+        知らせが騒がしくなるだけでなく、**本当の拾い漏れが埋もれる**。
+        """
+        import glob
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.unpacked(tmp)
+            # OUT の隣に、読める形の別データを置く (別の作品の作業場のつもり)
+            other = os.path.join(tmp, "OTHER")
+            os.makedirs(other)
+            with open(os.path.join(other, "yosomono.msg"), "wb") as fh:
+                fh.write(struct.pack("<I", 0))
+            # **共通の親が OUT になるように**、別々の下位フォルダから並べる。
+            # 片方のフォルダだけだと共通の親が OUT/system になり、
+            # 1 段上げても OUT 止まりで、この検査が働かない
+            listed = sorted(glob.glob(os.path.join(out, "system", "*.msg")))
+            listed += sorted(glob.glob(os.path.join(out, "maps", "*", "1.bin")))
+            self.assertEqual(os.path.commonpath([os.path.abspath(f) for f in listed]),
+                             os.path.abspath(out), "共通の親が OUT になっていない")
+            res = self.run_text(listed, tmp)
+            self.assertTrue("渡されなかった" in res.stderr, "知らせが出ていない (前提が崩れた)")
+            self.assertFalse("yosomono.msg" in res.stderr,
+                             f"隣のフォルダまで数えている: {res.stderr[-300:]!r}")
+
+    def test_the_folder_form_really_takes_more(self):
+        """知らせの前提。フォルダのほうが実際に多く拾えること.
+
+        ここが同じなら、上の知らせは**言うだけ無駄**になる。
+        """
+        import glob
+        import re
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.unpacked(tmp)
+            listed = sorted(glob.glob(os.path.join(out, "system", "*.msg")))
+            listed += sorted(glob.glob(os.path.join(out, "maps", "*", "1.bin")))
+            few = self.run_text(listed, tmp).stdout
+            many = self.run_text([out], tmp).stdout
+            n_few = int(re.search(r"(\d+) 行", few).group(1))
+            n_many = int(re.search(r"(\d+) 行", many).group(1))
+            self.assertGreater(n_many, n_few,
+                               f"フォルダで {n_many} 行 / 並べて {n_few} 行 (差が無い)")
+
+    def test_a_readable_shape_with_no_text_is_named(self):
+        """読める形なのに 1 行も出なかったファイルを、名前ごと言うこと."""
+        import struct
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.unpacked(tmp)
+            # 件数 0 の .msg。形は .msg だが本文が 1 行も無い
+            hollow = os.path.join(out, "system", "hollow.msg")
+            with open(hollow, "wb") as fh:
+                fh.write(struct.pack("<I", 0))
+            res = self.run_text([out], tmp)
+            self.assertEqual(res.returncode, 0, res.stderr[-300:])
+            self.assertTrue("1 行も出なかった" in res.stderr,
+                            f"空のファイルを知らせていない: {res.stderr[-400:]!r}")
+            self.assertTrue("hollow.msg" in res.stderr,
+                            f"名前が出ていない: {res.stderr[-400:]!r}")
+
+    def test_the_notice_does_not_change_the_result(self):
+        """知らせを足しても、行数も終了コードも変わらないこと."""
+        import glob
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.unpacked(tmp)
+            listed = sorted(glob.glob(os.path.join(out, "system", "*.msg")))
+            res = self.run_text(listed, tmp)
+            self.assertEqual(res.returncode, 0)
+            with open(os.path.join(tmp, "all.tsv"), encoding="utf-8-sig") as fh:
+                body = [ln for ln in fh.read().split("\n") if ln.strip()]
+            self.assertGreater(len(body), 1, "TSV が見出しだけになった")
+            self.assertTrue("渡されなかった" in res.stderr, "知らせが出ていない (前提が崩れた)")
+
+
 class TestTheFontGridIsTheSameEverywhere(unittest.TestCase):
     """フォントの升目の数字が、全部の文書で道具と揃っていること (#158).
 
