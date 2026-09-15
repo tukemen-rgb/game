@@ -136,5 +136,49 @@ for (const width of [1024, 640, 768]) {
   checked += 2;
 }
 
-if (checked < 14) fail(`確かめた場合が ${checked} 通りしかない`);
+
+/* ---- 6. 1 つのファイルから TIM2 を全部探す (#168) ---- */
+{
+  const m3 = new Function("u32le", "u16le", "FONT_COLS", "FONT_CELL",
+    src.slice(s, e) + "\nreturn { tim2Pages, findTim2, parseTim2 };")(u32le, u16le, FONT_COLS, FONT_CELL);
+  const { execFileSync } = await import("node:child_process");
+  /* 練習データを作る道具で、1 行 23 字の頁を 2 枚こしらえる。**道具に作らせる**ので、
+     TIM2 の組み立て方が変わってもこの検査は本物を見続ける */
+  const mk = (rows) => {
+    const hex = execFileSync("python3", ["-c", `
+import sys, binascii
+sys.path.insert(0, "tools")
+import make_tim2, boku2
+t, _ = make_tim2.font_sheet(rows=${rows}, cols=boku2.FONT_COLS, cell=boku2.FONT_CELL)
+sys.stdout.write(binascii.hexlify(t).decode())
+`], { encoding: "utf8", cwd: repo });
+    return Uint8Array.from(hex.match(/../g).map((x) => parseInt(x, 16)));
+  };
+  const head = new Uint8Array(0x80);
+  head.set([0x54, 0x4D, 0x53, 0x00, 0x80, 0, 0, 0]);   /* "TMS\0" + 前置き 0x80 */
+  const p1 = mk(2), p2 = mk(3);
+  const file = new Uint8Array(head.length + p1.length + p2.length);
+  file.set(head, 0); file.set(p1, head.length); file.set(p2, head.length + p1.length);
+
+  /* 今までの findTim2 は 1 枚目しか出さない —— それがこの直しの発端 */
+  if (m3.findTim2(file) !== 0x80) fail(`findTim2 が ${m3.findTim2(file)} を返した (前提が崩れた)`);
+  const pages = m3.tim2Pages(file);
+  if (pages.length !== 2) fail(`頁が ${pages.length} 枚しか見つからない (2 枚あるはず)`);
+  if (pages[0].at !== 0x80) fail(`1 枚目の位置が ${pages[0].at}`);
+  if (pages[1].at !== head.length + p1.length) fail(`2 枚目の位置が ${pages[1].at}`);
+  if (pages[0].t.pictures[0].height === pages[1].t.pictures[0].height) {
+    fail("2 枚が同じ大きさ (作り分けられていないので検査にならない)");
+  }
+  checked += 2;
+
+  /* たまたま "TIM2" の 4 バイトが並んだだけのものを拾わないこと。
+     拾うと、社長に「ここにもう 1 枚あります」と嘘を教える */
+  const junk = new Uint8Array(file.length + 64);
+  junk.set(file, 0);
+  junk.set([0x54, 0x49, 0x4D, 0x32, 0xFF, 0xFF, 0xFF, 0xFF], file.length + 8);
+  if (m3.tim2Pages(junk).length !== 2) fail("見出しの読めない TIM2 もどきを頁に数えている");
+  checked++;
+}
+
+if (checked < 17) fail(`確かめた場合が ${checked} 通りしかない`);
 console.log(`OK (${checked} 通り)`);

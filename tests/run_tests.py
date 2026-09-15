@@ -667,6 +667,71 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                     got = len(fh.read().replace("\n", ""))
                 self.assertEqual(got, want, f"公開ソースの {name} が {got} 字 (前提は {want})")
 
+    def test_check_hunts_for_the_missing_font_page(self):
+        """「別の画像にある」で終わらせず、**探して挙げる**こと (#168).
+
+        #167 で「1 枚では足りない」とは言えるようになりましたが、**どこを見れば
+        いいかは言えていませんでした**。社長は 1951 個のどれかは分かりません。
+
+        ここでは 3 つの結末を全部見ます。**「見つからない」だけを見て緑にすると、
+        探す処理が壊れていても気づけません** (#134 と同じ形)。
+        """
+        import io as _io
+        import struct
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+            import make_tim2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+
+        def page(rows: int) -> bytes:
+            """1 行 23 字の頁を 1 枚。rows 行ぶん."""
+            tim2, _ = make_tim2.font_sheet(rows=rows, cols=boku2.FONT_COLS, cell=boku2.FONT_CELL)
+            return tim2
+
+        first = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + page(2)
+        cells = 2 * boku2.FONT_COLS
+        want = boku2.FONT_GLYPHS - cells
+        rows_needed = -(-want // boku2.FONT_COLS)         # 残りが入る行数 (切り上げ)
+
+        # --- 1. 同じファイルの後ろに 2 枚目がある ---
+        blob = first + page(3)
+        img = _io.BytesIO(blob)
+        entry = {"path": "system/bk_font.tms", "at": 0, "len": len(blob)}
+        lines = boku2.font_page_hunt(img, [entry], entry, cells, 0x80)
+        joined = "\n".join(lines)
+        self.assertIn("同じファイルの位置", joined, f"同じファイルの 2 枚目を挙げていない:\n{joined}")
+        self.assertIn(f"0x{len(first):X}", joined, "2 枚目の位置を言っていない")
+
+        # --- 2. 別のファイルに、残りが入る大きさの頁がある ---
+        other = page(rows_needed)
+        img = _io.BytesIO(first + b"\0" * 16 + other)
+        font_e = {"path": "system/bk_font.tms", "at": 0, "len": len(first)}
+        other_e = {"path": "system/bk_font2.tms", "at": len(first) + 16, "len": len(other)}
+        lines = boku2.font_page_hunt(img, [font_e, other_e], font_e, cells, 0x80)
+        joined = "\n".join(lines)
+        self.assertIn("bk_font2.tms", joined, f"別ファイルの頁を挙げていない:\n{joined}")
+        self.assertIn(f"{rows_needed * boku2.FONT_COLS} マス", joined, "マス数を言っていない")
+
+        # --- 3. 何も無ければ「見つからなかった」と言う (黙らない) ---
+        img = _io.BytesIO(first)
+        lines = boku2.font_page_hunt(img, [font_e], font_e, cells, 0x80)
+        joined = "\n".join(lines)
+        self.assertIn("見つかりませんでした", joined, f"黙っている:\n{joined}")
+        self.assertIn(f"{want} 字ぶん", joined, "何字ぶん探したのかを言っていない")
+
+        # --- 4. 幅が 1 行 23 字にならない画像は、続きとして挙げない ---
+        wide, _ = make_tim2.font_sheet(rows=rows_needed, cols=boku2.FONT_COLS * 2,
+                                       cell=boku2.FONT_CELL)
+        img = _io.BytesIO(first + b"\0" * 16 + wide)
+        wide_e = {"path": "system/config.tm2", "at": len(first) + 16, "len": len(wide)}
+        lines = boku2.font_page_hunt(img, [font_e, wide_e], font_e, cells, 0x80)
+        joined = "\n".join(lines)
+        self.assertNotIn("config.tm2", joined,
+                         f"1 行 {boku2.FONT_COLS} 字にならない画像を続きとして挙げている:\n{joined}")
+
     def test_the_font_grid_numbers_match_the_sample_maker(self):
         """1 行の字数と刻みが、練習データを作る側と同じ数字であること."""
         sys.path.insert(0, os.path.join(REPO, "tools"))
@@ -720,6 +785,7 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         "ドットに足りません",
         "ドットで足ります",           # 広すぎる側の判定 (#166)
         "残りは別の画像にあります",   # 1 枚では文字表がまかなえない (#167)
+        "続きが見つかりませんでした",   # 続きを探して、無ければ無いと言う (#168)
         "1 画素 1 バイトのパレット番号",
         "索引が本体をどれだけ使い切っているか",
     )

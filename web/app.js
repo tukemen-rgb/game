@@ -3576,6 +3576,65 @@ $("idxrun").addEventListener("click", async () => {
  * 索引の読み・.msg の読めた件数・フォントの TIM2 見出し・読み込んである MAP の
  * 入れ物の読めた件数を並べ、外れた所は → で示す。
  */
+/* 文字表の続きを探すときの上限。**一括処理 (boku2.py) と同じ数字**にしておくこと。
+   ずれると、同じ吸い出しで 2 つの報告が食い違う (tests/e2e/broken.py が見張る) */
+const FONT_HUNT_HEAD = 64 * 1024;
+const FONT_HUNT_FILES = 400;
+
+/** 1 行 23 字の幅で割り切れる画像か (文字表の続きが入っていそうか、#168) */
+const looksLikeAFontPage = (p) => Math.floor(p.width / FONT_CELL) === FONT_COLS
+  && fontPageCells(p) > 0;
+/** その画像に番号を振れるマスの数 */
+const fontPageCells = (p) => Math.floor(p.width / FONT_CELL) * Math.floor(p.height / FONT_CELL);
+
+/** 文字表の続きが入っていそうな画像を、**同じ吸い出しの中から**挙げる (#168).
+ *
+ * #167 で「1 枚では足りない」と言えるようになったが、**どこを見ればいいかは
+ * 言えていなかった**。社長は「別の画像にある」と言われても、1951 個のどれかは
+ * 分からない。探すのは道具の仕事。
+ *
+ * 出す言葉と順番は `tools/boku2.py` の `font_page_hunt` と 1 行ずつ同じ。
+ * 画面と一括処理で違うことを言うと、どちらを信じればいいか分からなくなる (#99)。
+ */
+async function fontPageHunt(items, fontItem, firstAt, cells, dataEntry) {
+  const want = FONT_GLYPHS - cells;
+  const out = [];
+
+  const own = await readRange(dataEntry.file, dataEntry.offset + fontItem.at,
+                              Math.min(fontItem.len, FONT_HUNT_HEAD));
+  for (const p of tim2Pages(own)) {
+    /* firstAt は上で既に報告した 1 枚目の位置。**そこを候補に数えない** */
+    if (p.at === firstAt || !looksLikeAFontPage(p.t.pictures[0])) continue;
+    const pic = p.t.pictures[0];
+    out.push(`  ・同じファイルの位置 ${hx(p.at)} にもう 1 枚 `
+      + `(${pic.width}×${pic.height} ドット / ${fontPageCells(pic)} マス)`);
+  }
+
+  let found = 0;
+  for (const other of items.slice(0, FONT_HUNT_FILES)) {
+    if (other === fontItem || other.len < 1024) continue;
+    const bytes = await readRange(dataEntry.file, dataEntry.offset + other.at,
+                                  Math.min(other.len, FONT_HUNT_HEAD));
+    for (const p of tim2Pages(bytes, 2)) {
+      const pic = p.t.pictures[0];
+      if (!looksLikeAFontPage(pic) || fontPageCells(pic) < want) continue;
+      out.push(`  ・${other.name} (位置 ${hx(p.at)} / ${pic.width}×${pic.height} ドット / `
+        + `${fontPageCells(pic)} マス)`);
+      found++;
+      break;
+    }
+    if (found >= 5) break;
+  }
+
+  if (out.length) {
+    return [`  続きが入っていそうな画像 ${out.length} 件 `
+      + `(1 行 ${FONT_COLS} 字の幅で、残り ${want} 字が入る大きさ):`, ...out];
+  }
+  return [`  この吸い出しの中には続きが見つかりませんでした `
+    + `(1 行 ${FONT_COLS} 字の幅で ${want} 字ぶん入るものを `
+    + `${Math.min(items.length, FONT_HUNT_FILES)} 個まで探した)。この行ごと報告してください`];
+}
+
 async function buildIdxReport() {
   const c = state.idxCands[Math.max(0, state.idxPick)];
   const { idxEntry, dataEntry } = state.idxPair;
@@ -3710,6 +3769,10 @@ async function buildIdxReport() {
           lines.push(`  この画像のマスは ${cells} 個 (この作品の文字表は全部で ${FONT_GLYPHS} 字)。`
             + `1 枚では ${FONT_GLYPHS - cells} 字ぶん足りないので、残りは別の画像にあります。`
             + "書き写しても本文に大きい番号が残るのは、そのためです");
+          /* 「別の画像にある」で終わらせず、**探して挙げる** (#168)。
+             一括処理 (boku2.py の font_page_hunt) と **同じ順・同じ言葉**で出す。
+             両方の報告が 1 行ずつ一致することは tests/e2e/broken.py が見張っている */
+          for (const line of await fontPageHunt(items, it, at, cells, dataEntry)) lines.push(line);
         }
       }
     } else {
@@ -5948,6 +6011,36 @@ function renderFormat() {
   }
   const tim2At = findTim2(b);
   if (tim2At >= 0) {
+    /* 1 つのファイルに複数の TIM2 が入っていることがある。文字表は実際そうなので、
+       **選べるようにする** (#168)。1 枚しか無ければ何も出さない */
+    const pages = tim2Pages(b);
+    if (pages.length > 1) {
+      const bar = document.createElement("div");
+      bar.className = "chips";
+      bar.id = "tim2pages";
+      const note = document.createElement("p");
+      note.className = "hint";
+      note.textContent = `このファイルには TIM2 が ${pages.length} 枚入っています。`
+        + "文字表は 1 枚に収まらないので、続きがここにあることがあります。押すと切り替わります。";
+      const draw = (at) => {
+        const old = box.querySelector(".tim2body");
+        const made = renderTim2(b, at);
+        made.classList.add("tim2body");
+        if (old) old.replaceWith(made); else box.append(made);
+        for (const c of bar.children) c.setAttribute("aria-pressed", String(Number(c.dataset.at) === at));
+      };
+      for (const p of pages) {
+        const btn = document.createElement("button");
+        btn.className = "chipbtn";
+        btn.dataset.at = String(p.at);
+        btn.textContent = `${hx(p.at)} (${p.t.pictures[0].width}×${p.t.pictures[0].height})`;
+        btn.addEventListener("click", () => draw(p.at));
+        bar.append(btn);
+      }
+      box.append(note, bar);
+      draw(tim2At);
+      return;
+    }
     box.append(renderTim2(b, tim2At));
     return;
   }
@@ -6034,6 +6127,26 @@ function findTim2(b) {
     if (at + 16 <= b.length && b[at] === 0x54 && b[at + 1] === 0x49 && b[at + 2] === 0x4D && b[at + 3] === 0x32) return at;
   }
   return -1;
+}
+
+/** 1 つのファイルに入っている TIM2 を**全部**探す (#168).
+ *
+ * `findTim2` は決め打ちの数か所しか見ないので、1 枚目しか出てこない。ところが
+ * #167 で分かったとおり **文字表は 1 枚に収まらない**。2 枚目が同じファイルの
+ * 後ろにあるなら、探して**選べるようにする**ところまでが道具の仕事。
+ *
+ * たまたま "TIM2" の 4 バイトが並んだだけのものを拾わないよう、見出しが読めて
+ * 大きさが無茶でないものだけ返す。
+ */
+function tim2Pages(b, limit = 8) {
+  const out = [];
+  for (let at = 0; at + 16 <= b.length && out.length < limit; at++) {
+    if (!(b[at] === 0x54 && b[at + 1] === 0x49 && b[at + 2] === 0x4D && b[at + 3] === 0x32)) continue;
+    const t = parseTim2(b, at);
+    const p = t && t.pictures[0];
+    if (p && p.width > 0 && p.width <= 4096 && p.height > 0 && p.height <= 4096) out.push({ at, t });
+  }
+  return out;
 }
 
 function parseTim2(b, at) {

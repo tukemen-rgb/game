@@ -768,6 +768,106 @@ def tim2_info(b: bytes) -> dict | None:
     return None
 
 
+def tim2_pages(b: bytes, limit: int = 8) -> list[dict]:
+    """1 つのファイルに入っている TIM2 を**全部**探す (#168).
+
+    `tim2_info` は決め打ちの数か所しか見ないので、1 枚目しか出てこない。
+    ところが #167 で分かったとおり **文字表は 1 枚に収まらない**。2 枚目が
+    同じファイルの後ろにあるなら、探せば見つかるはず —— それを確かめる道具。
+
+    見出しの「絵の数」や大きさが無茶な値のものは、たまたま "TIM2" という 4 バイトが
+    並んだだけなので落とす。見つかった順 (= ファイルの前から) に返す。
+    """
+    out, at = [], 0
+    while len(out) < limit:
+        at = b.find(b"TIM2", at)
+        if at < 0:
+            break
+        info = tim2_info(b[at:at + 0x100])
+        # tim2_info は先頭からの相対位置を返すので、ファイル内の位置に直す
+        if info and info.get("width") and 0 < info["width"] <= 4096 and 0 < info["height"] <= 4096:
+            out.append({**info, "at": at + info["at"]})
+        at += 4
+    return out
+
+
+def font_page_cells(info: dict) -> int:
+    """その画像に番号を振れるマスの数 (列 × 行)."""
+    if not info.get("width") or not info.get("height"):
+        return 0
+    return (info["width"] // FONT_CELL) * (info["height"] // FONT_CELL)
+
+
+def looks_like_a_font_page(info: dict) -> bool:
+    """文字表の続きが入っていそうな画像か (#168).
+
+    決め手は **1 行 23 字の幅で割り切れること**。文字表はどの頁も同じ升目で
+    並んでいるはずなので、列数が 23 にならない画像は続きではない。
+    """
+    return (info.get("width") or 0) // FONT_CELL == FONT_COLS and font_page_cells(info) > 0
+
+
+#: 文字表の続きを探すとき、1 つのファイルから読む上限。実物の索引は 1951 個あるので、
+#: 全部を丸ごと読むと遅い。TIM2 の見出しは前のほうにあるので、この長さで足りる
+FONT_HUNT_HEAD = 64 * 1024
+#: 探す相手の上限 (索引が大きいので、見当のつくものから順に打ち切る)
+FONT_HUNT_FILES = 400
+
+
+def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
+                   first_at: int = 0) -> list[str]:
+    """文字表の続きが入っていそうな画像を、**同じ吸い出しの中から**挙げる (#168).
+
+    #167 で「1 枚では足りない」と言えるようになったが、**どこを見ればいいかは
+    言えていなかった**。社長は「別の画像にある」と言われても、1951 個のどれかは
+    分からない。探すのは道具の仕事。
+
+    探し方は 2 段:
+
+    1. **同じファイルの後ろ**。`bk_font.tms` は `TMS\\0` + 前置き + TIM2 という
+       作りなので、2 枚目が同じファイルに続いていてもおかしくない
+    2. **ほかのファイル**。決め手は `looks_like_a_font_page` —— 1 行 23 字の幅で
+       割り切れること。文字表はどの頁も同じ升目で並んでいるはず
+
+    見つからなければ「見つからなかった」と言う。**黙って何も出さない**と、
+    探したのか探していないのかが分からない。
+    """
+    want = FONT_GLYPHS - cells
+    out = []
+
+    img.seek(font_entry["at"])
+    # first_at は上で既に報告した 1 枚目の位置。**そこを候補に数えない** ——
+    # 同じ画像を「もう 1 枚あります」と出すと、探した意味がなくなる
+    same = [p for p in tim2_pages(img.read(min(font_entry["len"], FONT_HUNT_HEAD)))
+            if p["at"] != first_at and looks_like_a_font_page(p)]
+    for p in same:
+        out.append(f"  ・同じファイルの位置 0x{p['at']:X} にもう 1 枚 "
+                   f"({p['width']}×{p['height']} ドット / {font_page_cells(p)} マス)")
+
+    others = []
+    for other in entries[:FONT_HUNT_FILES]:
+        if other is font_entry or other["len"] < 1024:
+            continue
+        img.seek(other["at"])
+        for p in tim2_pages(img.read(min(other["len"], FONT_HUNT_HEAD)), limit=2):
+            if looks_like_a_font_page(p) and font_page_cells(p) >= want:
+                others.append((other["path"], p))
+                break
+        if len(others) >= 5:
+            break
+    for path, p in others:
+        out.append(f"  ・{path} (位置 0x{p['at']:X} / {p['width']}×{p['height']} ドット / "
+                   f"{font_page_cells(p)} マス)")
+
+    if out:
+        return [f"  続きが入っていそうな画像 {len(out)} 件 "
+                f"(1 行 {FONT_COLS} 字の幅で、残り {want} 字が入る大きさ):"] + out
+    return [f"  この吸い出しの中には続きが見つかりませんでした "
+            f"(1 行 {FONT_COLS} 字の幅で {want} 字ぶん入るものを "
+            f"{min(len(entries), FONT_HUNT_FILES)} 個まで探した)。"
+            "この行ごと報告してください"]
+
+
 def stopped_here(problems: int, why: str) -> str:
     """途中で止めたときの締めの行。この先を診ていないことまで書く.
 
@@ -963,6 +1063,9 @@ def check(folder: str, out=sys.stdout) -> int:
                             f"1 枚では {FONT_GLYPHS - cells} 字ぶん足りないので、"
                             "残りは別の画像にあります。書き写しても本文に大きい番号が"
                             "残るのは、そのためです")
+                        # 足りないと言うだけで終わらず、**この吸い出しの中から探す** (#168)
+                        for line in font_page_hunt(img, entries, e, cells, info["at"]):
+                            say(line)
             else:
                 problems += 1
                 img.seek(e["at"])
