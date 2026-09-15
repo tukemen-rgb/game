@@ -3596,15 +3596,16 @@ const fontPageCells = (p) => Math.floor(p.width / FONT_CELL) * Math.floor(p.heig
  * 出す言葉と順番は `tools/boku2.py` の `font_page_hunt` と 1 行ずつ同じ。
  * 画面と一括処理で違うことを言うと、どちらを信じればいいか分からなくなる (#99)。
  */
-async function fontPageHunt(items, fontItem, firstAt, cells, dataEntry) {
+async function fontPageHunt(items, fontItem, known, cells, dataEntry) {
   const want = FONT_GLYPHS - cells;
   const out = [];
 
   const own = await readRange(dataEntry.file, dataEntry.offset + fontItem.at,
                               Math.min(fontItem.len, FONT_HUNT_HEAD));
   for (const p of tim2Pages(own, 8, true)) {
-    /* firstAt は上で既に報告した 1 枚目の位置。**そこを候補に数えない** */
-    if (p.at === firstAt || !looksLikeAFontPage(p.t.pictures[0])) continue;
+    /* known は上で既に数えた頁の位置。**そこを候補に数えない** ——
+       数えた画像をもう一度挙げると、足し算が二重になる */
+    if (known.has(p.at) || !looksLikeAFontPage(p.t.pictures[0])) continue;
     const pic = p.t.pictures[0];
     out.push(`  ・同じファイルの位置 ${hx(p.at)} にもう 1 枚 `
       + `(${pic.width}×${pic.height} ドット / ${fontPageCells(pic)} マス)`);
@@ -3764,15 +3765,31 @@ async function buildIdxReport() {
       }
       /* 1 枚で文字表がまかなえるか。**問題ではなく、先に知っておくこと** (#167) */
       if (p.width && p.height) {
-        const cells = Math.floor(p.width / FONT_CELL) * Math.floor(p.height / FONT_CELL);
+        /* **このファイルに入っている頁を全部数える** (#170)。1 枚目だけで数えていたので、
+           「1 枚では N 字足りない」と言った直後に 2 枚目を挙げていて、足し算が
+           合っていなかった */
+        const own = tim2Pages(bytes.subarray(0, FONT_HUNT_HEAD), 8, true)
+          .filter((q) => looksLikeAFontPage(q.t.pictures[0]));
+        const cells = own.reduce((sum, q) => sum + fontPageCells(q.t.pictures[0]), 0)
+          || fontPageCells(p);
+        if (own.length > 1) {
+          const each = own.map((q) => fontPageCells(q.t.pictures[0])).join(" + ");
+          lines.push(`  このファイルの頁は ${own.length} 枚、マスは ${each} = ${cells} 個 `
+            + `(この作品の文字表は全部で ${FONT_GLYPHS} 字)`);
+        } else {
+          lines.push(`  この画像のマスは ${cells} 個 (この作品の文字表は全部で ${FONT_GLYPHS} 字)`);
+        }
         if (cells < FONT_GLYPHS) {
-          lines.push(`  この画像のマスは ${cells} 個 (この作品の文字表は全部で ${FONT_GLYPHS} 字)。`
-            + `1 枚では ${FONT_GLYPHS - cells} 字ぶん足りないので、残りは別の画像にあります。`
+          lines.push(`  ${FONT_GLYPHS - cells} 字ぶん足りないので、残りは別の画像にあります。`
             + "書き写しても本文に大きい番号が残るのは、そのためです");
           /* 「別の画像にある」で終わらせず、**探して挙げる** (#168)。
              一括処理 (boku2.py の font_page_hunt) と **同じ順・同じ言葉**で出す。
              両方の報告が 1 行ずつ一致することは tests/e2e/broken.py が見張っている */
-          for (const line of await fontPageHunt(items, it, at, cells, dataEntry)) lines.push(line);
+          const known = new Set(own.map((q) => q.at));
+          known.add(at);
+          for (const line of await fontPageHunt(items, it, known, cells, dataEntry)) lines.push(line);
+        } else {
+          lines.push("  これで文字表はまかなえます");
         }
       }
     } else {

@@ -648,15 +648,48 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         pages = boku2.tim2_pages(blob)
         self.assertGreaterEqual(len(pages), 2,
                                 "練習データのフォントが 1 枚しかない (実物は 2 枚に分かれている)")
-        cells = boku2.font_page_cells(pages[0])
-        self.assertGreater(cells, 0, "1 枚目のマス数が 0")
-        self.assertIn(f"マスは {cells} 個", res.stdout, "この画像のマス数を言っていない")
+        # **このファイルの頁を全部足した数**で言うこと (#170)。1 枚目だけで数えると、
+        # 「1 枚では N 字足りない」と言った直後に 2 枚目を挙げることになり、
+        # 足し算が合わない
+        each = [boku2.font_page_cells(p) for p in pages]
+        cells = sum(each)
+        self.assertGreater(min(each), 0, "マス数が 0 の頁がある")
+        self.assertIn(f"マスは {' + '.join(str(n) for n in each)} = {cells} 個", res.stdout,
+                      "頁ごとのマス数と合計を言っていない")
         self.assertIn(f"{boku2.FONT_GLYPHS - cells} 字ぶん足りない", res.stdout,
                       "足りない字数を言っていない")
-        # **2 枚目を挙げている**こと。ここが #168 の探索の、通しでの唯一の当たり
-        self.assertIn(f"同じファイルの位置 0x{pages[1]['at']:X}", res.stdout,
-                      "同じファイルの 2 枚目を挙げていない")
+        # 数えた頁を、**探索がもう一度挙げていない**こと (二重に数えたことになる)
+        for pg in pages:
+            self.assertNotIn(f"同じファイルの位置 0x{pg['at']:X}", res.stdout,
+                             f"数えた頁 0x{pg['at']:X} を候補としても挙げている")
         del struct
+
+    def test_enough_cells_is_said_plainly(self):
+        """マスが足りているときは、**足りていると言う** (#170).
+
+        「足りない」側だけを見ていると、足りたときに何も出ない —— 社長は
+        「言われないということは大丈夫なのか、見ていないのか」が分からない。
+        練習データでは足りないので、**道具の判定そのもの**を直接呼んで確かめる。
+        """
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        # 実物の頁 2 枚ぶん (512×1024 と 512×640) で、文字表はまかなえるか
+        real = [(512, 1024), (512, 640)]
+        cells = sum((w // boku2.FONT_CELL) * (h // boku2.FONT_CELL) for w, h in real)
+        self.assertGreaterEqual(cells, boku2.FONT_GLYPHS,
+                                f"実物の 2 枚で {cells} マス。文字表 {boku2.FONT_GLYPHS} 字に"
+                                "届かない (頁の読みが間違っている)")
+        # 画面側も同じ言葉を持っていること (片側にだけ足して忘れない)
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            cli = fh.read()
+        for src, name in ((ui, "web/app.js"), (cli, "tools/boku2.py")):
+            self.assertTrue("これで文字表はまかなえます" in src,
+                            f"{name} に、足りているときの言葉が無い")
 
     def test_the_real_font_page_holds_only_part_of_the_table(self):
         """実物の頁の大きさで、足りない字数が公開ソースと合うこと (#167).
@@ -717,7 +750,7 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         blob = first + page(3)
         img = _io.BytesIO(blob)
         entry = {"path": "system/bk_font.tms", "at": 0, "len": len(blob)}
-        lines = boku2.font_page_hunt(img, [entry], entry, cells, 0x80)
+        lines = boku2.font_page_hunt(img, [entry], entry, cells, {0x80})
         joined = "\n".join(lines)
         self.assertIn("同じファイルの位置", joined, f"同じファイルの 2 枚目を挙げていない:\n{joined}")
         self.assertIn(f"0x{len(first):X}", joined, "2 枚目の位置を言っていない")
@@ -727,14 +760,14 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         img = _io.BytesIO(first + b"\0" * 16 + other)
         font_e = {"path": "system/bk_font.tms", "at": 0, "len": len(first)}
         other_e = {"path": "system/bk_font2.tms", "at": len(first) + 16, "len": len(other)}
-        lines = boku2.font_page_hunt(img, [font_e, other_e], font_e, cells, 0x80)
+        lines = boku2.font_page_hunt(img, [font_e, other_e], font_e, cells, {0x80})
         joined = "\n".join(lines)
         self.assertIn("bk_font2.tms", joined, f"別ファイルの頁を挙げていない:\n{joined}")
         self.assertIn(f"{rows_needed * boku2.FONT_COLS} マス", joined, "マス数を言っていない")
 
         # --- 3. 何も無ければ「見つからなかった」と言う (黙らない) ---
         img = _io.BytesIO(first)
-        lines = boku2.font_page_hunt(img, [font_e], font_e, cells, 0x80)
+        lines = boku2.font_page_hunt(img, [font_e], font_e, cells, {0x80})
         joined = "\n".join(lines)
         self.assertIn("見つかりませんでした", joined, f"黙っている:\n{joined}")
         self.assertIn(f"{want} 字ぶん", joined, "何字ぶん探したのかを言っていない")
@@ -744,7 +777,7 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                                        cell=boku2.FONT_CELL)
         img = _io.BytesIO(first + b"\0" * 16 + wide)
         wide_e = {"path": "system/config.tm2", "at": len(first) + 16, "len": len(wide)}
-        lines = boku2.font_page_hunt(img, [font_e, wide_e], font_e, cells, 0x80)
+        lines = boku2.font_page_hunt(img, [font_e, wide_e], font_e, cells, {0x80})
         joined = "\n".join(lines)
         self.assertNotIn("config.tm2", joined,
                          f"1 行 {boku2.FONT_COLS} 字にならない画像を続きとして挙げている:\n{joined}")

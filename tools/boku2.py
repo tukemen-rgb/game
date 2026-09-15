@@ -815,7 +815,7 @@ FONT_HUNT_FILES = 400
 
 
 def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
-                   first_at: int = 0) -> list[str]:
+                   known: set | None = None) -> list[str]:
     """文字表の続きが入っていそうな画像を、**同じ吸い出しの中から**挙げる (#168).
 
     #167 で「1 枚では足りない」と言えるようになったが、**どこを見ればいいかは
@@ -836,10 +836,11 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
     out = []
 
     img.seek(font_entry["at"])
-    # first_at は上で既に報告した 1 枚目の位置。**そこを候補に数えない** ——
-    # 同じ画像を「もう 1 枚あります」と出すと、探した意味がなくなる
+    # known は上で既に数えた頁の位置。**そこを候補に数えない** ——
+    # 数えた画像を「もう 1 枚あります」と出すと、足し算が二重になる
+    seen = known or set()
     same = [p for p in tim2_pages(img.read(min(font_entry["len"], FONT_HUNT_HEAD)))
-            if p["at"] != first_at and looks_like_a_font_page(p)]
+            if p["at"] not in seen and looks_like_a_font_page(p)]
     for p in same:
         out.append(f"  ・同じファイルの位置 0x{p['at']:X} にもう 1 枚 "
                    f"({p['width']}×{p['height']} ドット / {font_page_cells(p)} マス)")
@@ -1056,16 +1057,31 @@ def check(folder: str, out=sys.stdout) -> int:
                 # 1 枚で文字表がまかなえるか。**問題ではなく、先に知っておくこと** (#167)。
                 # 手順書は「番号 0 から書き出す」で終わっているが、1 枚では終わらない
                 if info.get("width") and info.get("height"):
-                    cells = (info["width"] // FONT_CELL) * (info["height"] // FONT_CELL)
-                    if cells < FONT_GLYPHS:
+                    # **このファイルに入っている頁を全部数える** (#170)。1 枚目だけで
+                    # 数えていたので、「1 枚では N 字足りない」と言った直後に 2 枚目を
+                    # 挙げていて、足し算が合っていなかった
+                    img.seek(e["at"])
+                    own = [p for p in tim2_pages(img.read(min(e["len"], FONT_HUNT_HEAD)))
+                           if looks_like_a_font_page(p)]
+                    cells = sum(font_page_cells(p) for p in own) or font_page_cells(info)
+                    if len(own) > 1:
+                        each = " + ".join(str(font_page_cells(p)) for p in own)
+                        say(f"  このファイルの頁は {len(own)} 枚、マスは {each} = {cells} 個 "
+                            f"(この作品の文字表は全部で {FONT_GLYPHS} 字)")
+                    else:
                         say(f"  この画像のマスは {cells} 個 "
-                            f"(この作品の文字表は全部で {FONT_GLYPHS} 字)。"
-                            f"1 枚では {FONT_GLYPHS - cells} 字ぶん足りないので、"
+                            f"(この作品の文字表は全部で {FONT_GLYPHS} 字)")
+                    if cells < FONT_GLYPHS:
+                        say(f"  {FONT_GLYPHS - cells} 字ぶん足りないので、"
                             "残りは別の画像にあります。書き写しても本文に大きい番号が"
                             "残るのは、そのためです")
-                        # 足りないと言うだけで終わらず、**この吸い出しの中から探す** (#168)
-                        for line in font_page_hunt(img, entries, e, cells, info["at"]):
+                        # 足りないと言うだけで終わらず、**この吸い出しの中から探す** (#168)。
+                        # 上で数えた頁は候補に入れない (数えた分をもう一度挙げない)
+                        for line in font_page_hunt(img, entries, e, cells,
+                                                   {p["at"] for p in own} | {info["at"]}):
                             say(line)
+                    else:
+                        say("  これで文字表はまかなえます")
             else:
                 problems += 1
                 img.seek(e["at"])
