@@ -753,6 +753,73 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_an_arrow_always_means_a_nonzero_exit(self):
+        """**→ を出したら終了コードは 1** —— どの命令でも (#177).
+
+        `check` は前からそうでした。ところが `unpack` / `maps` / `text` は
+        → を出しながら 0 を返していました。docs/10 の手順 6 は 3 つの命令を
+        続けて打つので、途中で
+
+            → 読めるはずの形なのに 1 行も出なかったファイル 4 個 (…)
+
+        と出ていても、終了コードが 0 なら**次の命令に進んでしまう**。しかも
+        `text` のこの場合は **31 行のうち 19 行**しか出ていません。#159 で
+        61% 落としたときと同じ壊れ方が、今度は終了コードの側に残っていた。
+
+        **どの → でも赤にする、ではありません。** 「入れ物ではありません
+        (飛ばしました)」はごみを飛ばしただけで仕事は済んでいるし (#162)、
+        「名前が付かなかった」もファイルは全部出ています。
+        **出るはずのものが出ていない**ときだけ赤にします。
+
+        ここでは 2 つ見ます: **健全なら 0**、**本文が落ちたら 1**。
+        片方だけだと「いつも 1 を返す」でも通ってしまいます。
+        """
+        import glob
+        import subprocess
+        import tempfile
+
+        def call(*a):
+            return subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), *a],
+                                  capture_output=True, text=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out")
+            # 1. 健全な通しは、どの命令も 0 で終わること (→ を出していない)
+            steps = [
+                ("unpack", [os.path.join(self.folder, "BOKU2.IDX"),
+                            os.path.join(self.folder, "BOKU2.IMG"), out]),
+                ("maps", [os.path.join(self.folder, "MAP"), "-o", os.path.join(out, "maps")]),
+                ("text", [out, "-f", os.path.join(self.folder, "font.txt"),
+                          "-o", os.path.join(tmp, "all.tsv")]),
+            ]
+            for cmd, rest in steps:
+                res = call(cmd, *rest)
+                self.assertEqual(res.returncode, 0,
+                                 f"健全なのに {cmd} が {res.returncode}:\n{res.stdout}{res.stderr}")
+                # **行頭の → だけ**が知らせの印。「20 個に切り分けました → OUT」の
+                # ような進み具合の行にも同じ字を使っているので、含むかで見ない
+                arrows = [l for l in (res.stdout + res.stderr).splitlines()
+                          if l.startswith("→")]
+                self.assertEqual(arrows, [], f"健全なのに {cmd} が知らせを出している: {arrows}")
+            full = sum(1 for _ in open(os.path.join(tmp, "all.tsv"), encoding="utf-8")) - 1
+            self.assertGreater(full, 20, f"通しで {full} 行しか出ていない (前提が崩れた)")
+
+            # 2. 本文の一部を読めなくすると、→ が出て 1 で終わること
+            for path in glob.glob(os.path.join(out, "**", "*.msg"), recursive=True):
+                with open(path, "r+b") as fh:
+                    fh.write(b"\xee" * 16)
+            res = call("text", out, "-f", os.path.join(self.folder, "font.txt"),
+                       "-o", os.path.join(tmp, "less.tsv"))
+            less = sum(1 for _ in open(os.path.join(tmp, "less.tsv"), encoding="utf-8")) - 1
+            # **本当に減っていること**を先に確かめる。減っていなければ検査にならない
+            self.assertLess(less, full, f"壊したのに行数が減っていない ({full} → {less})")
+            arrows = [l for l in res.stderr.splitlines()
+                      if l.startswith("→") and "1 行も出なかった" in l]
+            self.assertTrue(arrows, f"減ったのに知らせを出していない:\n{res.stderr}")
+            self.assertEqual(res.returncode, 1,
+                             f"→ を出したのに {res.returncode} で終わっている "
+                             f"({full} 行が {less} 行に減った):\n{res.stderr[:300]}")
+
     def test_no_section_can_see_nothing_and_still_pass(self):
         """**段まるごと 0 件で「問題なし」にならない**ことを、まとめて見張る (#176).
 

@@ -1346,6 +1346,33 @@ def main(argv=None) -> int:
         return 1
 
 
+def honestly_empty(path: str) -> bool:
+    """1 行も出なかったのが**正しい**ファイルか (#177).
+
+    `.msg` の先頭 u32 は件数。**読めたうえで「0 件」と書いてあるなら、空なのが
+    正しい** (#160 の `hollow.msg`)。それ以外 —— 件数が 1 以上なのに 1 行も
+    出ない、そもそも読めない —— は**本文が落ちている**。
+
+    「読めないのだから分からない」で 0 を返すと、いちばん危ない場合
+    (見出しが壊れて 12 行消えた) が静かに通る。**分からないときは落ちた側に倒す。**
+    """
+    try:
+        with open(path, "rb") as fh:
+            b = fh.read(FONT_HUNT_HEAD)
+    except OSError:
+        return False
+    # 先頭 u32 が件数。**0 と書いてあれば、空なのが正しい。**
+    # `pick_msg` は 8 バイト未満を読まないので、ここは自分で見る
+    # (件数 0 の .msg は 4 バイトしかない —— #160 の hollow.msg がまさにそれ)
+    if len(b) >= 4 and struct.unpack_from("<I", b, 0)[0] == 0:
+        return True
+    items = pick_msg(b, {})
+    if items is not None:
+        return len(items) == 0
+    parts = parse_map(b)
+    return parts is not None and not parts
+
+
 def run(args) -> int:
     if args.cmd == "check":
         return check(args.folder)
@@ -1468,6 +1495,20 @@ def run(args) -> int:
             print(f"→ 読めるはずの形なのに 1 行も出なかったファイル {len(empty)} 個 "
                   f"({names}{' …' if len(empty) > 5 else ''})。"
                   f"その名前ごと報告してください", file=sys.stderr)
+            # **ここは 0 で終わらない** (#177)。読めるはずの形なのに 1 行も出て
+            # いないのは、**本文が落ちている**ということ。docs/10 の手順 6 は
+            # 3 つの命令を続けて打つので、0 を返すと次に進んでしまう。#159 で
+            # 31 行のうち 12 行しか出ていなかったときと同じ落ち方が、終了コードに残っていた。
+            #
+            # ほかの → はそのまま 0 のまま。「入れ物ではありません (飛ばしました)」は
+            # ごみを飛ばしただけで仕事は済んでいるし (#162)、「名前が付かなかった」も
+            # ファイルは全部出ている。**出るはずのものが出ていない**ときだけ赤にする。
+            #
+            # さらに「件数 0 と書いてある .msg」は、**正直に空**なだけで落ちてはいない
+            # (#160 の hollow.msg)。件数が 1 以上と書いてあるのに 1 行も出ないものだけ、
+            # 本文が落ちたと見なす
+            if not all(honestly_empty(f) for f in empty):
+                return 1
         missed = unpicked_nearby(given)
         if missed:
             names = ", ".join(os.path.basename(f) for f in missed[:5])
