@@ -567,6 +567,48 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         self.assertIn(str(boku2.FONT_COLS * boku2.FONT_CELL), res.stdout,
                       "必要な幅を数字で言っていない")
 
+    def test_a_too_wide_font_is_reported(self):
+        """**広すぎる**幅も言うこと (#166).
+
+        #98 で足した判定は「足りない」側だけを見ていました。ところが番号振りは
+        **幅 ÷ 刻み**で列数を決めるので、広すぎる側も同じだけ危ない。この作品には
+        1024 ドット幅の画像が普通にあり (公開ソースの書き出しでは `config.tm2` /
+        `insect_base.tm2` / `bumper.tm2` がそう)、それを渡すと 1 行 46 字で番号が
+        振られ、文字表が丸ごとずれます。**出てくる字は日本語のまま**なので、
+        目では気づけません (#158 と同じ型)。
+        """
+        import struct
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+            import make_tim2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        wide_cols = boku2.FONT_COLS * 2
+        tim2, _ = make_tim2.font_sheet(rows=4, cols=wide_cols, cell=boku2.FONT_CELL)
+        # 前提: この幅なら列数が 23 にならないこと (ならなければ検査にならない)
+        self.assertNotEqual(wide_cols * boku2.FONT_CELL // boku2.FONT_CELL, boku2.FONT_COLS)
+        tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + tim2
+        img = os.path.join(self.folder, "BOKU2.IMG")
+        with open(os.path.join(self.folder, "BOKU2.IDX"), "rb") as fh:
+            idx = fh.read()
+        entry = next(e for e in boku2.read_dfi(idx, os.path.getsize(img))
+                     if e["path"].endswith("bk_font.tms"))
+        self.assertLessEqual(len(tms), entry["len"],
+                             "作った画像が入れ物より大きい (切り詰めると TIM2 として読めない)")
+        with open(img, "r+b") as fh:
+            fh.seek(entry["at"])
+            fh.write(tms)
+        res = self.check(self.folder)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertTrue("ドットに足りません" not in res.stdout,
+                        "広すぎるのに「足りません」と言っている")
+        self.assertIn(f"1 行 {wide_cols} 字になります", res.stdout,
+                      "このままだと何字になるかを言っていない")
+        self.assertIn(f"この作品は 1 行 {boku2.FONT_COLS} 字", res.stdout,
+                      "本当は何字かを言っていない")
+
     def test_the_font_grid_numbers_match_the_sample_maker(self):
         """1 行の字数と刻みが、練習データを作る側と同じ数字であること."""
         sys.path.insert(0, os.path.join(REPO, "tools"))
@@ -618,6 +660,7 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         "位置表の長さの欄が",
         "会話として読めたファイルが 0 件",
         "ドットに足りません",
+        "ドットで足ります",           # 広すぎる側の判定 (#166)
         "1 画素 1 バイトのパレット番号",
         "索引が本体をどれだけ使い切っているか",
     )
@@ -3671,6 +3714,22 @@ class TestGlyphDraftInBrowser(unittest.TestCase):
         if not node:
             self.skipTest("node がありません")
         res = subprocess.run([node, os.path.join(REPO, "tests", "test_glyphdraft.mjs")],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK", res.stdout)
+
+
+class TestFontGridInBrowser(unittest.TestCase):
+    """番号振りの列数が 1 行 23 字と合うかの照合 (tests/test_fontgrid.mjs、#166)."""
+
+    def test_font_grid_mismatch(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        res = subprocess.run([node, os.path.join(REPO, "tests", "test_fontgrid.mjs")],
                              capture_output=True, text=True, cwd=REPO)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("OK", res.stdout)

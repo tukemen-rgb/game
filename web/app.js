@@ -26,6 +26,7 @@ const SECTOR = 2048;
    動かすので、外に置くと抽出したコードで未定義になる #99) */
 const FONT_COLS = 23;       /* フォント画像の 1 行の文字数 */
 const FONT_CELL = 22;       /* 文字の刻み (ドット) */
+
 const TIM2_PIXEL_KIND = {
   1: "1 画素 16 ビットの直接色",
   2: "1 画素 24 ビットの直接色",
@@ -3688,6 +3689,15 @@ async function buildIdxReport() {
         lines.push(`→ [フォント] 幅が ${p.width} ドットで、1 行 ${FONT_COLS} 字を ${FONT_CELL} ドット刻みで`
           + `並べるのに要る ${need} ドットに足りません。文字の並びの読み方 (1 行の字数・刻み) が`
           + "この作品では違うかもしれません。この行ごと報告してください");
+      } else if (p.width && Math.floor(p.width / FONT_CELL) !== FONT_COLS) {
+        /* 「足りない」だけを見ていたので、**広すぎる**側を素通ししていた (#166)。
+           画面の番号振りは幅 ÷ 刻みで列数を決めるので、1024 ドット幅なら 1 行 46 字に
+           なる。足りない側と同じだけ危ない */
+        problems++;
+        lines.push(`→ [フォント] 幅が ${p.width} ドットあり、${FONT_CELL} ドット刻みで割ると`
+          + ` 1 行 ${Math.floor(p.width / FONT_CELL)} 字になります (この作品は 1 行 ${FONT_COLS} 字)。`
+          + `「文字の番号を重ねる」は幅から列数を決めるので、このままでは文字表が丸ごとずれます。`
+          + `頁 1 枚は幅 ${need} ドットで足ります。この行ごと報告してください`);
       }
     } else {
       problems++;
@@ -5937,6 +5947,29 @@ function renderFormat() {
 }
 
 /* @extract-start tim2 */
+/** 画像の幅から自動で出した列数が、判っている 1 行 23 字と合うか (#166).
+ *
+ * 番号は画像の幅を刻みで割って振っている。実物の `bk_font.tms` は 512 ドット
+ * 幅なので 512/22 = 23 で合う。ところが**合わない画像を渡しても黙って番号を
+ * 振る**。この作品には 1024 ドット幅の画像が普通にあり、それを渡すと 1 行 46 字で
+ * 番号が振られる。文字表は丸ごとずれるが、出てくるのは日本語のままなので
+ * **目では気づけない** (#158 と同じ型)。合わないときは、その場で言う。
+ *
+ * @returns {string} 食い違っているときの説明。合っていれば空文字
+ */
+function fontGridMismatch(cols, width, cell) {
+  if (cols === FONT_COLS) return "";
+  const fits = FONT_COLS * cell;
+  return `1 行 ${cols} 字になっていますが、僕の夏休み 2 のフォントは 1 行 ${FONT_COLS} 字です`
+    + `。このまま番号を振ると文字表が丸ごとずれます (出てくる字は日本語のままなので目では`
+    + `気づけません)。幅 ${width} ドット ÷ 刻み ${cell} ドットでこうなりました。`
+    + (cols > FONT_COLS
+      ? `フォントの頁 1 枚は幅 ${fits} ドットあれば足ります。**フォント以外の画像**か、`
+        + `2 枚分が横に並んだ画像かもしれません。`
+      : `1 行 ${FONT_COLS} 字を並べるには幅 ${fits} ドットが要ります。`)
+    + `刻みと余白の欄を確かめてください。`;
+}
+
 /**
  * TIM2 (PS2 の標準画像形式)。
  *
@@ -6113,7 +6146,8 @@ function renderTim2(b, at) {
   const hint = document.createElement("p");
   hint.className = "hint";
   hint.textContent = "フォント画像なら「文字の番号を重ねる」を押してください。番号が .msg の文字番号に対応します"
-    + " (僕の夏休み 2 のフォントは 1 行 23 字、刻み 22 ドット。描かれる枠は 23 ドットで 1 ドット重なる。列数は画像の幅から自動で決まる)。番号順に文字を書き出したものが、.msg 読みに貼る文字表です。";
+    + " (僕の夏休み 2 のフォントは 1 行 23 字、刻み 22 ドット。描かれる枠は 23 ドットで 1 ドット重なる。列数は画像の幅から自動で決まるので、"
+    + "押したあと「1 行 23 字で」と出ているか確かめてください。23 以外なら ⚠ が付きます)。番号順に文字を書き出したものが、.msg 読みに貼る文字表です。";
   wrap.append(hint);
 
   const holder = document.createElement("div");
@@ -6159,9 +6193,12 @@ function renderTim2(b, at) {
           g.fillStyle = "#ffd28a"; g.fillText(label, x * z + 2, y * z + 2);
         }
       }
-      hint.textContent = `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の 0 から順に文字を書き出して、.msg 読みの文字表に貼ってください。`
+      const off = fontGridMismatch(cols, pic.width, cw);
+      hint.textContent = (off ? `⚠ ${off} ` : "")
+        + `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の 0 から順に文字を書き出して、.msg 読みの文字表に貼ってください。`
         + (usedSet && usedSet.size ? ` 緑の枠は、直前に読んだ .msg で使われている ${usedSet.size} 字 (まずここだけ書き出せば読めます)。` : "")
         + (missingSet && missingSet.size ? ` 橙の枠は、そのうち文字表にまだ無い ${missingSet.size} 字 (本文で [番号] のまま残る所)。` : "");
+      hint.className = off ? "hint warnbar" : "hint";
     }
   };
   for (const el of [zoomIn, cwIn, chIn, oxIn, oyIn]) el.addEventListener("input", draw);
@@ -6212,7 +6249,10 @@ function renderTim2(b, at) {
        (点数そのものは当たり外れの目安にならない。実測は docs/11 第 10 節) */
     const shaky = draft.slice().sort((a, b) => a.margin - b.margin).slice(0, 12)
       .map((d) => `${d.n}=${d.ch}`).join(" ");
-    hint.textContent = `形の似ている字を当てて ${merged.added} 字を文字表に入れました`
+    const off = fontGridMismatch(cols, pic.width, cw);
+    hint.className = off ? "hint warnbar" : "hint";
+    hint.textContent = (off ? `⚠ ${off} 下書きの番号もこのままずれます。 ` : "")
+      + `形の似ている字を当てて ${merged.added} 字を文字表に入れました`
       + ` (調べたマス ${cells.length} / 候補 ${cands.length} 字`
       + (extra ? ` (うち貼った字 ${Array.from(extra).length})` : "")
       + ``

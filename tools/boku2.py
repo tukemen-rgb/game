@@ -937,6 +937,17 @@ def check(folder: str, out=sys.stdout) -> int:
                         f"1 行 {FONT_COLS} 字を {FONT_CELL} ドット刻みで並べるのに要る "
                         f"{need} ドットに足りません。文字の並びの読み方 (1 行の字数・刻み) が"
                         "この作品では違うかもしれません。この行ごと報告してください")
+                elif info.get("width") and info["width"] // FONT_CELL != FONT_COLS:
+                    # 「足りない」だけを見ていたので、**広すぎる**側を素通ししていた (#166)。
+                    # 画面の番号振りは幅 ÷ 刻みで列数を決めるので、1024 ドット幅なら
+                    # 1 行 46 字になる。足りない側と同じだけ危ない
+                    problems += 1
+                    say(f"→ [フォント] 幅が {info['width']} ドットあり、{FONT_CELL} ドット刻みで"
+                        f"割ると 1 行 {info['width'] // FONT_CELL} 字になります "
+                        f"(この作品は 1 行 {FONT_COLS} 字)。"
+                        "「文字の番号を重ねる」は幅から列数を決めるので、このままでは"
+                        f"文字表が丸ごとずれます。頁 1 枚は幅 {need} ドットで足ります。"
+                        "この行ごと報告してください")
             else:
                 problems += 1
                 img.seek(e["at"])
