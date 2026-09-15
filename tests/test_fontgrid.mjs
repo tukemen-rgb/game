@@ -9,11 +9,13 @@
  * 番号が振られ、文字表は丸ごとずれる。ところが **出てくる字は日本語のまま** なので、
  * 目では気づけない。#158 でフォントの升目を間違えたときと同じ型の壊れ方。
  *
- * ここで見るのは 3 つ:
+ * ここで見るのは 4 つ:
  *
  *   1. 実物と練習データの幅では、何も言わない (要らない警告を出さない)
  *   2. 合わない幅では、**実際に何字になるか** と **本当は何字か** の両方を言う
  *   3. 広すぎる側と狭すぎる側で、言うことが違う (直し方が違うので)
+ *   4. **1 枚で文字表がまかなえるか** (#167)。font.txt は 1656 字あるのに、
+ *      bk_font.tms の頁は 1058 マスしかない。残り 598 字は別の画像にある
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -96,5 +98,43 @@ for (const width of [1024, 640, 768]) {
   checked++;
 }
 
-if (checked < 8) fail(`確かめた場合が ${checked} 通りしかない`);
+
+/* ---- 5. 1 枚で文字表がまかなえるか (#167) ---- */
+{
+  const FONT_GLYPHS = constOf("FONT_GLYPHS");
+  const m2 = new Function("u32le", "u16le", "FONT_COLS", "FONT_CELL", "FONT_GLYPHS",
+    src.slice(s, e) + "\nreturn { fontPageShortfall };")(u32le, u16le, FONT_COLS, FONT_CELL, FONT_GLYPHS);
+  /* 公開ソースの実物: font.txt は 72 行 × 23 = 1656 字。ところが bk_font.tms の頁は
+     512×1024 ドットで 23 × 46 = 1058 マスしかない。差の 598 は向こうの font2.txt の
+     字数とちょうど一致する —— **文字表は 2 枚に分かれている** */
+  const page1 = Math.floor(512 / FONT_CELL) * Math.floor(1024 / FONT_CELL);
+  if (page1 !== 1058) fail(`実物の頁が ${page1} マス (前提が崩れた)`);
+  if (FONT_GLYPHS - page1 !== 598) fail(`足りない字数が ${FONT_GLYPHS - page1} (font2.txt は 598 字)`);
+
+  /* 足りている画像には何も言わない */
+  if (m2.fontPageShortfall(FONT_GLYPHS, -1) !== "") fail("ちょうど足りる画像に文句を言っている");
+  if (m2.fontPageShortfall(FONT_GLYPHS + 100, 5) !== "") fail("余る画像に文句を言っている");
+  checked += 2;
+
+  /* 実物の頁: 足りない字数と、全体の字数の両方を言う */
+  const note = m2.fontPageShortfall(page1, -1);
+  if (!note) fail("実物の頁 (1058 マス) で何も言わない");
+  for (const must of [String(page1), String(FONT_GLYPHS), "598"]) {
+    if (!note.includes(must)) fail(`説明に ${must} が出てこない: ${note}`);
+  }
+  checked++;
+
+  /* **本文がこの画像を越える番号を使っているとき**は、書き写しの間違いではないと言う。
+     ここを言わないと、社長は 1058 字を書き写したあと自分の写しを疑う */
+  const over = m2.fontPageShortfall(page1, 1600);
+  if (!over.includes("1600")) fail(`本文が使う最大の番号を言っていない: ${over}`);
+  if (!over.includes(String(page1 - 1))) fail(`この画像の番号の上限を言っていない: ${over}`);
+  if (!over.includes("書き写しの間違いではありません")) {
+    fail(`原因が書き写しでないことを言っていない: ${over}`);
+  }
+  if (over === note) fail("本文が越えていても、越えていなくても同じことを言っている");
+  checked += 2;
+}
+
+if (checked < 14) fail(`確かめた場合が ${checked} 通りしかない`);
 console.log(`OK (${checked} 通り)`);

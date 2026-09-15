@@ -42,6 +42,11 @@ SECTOR = 2048
 FONT_COLS = 23
 FONT_CELL = 22
 
+#: 文字表ぜんぶの字数。公開ソースの font.txt が 72 行 × 23 字 = 1656 字 (#167)。
+#: **1 枚の画像には収まりきらない。** 512×1024 ドットの頁で 23 × 46 = 1058 マスしか
+#: 無く、残り 598 字は別の画像にある (向こうの font2.txt の字数がちょうど 598 で合う)
+FONT_GLYPHS = 1656
+
 #: TIM2 の「画素の種類」を素人向けに言い換える (make_tim2.build_tim2 の書き出しと対)。
 #: 番号のままだと意味が伝わらないので、1 画素に何が入っているかで言う
 TIM2_PIXEL_KIND = {
@@ -948,6 +953,16 @@ def check(folder: str, out=sys.stdout) -> int:
                         "「文字の番号を重ねる」は幅から列数を決めるので、このままでは"
                         f"文字表が丸ごとずれます。頁 1 枚は幅 {need} ドットで足ります。"
                         "この行ごと報告してください")
+                # 1 枚で文字表がまかなえるか。**問題ではなく、先に知っておくこと** (#167)。
+                # 手順書は「番号 0 から書き出す」で終わっているが、1 枚では終わらない
+                if info.get("width") and info.get("height"):
+                    cells = (info["width"] // FONT_CELL) * (info["height"] // FONT_CELL)
+                    if cells < FONT_GLYPHS:
+                        say(f"  この画像のマスは {cells} 個 "
+                            f"(この作品の文字表は全部で {FONT_GLYPHS} 字)。"
+                            f"1 枚では {FONT_GLYPHS - cells} 字ぶん足りないので、"
+                            "残りは別の画像にあります。書き写しても本文に大きい番号が"
+                            "残るのは、そのためです")
             else:
                 problems += 1
                 img.seek(e["at"])

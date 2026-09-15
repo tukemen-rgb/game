@@ -26,6 +26,10 @@ const SECTOR = 2048;
    動かすので、外に置くと抽出したコードで未定義になる #99) */
 const FONT_COLS = 23;       /* フォント画像の 1 行の文字数 */
 const FONT_CELL = 22;       /* 文字の刻み (ドット) */
+/* 文字表ぜんぶの字数。公開ソースの font.txt が 72 行 × 23 字 = 1656 字 (#167)。
+   1 枚の画像には収まりきらない: 512×1024 ドットの頁で 23 × 46 = 1058 マスしかなく、
+   残り 598 字は別の画像にある (向こうの font2.txt の字数がちょうど 598) */
+const FONT_GLYPHS = 1656;
 
 const TIM2_PIXEL_KIND = {
   1: "1 画素 16 ビットの直接色",
@@ -3699,6 +3703,15 @@ async function buildIdxReport() {
           + `「文字の番号を重ねる」は幅から列数を決めるので、このままでは文字表が丸ごとずれます。`
           + `頁 1 枚は幅 ${need} ドットで足ります。この行ごと報告してください`);
       }
+      /* 1 枚で文字表がまかなえるか。**問題ではなく、先に知っておくこと** (#167) */
+      if (p.width && p.height) {
+        const cells = Math.floor(p.width / FONT_CELL) * Math.floor(p.height / FONT_CELL);
+        if (cells < FONT_GLYPHS) {
+          lines.push(`  この画像のマスは ${cells} 個 (この作品の文字表は全部で ${FONT_GLYPHS} 字)。`
+            + `1 枚では ${FONT_GLYPHS - cells} 字ぶん足りないので、残りは別の画像にあります。`
+            + "書き写しても本文に大きい番号が残るのは、そのためです");
+        }
+      }
     } else {
       problems++;
       lines.push(`→ [フォント] ${it.name} は TIM2 として読めません。先頭 16 バイト ${[...bytes.subarray(0, 16)].map((v) => hex(v, 2)).join(" ")}`);
@@ -5970,6 +5983,36 @@ function fontGridMismatch(cols, width, cell) {
     + `刻みと余白の欄を確かめてください。`;
 }
 
+/** この画像 1 枚で文字表がまかなえるか (#167).
+ *
+ * 手順書は「番号 0 から順に文字を書き出して文字表に貼る」で終わっている。ところが
+ * **1 枚では終わらない**。公開ソースの `font.txt` は 72 行 × 23 = 1656 字あるのに、
+ * `bk_font.tms` の頁は 512×1024 ドット = 23 × 46 = **1058 マス**しかない。
+ * 残り 598 字 (全体の 36%) は別の画像にある —— 向こうの `font2.txt` の字数が
+ * ちょうど 598 で合う。
+ *
+ * これを言わないと、社長は 1058 字を手で書き写したあと、本文に `[1234]` が
+ * 残るのを見て **自分の書き写しを疑う**。原因は別の所にある。
+ *
+ * @param cells このマス目で番号を振れるマスの数 (列 × 行)
+ * @param maxUsed 直前に読んだ .msg が使っている最大の番号 (無ければ -1)
+ * @returns {string} 足りないときの説明。足りていれば空文字
+ */
+function fontPageShortfall(cells, maxUsed) {
+  if (cells >= FONT_GLYPHS) return "";
+  const rest = FONT_GLYPHS - cells;
+  let s = `この画像は ${cells} マスです。僕の夏休み 2 の文字表は全部で ${FONT_GLYPHS} 字あるので、`
+    + `**この 1 枚では ${rest} 字ぶん足りません**。残りは別の画像にあります`
+    + ` (別のファイルか、同じファイルの別の位置)。`;
+  if (maxUsed >= cells) {
+    s += `直前に読んだ .msg は番号 ${maxUsed} まで使っていて、この画像の番号は ${cells - 1} までです。`
+      + `この画像を全部書き写しても、その先は [番号] のまま残ります —— 書き写しの間違いではありません。`;
+  } else {
+    s += `まずこの 1 枚を書き写して構いません。本文に残る大きい番号は、次の画像の分です。`;
+  }
+  return s;
+}
+
 /**
  * TIM2 (PS2 の標準画像形式)。
  *
@@ -6194,11 +6237,14 @@ function renderTim2(b, at) {
         }
       }
       const off = fontGridMismatch(cols, pic.width, cw);
+      /* n はここまでで振った番号の数 = このマス目のマス数 */
+      const short = fontPageShortfall(n, usedSet && usedSet.size ? Math.max(...usedSet) : -1);
       hint.textContent = (off ? `⚠ ${off} ` : "")
         + `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の 0 から順に文字を書き出して、.msg 読みの文字表に貼ってください。`
         + (usedSet && usedSet.size ? ` 緑の枠は、直前に読んだ .msg で使われている ${usedSet.size} 字 (まずここだけ書き出せば読めます)。` : "")
-        + (missingSet && missingSet.size ? ` 橙の枠は、そのうち文字表にまだ無い ${missingSet.size} 字 (本文で [番号] のまま残る所)。` : "");
-      hint.className = off ? "hint warnbar" : "hint";
+        + (missingSet && missingSet.size ? ` 橙の枠は、そのうち文字表にまだ無い ${missingSet.size} 字 (本文で [番号] のまま残る所)。` : "")
+        + (short ? ` ⚠ ${short}` : "");
+      hint.className = off || short ? "hint warnbar" : "hint";
     }
   };
   for (const el of [zoomIn, cwIn, chIn, oxIn, oyIn]) el.addEventListener("input", draw);

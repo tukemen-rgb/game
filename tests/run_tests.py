@@ -609,6 +609,64 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         self.assertIn(f"この作品は 1 行 {boku2.FONT_COLS} 字", res.stdout,
                       "本当は何字かを言っていない")
 
+    def test_one_font_page_is_not_enough_and_check_says_so(self):
+        """1 枚では文字表がまかなえないことを、`check` が先に言うこと (#167).
+
+        手順書は「番号 0 から順に書き出して文字表に貼る」で終わっています。
+        ところが **1 枚では終わりません**。公開ソースの `font.txt` は
+        72 行 × 23 = 1656 字あるのに、`bk_font.tms` の頁は 512×1024 ドット、
+        つまり 23 × 46 = **1058 マス**しかない。残り 598 字は別の画像にあり、
+        向こうの `font2.txt` の字数がちょうど 598 で合います。
+
+        これを言わないと、社長は 1058 字を手で書き写したあと、本文に
+        `[1234]` が残るのを見て **自分の書き写しを疑います**。原因は別です。
+
+        **問題 (→) ではなく、先に知っておくこと**なので、健全な練習データでも
+        終了コードは 0 のままであるべき —— それも一緒に見ます。
+        """
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        res = self.check(self.folder)
+        self.assertEqual(res.returncode, 0,
+                         "先に知らせるだけの行で、健全な練習データが赤くなっている")
+        self.assertIn(f"文字表は全部で {boku2.FONT_GLYPHS} 字", res.stdout,
+                      "文字表ぜんぶの字数を言っていない")
+        # 練習データの画像 (506×198) のマス数を、道具と同じ式で出して突き合わせる
+        cells = (506 // boku2.FONT_CELL) * (198 // boku2.FONT_CELL)
+        self.assertEqual(cells, 207, "練習データの前提が変わった")
+        self.assertIn(f"マスは {cells} 個", res.stdout, "この画像のマス数を言っていない")
+        self.assertIn(f"{boku2.FONT_GLYPHS - cells} 字ぶん足りない", res.stdout,
+                      "足りない字数を言っていない")
+
+    def test_the_real_font_page_holds_only_part_of_the_table(self):
+        """実物の頁の大きさで、足りない字数が公開ソースと合うこと (#167).
+
+        512×1024 ドットの頁は 1058 マス。1656 - 1058 = 598 で、公開ソースの
+        `font2.txt` の字数とちょうど一致します。**この一致が、文字表が 2 枚に
+        分かれているという読みの裏付け**なので、数字が動いたら気づけるようにする。
+        """
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        page1 = (512 // boku2.FONT_CELL) * (1024 // boku2.FONT_CELL)
+        self.assertEqual(page1, 1058, "実物の頁のマス数が変わった")
+        self.assertEqual(boku2.FONT_GLYPHS - page1, 598,
+                         "足りない字数が、公開ソースの font2.txt の 598 字と合わない")
+        # 公開ソースが手元にあるなら、その 598 を**数え直して**確かめる
+        if os.path.isdir(PUBLIC_SRC):
+            for name, want in (("font.txt", boku2.FONT_GLYPHS), ("font2.txt", 598)):
+                path = os.path.join(PUBLIC_SRC, name)
+                if not os.path.isfile(path):
+                    continue
+                with open(path, encoding="utf-8") as fh:
+                    got = len(fh.read().replace("\n", ""))
+                self.assertEqual(got, want, f"公開ソースの {name} が {got} 字 (前提は {want})")
+
     def test_the_font_grid_numbers_match_the_sample_maker(self):
         """1 行の字数と刻みが、練習データを作る側と同じ数字であること."""
         sys.path.insert(0, os.path.join(REPO, "tools"))
@@ -661,6 +719,7 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         "会話として読めたファイルが 0 件",
         "ドットに足りません",
         "ドットで足ります",           # 広すぎる側の判定 (#166)
+        "残りは別の画像にあります",   # 1 枚では文字表がまかなえない (#167)
         "1 画素 1 バイトのパレット番号",
         "索引が本体をどれだけ使い切っているか",
     )
@@ -679,7 +738,8 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
             sys.path.remove(os.path.join(REPO, "tools"))
         for name, value in (("COVERAGE_MIN", boku2.COVERAGE_MIN),
                             ("FONT_COLS", boku2.FONT_COLS),
-                            ("FONT_CELL", boku2.FONT_CELL)):
+                            ("FONT_CELL", boku2.FONT_CELL),
+                            ("FONT_GLYPHS", boku2.FONT_GLYPHS)):
             self.assertTrue(f"const {name} = {value}" in self.ui,
                             f"web/app.js の {name} が {value} と違う")
 
