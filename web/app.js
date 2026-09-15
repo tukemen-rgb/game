@@ -3602,7 +3602,7 @@ async function fontPageHunt(items, fontItem, firstAt, cells, dataEntry) {
 
   const own = await readRange(dataEntry.file, dataEntry.offset + fontItem.at,
                               Math.min(fontItem.len, FONT_HUNT_HEAD));
-  for (const p of tim2Pages(own)) {
+  for (const p of tim2Pages(own, 8, true)) {
     /* firstAt は上で既に報告した 1 枚目の位置。**そこを候補に数えない** */
     if (p.at === firstAt || !looksLikeAFontPage(p.t.pictures[0])) continue;
     const pic = p.t.pictures[0];
@@ -3615,7 +3615,7 @@ async function fontPageHunt(items, fontItem, firstAt, cells, dataEntry) {
     if (other === fontItem || other.len < 1024) continue;
     const bytes = await readRange(dataEntry.file, dataEntry.offset + other.at,
                                   Math.min(other.len, FONT_HUNT_HEAD));
-    for (const p of tim2Pages(bytes, 2)) {
+    for (const p of tim2Pages(bytes, 2, true)) {
       const pic = p.t.pictures[0];
       if (!looksLikeAFontPage(pic) || fontPageCells(pic) < want) continue;
       out.push(`  ・${other.name} (位置 ${hx(p.at)} / ${pic.width}×${pic.height} ドット / `
@@ -6022,9 +6022,18 @@ function renderFormat() {
       note.className = "hint";
       note.textContent = `このファイルには TIM2 が ${pages.length} 枚入っています。`
         + "文字表は 1 枚に収まらないので、続きがここにあることがあります。押すと切り替わります。";
+      /* 各頁の左上に振る番号。**前の頁のマス数を足していく** (#169)。
+         0 から振り直すと、書き出した文字表が丸ごとずれる */
+      const bases = new Map();
+      let running = 0;
+      for (const p of pages) {
+        bases.set(p.at, running);
+        const pic = p.t.pictures[0];
+        running += Math.floor(pic.width / FONT_CELL) * Math.floor(pic.height / FONT_CELL);
+      }
       const draw = (at) => {
         const old = box.querySelector(".tim2body");
-        const made = renderTim2(b, at);
+        const made = renderTim2(b, at, bases.get(at) || 0);
         made.classList.add("tim2body");
         if (old) old.replaceWith(made); else box.append(made);
         for (const c of bar.children) c.setAttribute("aria-pressed", String(Number(c.dataset.at) === at));
@@ -6138,18 +6147,25 @@ function findTim2(b) {
  * たまたま "TIM2" の 4 バイトが並んだだけのものを拾わないよう、見出しが読めて
  * 大きさが無茶でないものだけ返す。
  */
-function tim2Pages(b, limit = 8) {
+function tim2Pages(b, limit = 8, headerOnly = false) {
   const out = [];
   for (let at = 0; at + 16 <= b.length && out.length < limit; at++) {
     if (!(b[at] === 0x54 && b[at + 1] === 0x49 && b[at + 2] === 0x4D && b[at + 3] === 0x32)) continue;
-    const t = parseTim2(b, at);
+    const t = parseTim2(b, at, headerOnly);
     const p = t && t.pictures[0];
     if (p && p.width > 0 && p.width <= 4096 && p.height > 0 && p.height <= 4096) out.push({ at, t });
   }
   return out;
 }
 
-function parseTim2(b, at) {
+/**
+ * @param headerOnly 画素が入りきらなくても見出しだけで認める (#169)。**探すとき専用**。
+ *   ファイルの先頭だけを読んで頁を数えるときに要る —— 後ろの頁は画素が窓の外に
+ *   はみ出すので、そのままだと「無い」ことになってしまう。描くときは使わない
+ *   (画素が要る)。一括処理 (boku2.py の tim2_info) も見出しだけを読むので、
+ *   これで両側の答えが揃う
+ */
+function parseTim2(b, at, headerOnly = false) {
   if (at < 0 || at + 16 > b.length) return null;
   if (!(b[at] === 0x54 && b[at + 1] === 0x49 && b[at + 2] === 0x4D && b[at + 3] === 0x32)) return null;
   const version = b[at + 4], format = b[at + 5], count = u16le(b, at + 6);
@@ -6167,7 +6183,7 @@ function parseTim2(b, at) {
     const width = u16le(b, p + 20), height = u16le(b, p + 22);
     if (!width || !height || width > 4096 || height > 4096 || headerSize < 48) return null;
     const imageAt = p + headerSize, clutAt = imageAt + imageSize;
-    if (imageAt + imageSize > b.length) return null;
+    if (!headerOnly && imageAt + imageSize > b.length) return null;
     pictures.push({ at: p, total, clutSize, imageSize, headerSize, clutColors, clutType, imageType,
                     width, height, imageAt, clutAt });
     if (!total) break;
@@ -6240,9 +6256,17 @@ function decodeTim2(b, pic) {
 
 const TIM2_TYPES = { 1: "16bit", 2: "24bit", 3: "32bit", 4: "4bit 索引", 5: "8bit 索引" };
 
-/** TIM2 を描いて、フォント画像なら番号の目盛りを重ねる */
-function renderTim2(b, at) {
+/** TIM2 を描いて、フォント画像なら番号の目盛りを重ねる.
+ *
+ * @param firstNum この画像の左上のマスに振る番号 (#169)。文字表は 1 枚に収まらないので、
+ *   2 枚目は **1 枚目の続きの番号**から始まる。0 から振り直すと、書き出した文字表が
+ *   丸ごとずれる —— しかも出てくる字は日本語のままなので目では気づけない
+ */
+function renderTim2(b, at, firstNum = 0) {
   const wrap = document.createElement("div");
+  /* 頁が 2 枚以上あるときは切り替えの案内が先に来るので、**画像の側**を
+     名前で指せるようにしておく (検査がどちらの案内を読むかで迷わないように、#169) */
+  wrap.className = "tim2body";
   wrap.style.display = "grid";
   wrap.style.gap = "12px";
   const t = parseTim2(b, at);
@@ -6288,7 +6312,8 @@ function renderTim2(b, at) {
   };
   const zoomIn = mk("拡大率", "tim2zoom", 2);
   const gridOn = document.createElement("button");
-  gridOn.className = "chipbtn"; gridOn.textContent = "文字の番号を重ねる"; gridOn.setAttribute("aria-pressed", "false");
+  gridOn.className = "chipbtn"; gridOn.id = "tim2grid";
+  gridOn.textContent = "文字の番号を重ねる"; gridOn.setAttribute("aria-pressed", "false");
   /* 僕の夏休み 2 の実機の描画ルーチン (公開ソース asm_notes.txt): 文字の刻みは 0x16 = 22 ドット、
      描く枠は 0x17 = 23 ドット (1 ドット重なる)。番号を振る刻みは 22 */
   const cwIn = mk("1 文字の幅", "tim2cw", 22), chIn = mk("1 文字の高さ", "tim2ch", 22);
@@ -6338,22 +6363,27 @@ function renderTim2(b, at) {
       const missingSet = state.missingGlyphs || null;
       for (let y = oy; y + ch <= pic.height; y += ch) {
         for (let x = ox; x + cw <= pic.width; x += cw) {
-          const isUsed = usedSet && usedSet.has(n);
-          const isMissing = missingSet && missingSet.has(n);
+          /* 緑・橙の印が持っているのは **文字表の番号** なので、
+             この画像の中の順番ではなく base を足した番号で引く (#169) */
+          const num = firstNum + n++;
+          const isUsed = usedSet && usedSet.has(num);
+          const isMissing = missingSet && missingSet.has(num);
           g.strokeStyle = isMissing ? "rgba(255,170,40,.95)" : isUsed ? "rgba(60,200,120,.9)" : "rgba(255,80,40,.5)";
           g.lineWidth = isUsed || isMissing ? 2 : 1;
           g.strokeRect(x * z + .5, y * z + .5, cw * z, ch * z);
-          const label = String(n++);
+          const label = String(num);
           const tw = g.measureText(label).width + 3;
           g.fillStyle = "rgba(0,0,0,.65)"; g.fillRect(x * z + 1, y * z + 1, tw, Math.max(9, 5 * z) + 2);
           g.fillStyle = "#ffd28a"; g.fillText(label, x * z + 2, y * z + 2);
         }
       }
       const off = fontGridMismatch(cols, pic.width, cw);
-      /* n はここまでで振った番号の数 = このマス目のマス数 */
-      const short = fontPageShortfall(n, usedSet && usedSet.size ? Math.max(...usedSet) : -1);
+      /* n はここまでで振った番号の数 = このマス目のマス数。2 枚目なら
+         **前の頁の分も数に入れる** (base) —— そうしないと「足りない」を二重に言う */
+      const short = fontPageShortfall(firstNum + n, usedSet && usedSet.size ? Math.max(...usedSet) : -1);
       hint.textContent = (off ? `⚠ ${off} ` : "")
-        + `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の 0 から順に文字を書き出して、.msg 読みの文字表に貼ってください。`
+        + `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の ${firstNum} から順に文字を書き出して、.msg 読みの文字表に貼ってください。`
+        + (firstNum ? ` (この画像は ${firstNum} 番から始まります —— 前の頁の続きです)` : "")
         + (usedSet && usedSet.size ? ` 緑の枠は、直前に読んだ .msg で使われている ${usedSet.size} 字 (まずここだけ書き出せば読めます)。` : "")
         + (missingSet && missingSet.size ? ` 橙の枠は、そのうち文字表にまだ無い ${missingSet.size} 字 (本文で [番号] のまま残る所)。` : "")
         + (short ? ` ⚠ ${short}` : "");
@@ -6378,11 +6408,14 @@ function renderTim2(b, at) {
     let targets = missing || used;
     if (!targets) {
       targets = [];
-      for (let n = 0; n < Math.min(total, 400); n++) targets.push(n);
+      for (let k = 0; k < Math.min(total, 400); k++) targets.push(firstNum + k);
     }
-    targets = targets.filter((n) => n >= 0 && n < total);
+    /* targets は **文字表の番号**。この画像に載っているのは base 〜 base+total-1 の分
+       だけなので、そこで絞る。マスの位置は base を引いてから出す (#169) */
+    targets = targets.filter((n) => n >= firstNum && n < firstNum + total);
     const cells = targets.map((n) => {
-      const x = ox + (n % cols) * cw, y = oy + Math.floor(n / cols) * ch;
+      const k = n - firstNum;
+      const x = ox + (k % cols) * cw, y = oy + Math.floor(k / cols) * ch;
       return { n, feat: inkFeature(glyphCellInk(rgba, pic.width, x, y, cw, ch, pol), cw, ch) };
     });
     /* 既定の候補は仮名・数字・記号だけ。漢字などは画面の欄に貼ってもらって足す */

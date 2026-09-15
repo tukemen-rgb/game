@@ -215,7 +215,9 @@ async def main():
         await page.click("#tim2draft")
         await page.wait_for_timeout(2000)
         table = await page.input_value("#msgglyphs")
-        hint = await page.text_content("#formatbox .hint")
+        # 1 つのファイルに TIM2 が 2 枚以上あると、切り替えの案内が先に来る (#169)。
+        # 下書きの知らせは **画像の側** (.tim2body) に出るので、そこから取る
+        hint = await page.text_content("#formatbox .tim2body .hint")
         print("hint:", hint[:160])
         print("table head:", table.replace("\n", " ")[:80])
         lines = [ln for ln in table.split("\n") if ln.strip()]

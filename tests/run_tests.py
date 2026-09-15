@@ -634,12 +634,29 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                          "先に知らせるだけの行で、健全な練習データが赤くなっている")
         self.assertIn(f"文字表は全部で {boku2.FONT_GLYPHS} 字", res.stdout,
                       "文字表ぜんぶの字数を言っていない")
-        # 練習データの画像 (506×198) のマス数を、道具と同じ式で出して突き合わせる
-        cells = (506 // boku2.FONT_CELL) * (198 // boku2.FONT_CELL)
-        self.assertEqual(cells, 207, "練習データの前提が変わった")
+        # 練習データの画像の大きさを**実際に読んで**、道具と同じ式でマス数を出す。
+        # 数字を写すと、練習データの形を変えたときにここだけ古くなる (#169)
+        import struct
+        img = os.path.join(self.folder, "BOKU2.IMG")
+        with open(os.path.join(self.folder, "BOKU2.IDX"), "rb") as fh:
+            idx = fh.read()
+        entry = next(e for e in boku2.read_dfi(idx, os.path.getsize(img))
+                     if e["path"].endswith("bk_font.tms"))
+        with open(img, "rb") as fh:
+            fh.seek(entry["at"])
+            blob = fh.read(entry["len"])
+        pages = boku2.tim2_pages(blob)
+        self.assertGreaterEqual(len(pages), 2,
+                                "練習データのフォントが 1 枚しかない (実物は 2 枚に分かれている)")
+        cells = boku2.font_page_cells(pages[0])
+        self.assertGreater(cells, 0, "1 枚目のマス数が 0")
         self.assertIn(f"マスは {cells} 個", res.stdout, "この画像のマス数を言っていない")
         self.assertIn(f"{boku2.FONT_GLYPHS - cells} 字ぶん足りない", res.stdout,
                       "足りない字数を言っていない")
+        # **2 枚目を挙げている**こと。ここが #168 の探索の、通しでの唯一の当たり
+        self.assertIn(f"同じファイルの位置 0x{pages[1]['at']:X}", res.stdout,
+                      "同じファイルの 2 枚目を挙げていない")
+        del struct
 
     def test_the_real_font_page_holds_only_part_of_the_table(self):
         """実物の頁の大きさで、足りない字数が公開ソースと合うこと (#167).

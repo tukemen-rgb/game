@@ -212,8 +212,16 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
                                            for i, t in enumerate(lines)]
     on_mem_event = build_map(ev_parts)
 
-    font_tim2, _ = make_tim2.font_sheet(rows=(len(glyphs) + COLS - 1) // COLS, cols=COLS, cell=CELL)
-    tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + font_tim2
+    # 文字表は **1 枚に収まらない** (#167)。実物は 1656 字あるのに 1 枚の頁は
+    # 1058 マスしかなく、残りは別の画像にある。練習データも同じ形にしておかないと、
+    # 手順どおりに練習した社長が実物で初めて 2 枚目に出くわすことになる (#169)。
+    # 番号は **1 枚目の続き** から振られる —— そこが実物で一番間違えやすい所
+    rows_all = (len(glyphs) + COLS - 1) // COLS
+    rows_1 = rows_all // 2                    # 1 枚目。残りは 2 枚目に回す
+    page1, _ = make_tim2.font_sheet(rows=rows_1, cols=COLS, cell=CELL)
+    page2, _ = make_tim2.font_sheet(rows=rows_all - rows_1, cols=COLS, cell=CELL)
+    tms = (b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + page1
+           + b"\0" * ((16 - len(page1) % 16) % 16) + page2)
     photo = [make_tim2.build_tim2(8, 8, 5, [(i + k) % 4 for i in range(64)],
                                   [(0, 0, 0, 255), (255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)] + [(0, 0, 0, 0)] * 252,
                                   clut_type=3) for k in range(8)]
