@@ -6627,6 +6627,123 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
 
 
+class TestTheOutputUnderACommandIsRealOutput(unittest.TestCase):
+    """コマンドの**すぐ下**に置いた出力ブロックが、本当にその出力であること (#163).
+
+    #130 は docs/10 の引用を「どこかの道具が言うか」で見ていた。
+    こちらは**どのコマンドの出力か**まで縛る。教材は
+
+        ```bash
+        python3 tools/hexdump.py work/SCRIPT.BIN --message 2
+        ```
+        ```
+        0000013D  F1 01 …
+        ```
+
+    という形で「打てばこう出る」と約束している。ここが古いと、
+    **初めて読む人が最初の 1 分で「話が違う」と思う**。
+
+    docs/01 と docs/02 は**いちばん最初に読む教材**なのに、
+    中身を確かめる検査が一つも無かった (通しで打てるか、Windows で読めるかの
+    構造的な検査だけ)。手で確かめたら 4 組とも合っていたので、そのまま固定する。
+
+    **組にするのは「すぐ下」に置かれたものだけ。** 間に文章があるブロックは
+    式や語の一覧のことがあり、近さで機械的に結ぶと外れる。
+    拾い方を賢くするより、**書き方の決まり (すぐ下に置く) を頼りにする** (#151)。
+    """
+
+    #: 出力に混ざる「その場のもの」。ここだけは違ってよい
+    VOLATILE = (
+        re.compile(r"/tmp/[^\s'\"]+"),
+        re.compile(r"work/[^\s'\"]*\.(?:tbl|tsv|bin|BIN)"),
+    )
+
+    FENCE = re.compile(r"```(\w*)\n(.*?)\n```", re.S)
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/SCRIPT.BIN", "make_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+
+    @classmethod
+    def pairs(cls, text: str) -> list:
+        """```bash のすぐ下にある出力ブロックを (コマンド, 出力) で返す."""
+        out, blocks = [], list(cls.FENCE.finditer(text))
+        for a, b in zip(blocks, blocks[1:]):
+            if a.group(1) != "bash" or b.group(1) not in ("", "text"):
+                continue
+            if text[a.end():b.start()].strip():     # 間に文章があれば組にしない
+                continue
+            out.append((a.group(2).strip(), b.group(2)))
+        return out
+
+    def all_pairs(self) -> list:
+        got = []
+        base = os.path.join(REPO, "docs")
+        for name in sorted(os.listdir(base)):
+            if not name.endswith(".md"):
+                continue
+            with open(os.path.join(base, name), encoding="utf-8") as fh:
+                for cmd, body in self.pairs(fh.read()):
+                    got.append((f"docs/{name}", cmd, body))
+        return got
+
+    @staticmethod
+    def run_lines(cmd: str) -> str:
+        """書いてあるコマンドを、書いてあるまま走らせて出力を返す.
+
+        `\\` の行継続と、`#` のコメントだけ外す。**引数はいじらない** ——
+        いじると「書いてあるとおりに打った人」と違うものを測ることになる。
+        """
+        import subprocess
+
+        joined = cmd.replace("\\\n", " ")
+        out = []
+        for line in joined.splitlines():
+            line = re.sub(r"\s+#.*$", "", line).strip()
+            if not line.startswith("python3 "):
+                continue
+            argv = [sys.executable] + line.split()[1:]
+            res = subprocess.run(argv, capture_output=True, text=True, cwd=REPO)
+            out.append(res.stdout + res.stderr)
+        return "\n".join(out)
+
+    def test_the_pairs_are_found(self):
+        """前提: 組がちゃんと拾えていること (0 組なら下の検査は素通り)."""
+        got = self.all_pairs()
+        self.assertGreaterEqual(len(got), 4,
+                                f"コマンドと出力の組を {len(got)} 組しか拾えていない")
+        for doc in ("docs/01-文字テーブル.md", "docs/02-相対検索.md"):
+            self.assertTrue(any(d == doc for d, _c, _b in got),
+                            f"{doc} から組を拾えていない")
+
+    def test_every_line_under_a_command_really_comes_out(self):
+        """出力ブロックの各行が、そのコマンドの出力に実際にあること."""
+        bad = []
+        for doc, cmd, body in self.all_pairs():
+            real = self.run_lines(cmd)
+            if not real.strip():
+                bad.append(f"{doc}: コマンドが何も出さない [{cmd.splitlines()[0]}]")
+                continue
+            # その場で変わるもの (一時フォルダの道筋など) は、両側から同じように落とす
+            real_cmp = real
+            for pat in self.VOLATILE:
+                real_cmp = pat.sub("", real_cmp)
+            for line in body.splitlines():
+                want = line.strip()
+                if not want:
+                    continue
+                for pat in self.VOLATILE:
+                    want = pat.sub("", want)
+                if want and want not in real_cmp:
+                    bad.append(f"{doc} [{cmd.splitlines()[0][:50]}]\n"
+                               f"      書いてある: {line.strip()[:70]!r}\n"
+                               f"      実際の出力にこの行が無い")
+        self.assertEqual(bad, [], "コマンドの下の出力が実際と違う:\n  "
+                                  + "\n  ".join(bad))
+
+
 class TestSplittingSurvivesAStrayFile(unittest.TestCase):
     """関係ないファイル 1 つで、切り分けが全部止まらないこと (#161).
 
