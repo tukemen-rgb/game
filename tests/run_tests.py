@@ -2723,8 +2723,10 @@ class TestBoku2Cli(unittest.TestCase):
             with open(img_path, "wb") as fh:
                 fh.write(img)
             out = os.path.join(tmp, "out")
-            n = boku2.unpack(idx_path, img_path, out)
+            # #161 から (切り分けた数, 名前が付かなかった数) を返す
+            n, unnamed = boku2.unpack(idx_path, img_path, out)
             self.assertEqual(n, 11)
+            self.assertEqual(unnamed, 0, "この題材では全部に名前が付くはず")
             for path, data in want.items():
                 with open(os.path.join(out, *path.split("/")), "rb") as fh:
                     self.assertEqual(fh.read(), data, path)
@@ -4638,6 +4640,11 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             run(tool("boku2.py"), "unpack", os.path.join(sample, "BOKU2.IDX"),
                 os.path.join(sample, "BOKU2.IMG"), at("OUT")),
             run(tool("boku2.py"), "maps", os.path.join(sample, "MAP"), "-o", at("OUT", "maps")),
+            # 名前の置き場を壊した索引で unpack も走らせる。**名前が付かなかった**
+            # ときの知らせは、この道でしか出ない (#161)。`check` だけ走らせていたので、
+            # docs/10 がそれを引用した瞬間に「道具も画面も言わない」で落ちた
+            run(tool("boku2.py"), "unpack", at("BRname", "BOKU2.IDX"),
+                at("BRname", "BOKU2.IMG"), at("OUTname")),
             run(tool("boku2.py"), "maps", at("void"), "-o", at("m0")),
             run(tool("boku2.py"), "maps", at("nosuch") + "/*.BIN", "-o", at("m2")),
         ]
@@ -6618,6 +6625,153 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
         self.assertGreater(got["ratio"], 6,
                            f"なめらかな波の相関が {got['ratio']:.2f}。"
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
+
+
+class TestSplittingSurvivesAStrayFile(unittest.TestCase):
+    """関係ないファイル 1 つで、切り分けが全部止まらないこと (#161).
+
+    `maps` はフォルダの中を順に切り分けるが、入れ物でないファイルに当たると
+    **例外を投げてそこで終わって**いた。吸い出した `MAP/` には
+    **`.DS_Store` (Mac) や `Thumbs.db` (Windows) がほぼ必ず混ざる**。
+    しかも先頭が `.` の名前は一覧にも出ないので、
+    **身に覚えのないファイル名のエラーだけ**が残る。
+
+    並び順で結果が変わるのが最悪だった: `readme.txt` なら本物 2 つは切り分けて
+    から止まる。`.DS_Store` は先に来るので、**1 つも切り分けられない**。
+    実測したとおり。
+
+    直したあとは、入れ物でないものを**飛ばして名前を言い**、残りは切り分ける。
+    言葉は docs/10 の「困ったとき」に載っている「入れ物ではありません」のまま
+    (#130 の引用の検査が見張っている)。
+
+    `unpack` にも同じ目を向けた。こちらは**名前が付かなかった数**を言わなかった。
+    docs/10 は「`#0012.tm2` のように番号だけなら名前の読み取りに失敗している」と
+    人に見張らせているのに、道具は数を出していなかった。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        cls.sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+
+    def maps_with(self, stray: str, tmp: str):
+        """MAP/ を写して `stray` という名前のごみを 1 つ混ぜ、maps を走らせる."""
+        import shutil
+        import subprocess
+
+        src = os.path.join(self.sample, "MAP")
+        dst = os.path.join(tmp, "MAP")
+        shutil.copytree(src, dst)
+        with open(os.path.join(dst, stray), "w", encoding="utf-8") as fh:
+            fh.write("これは MAP のファイルではありません\n")
+        out = os.path.join(tmp, "out")
+        res = subprocess.run([sys.executable, "tools/boku2.py", "maps", dst, "-o", out],
+                             capture_output=True, text=True, cwd=REPO)
+        made = sorted(os.listdir(out)) if os.path.isdir(out) else []
+        return res, made
+
+    def test_a_stray_file_does_not_stop_the_rest(self):
+        """並び順によらず、本物は全部切り分けられること.
+
+        **`.DS_Store` を必ず試す。** 名前の順で先に来るので、
+        止まる作りだと 1 つも出来ない —— いちばん痛い形。
+        """
+        for stray in (".DS_Store", "Thumbs.db", "readme.txt"):
+            with tempfile.TemporaryDirectory() as tmp:
+                res, made = self.maps_with(stray, tmp)
+                self.assertEqual(res.returncode, 0,
+                                 f"{stray}: 終了コード {res.returncode} "
+                                 f"{(res.stdout + res.stderr)[-200:]!r}")
+                self.assertEqual(made, ["M_A01000", "M_A02000"],
+                                 f"{stray}: 切り分けられたのが {made}")
+                self.assertTrue("入れ物ではありません" in res.stderr,
+                                f"{stray}: 飛ばしたことを言っていない "
+                                f"{res.stderr[-200:]!r}")
+                self.assertTrue(stray in res.stderr,
+                                f"{stray}: 飛ばした名前が出ていない {res.stderr[-200:]!r}")
+
+    def test_the_count_is_of_real_boxes_not_of_files_given(self):
+        """「N 個の入れ物から」の N が、**入れ物だった数**であること.
+
+        渡した数で言うと、飛ばしたごみまで入れ物に数えてしまう。
+        """
+        import re
+
+        with tempfile.TemporaryDirectory() as tmp:
+            res, _made = self.maps_with(".DS_Store", tmp)
+            m = re.search(r"(\d+) 個の入れ物から", res.stdout)
+            self.assertTrue(m, f"入れ物の数が出ていない: {res.stdout!r}")
+            self.assertEqual(int(m.group(1)), 2,
+                             f"入れ物が {m.group(1)} 個 (本物は 2 個。"
+                             f"渡した 3 個を数えていないか)")
+
+    def test_all_stray_still_fails(self):
+        """入れ物が 1 つも無ければ、今までどおり終了コード 1 で、名前も言うこと.
+
+        飛ばす作りにしたせいで「何も出来ていないのに成功」になっては困る。
+        """
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            junk = os.path.join(tmp, "MAP")
+            os.makedirs(junk)
+            for name in (".DS_Store", "note.txt"):
+                with open(os.path.join(junk, name), "w", encoding="utf-8") as fh:
+                    fh.write("ごみ\n")
+            res = subprocess.run([sys.executable, "tools/boku2.py", "maps", junk,
+                                  "-o", os.path.join(tmp, "out")],
+                                 capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 1, "全部ごみなのに成功で終わった")
+            self.assertTrue("1 つも見つかりませんでした" in res.stderr, res.stderr[-200:])
+            self.assertTrue("入れ物ではありません" in res.stderr, res.stderr[-200:])
+            self.assertTrue("note.txt" in res.stderr,
+                            f"どれが入れ物でなかったかを言っていない: {res.stderr[-200:]!r}")
+
+    def test_unpack_reports_how_many_got_no_name(self):
+        """`unpack` が、名前の付かなかった数を言うこと."""
+        import struct
+        import subprocess
+
+        import boku2
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 名前の置き場を壊した索引を作る (make_boku2_sample.py の "name" と同じ狙い)
+            with open(os.path.join(self.sample, "BOKU2.IDX"), "rb") as fh:
+                idx = bytearray(fh.read())
+            # レコードの直後 (0x1C0) から名前が並ぶ。そこを 0 で埋めれば名前が読めない
+            img = os.path.join(self.sample, "BOKU2.IMG")
+            before = boku2.read_dfi(bytes(idx), os.path.getsize(img))
+            self.assertTrue(before, "題材の索引が読めない")
+            named = sum(1 for e in before
+                        if not os.path.basename(e["path"]).startswith("#"))
+            self.assertEqual(named, len(before), "壊す前から名前が欠けている")
+            idx[0x1C0:] = b"\0" * (len(idx) - 0x1C0)
+            broken = os.path.join(tmp, "B.IDX")
+            with open(broken, "wb") as fh:
+                fh.write(bytes(idx))
+            res = subprocess.run(
+                [sys.executable, "tools/boku2.py", "unpack", broken,
+                 img, os.path.join(tmp, "out")],
+                capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 0, res.stderr[-200:])
+            self.assertTrue("名前が付かなかったファイル" in res.stderr,
+                            f"名前の付かない数を言っていない: {res.stderr[-300:]!r}")
+
+    def test_unpack_says_nothing_when_every_name_is_read(self):
+        """名前が全部読めたときは黙ること (毎回言うと、言葉が効かなくなる)."""
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            res = subprocess.run(
+                [sys.executable, "tools/boku2.py", "unpack",
+                 os.path.join(self.sample, "BOKU2.IDX"),
+                 os.path.join(self.sample, "BOKU2.IMG"), os.path.join(tmp, "out")],
+                capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(res.returncode, 0, res.stderr[-200:])
+            self.assertFalse("名前が付かなかったファイル" in res.stderr,
+                             f"全部読めたのに知らせが出た: {res.stderr[-300:]!r}")
 
 
 class TestTextSaysWhatItDidNotTake(unittest.TestCase):

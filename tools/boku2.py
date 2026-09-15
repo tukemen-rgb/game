@@ -180,7 +180,8 @@ def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
             img.seek(e["at"])
             with open(dest, "wb") as fo:
                 fo.write(img.read(e["len"]))
-    return len(entries)
+    unnamed = sum(1 for e in entries if os.path.basename(e["path"]).startswith("#"))
+    return len(entries), unnamed
 
 
 # ---------- マップの入れ物 ----------
@@ -1030,24 +1031,57 @@ def run(args) -> int:
         return check(args.folder)
 
     if args.cmd == "unpack":
-        n = unpack(args.idx, args.img, args.out)
+        n, unnamed = unpack(args.idx, args.img, args.out)
         print(f"{n} 個に切り分けました → {args.out}")
+        # **名前が付かなかった数を言う** (#161)。docs/10 は「`#0012.tm2` のように
+        # 番号だけなら名前の読み取りに失敗している」と人に見張らせているのに、
+        # この道具は数を出していなかった (`check` と画面は出している)
+        if unnamed:
+            print(f"→ 名前が付かなかったファイル {unnamed} 個 "
+                  f"(`#0012` のような番号だけの名前になります)。"
+                  f"索引の名前の置き場の読み取りが外れている疑いがあります。"
+                  f"python3 tools/boku2.py check 実物/ の出力ごと報告してください",
+                  file=sys.stderr)
     elif args.cmd == "maps":
         files = expand_patterns(args.files, folder_files=True)
-        total = 0
+        total, boxes, skipped = 0, 0, []
         for f in files:
             stem = os.path.splitext(os.path.basename(f))[0]
-            total += split_map(f, os.path.join(args.out, stem))
+            try:
+                n = split_map(f, os.path.join(args.out, stem))
+            except ValueError:
+                # **関係ないファイル 1 つで全部を止めない** (#161)。
+                # 吸い出した MAP/ には .DS_Store (Mac) や Thumbs.db (Windows) が
+                # 必ずと言ってよいほど混ざる。しかも名前の先頭が "." だと
+                # 一覧にも出ないので、**身に覚えのないファイル名のエラーだけ**が残り、
+                # 並び順によっては**1 つも切り分けられない**。飛ばして名前を言う
+                skipped.append(f)
+                continue
+            total += n
+            boxes += 1
         if not total:
             # 0 個を「0 個の入れ物から 0 個の部品」で終わると、手順が進んだように読める。
             # docs/10 の 25 分の行は「0 個でないこと」を人に見張らせていた (#125)
             print(f"→ 入れ物が 1 つも見つかりませんでした (見たファイル {len(files)} 個)",
                   file=sys.stderr)
+            if skipped:
+                # **どれが入れ物でなかったか**を名前で言う。数だけだと次の手が無い (#161)
+                names = ", ".join(os.path.basename(f) for f in skipped[:5])
+                print(f"   入れ物ではありません: {names}"
+                      f"{' …' if len(skipped) > 5 else ''}", file=sys.stderr)
             print("   指定した場所に MAP のファイルがありません。"
                   "吸い出したフォルダの MAP/ を指定してください:", file=sys.stderr)
             print("     python3 tools/boku2.py maps 実物/MAP -o OUT/maps", file=sys.stderr)
             return 1
-        print(f"{len(files)} 個の入れ物から {total} 個の部品 → {args.out}")
+        # 渡した数ではなく**入れ物だった数**で言う。渡した数で言うと、
+        # 飛ばしたものまで入れ物に数えてしまう
+        print(f"{boxes} 個の入れ物から {total} 個の部品 → {args.out}")
+        if skipped:
+            names = ", ".join(os.path.basename(f) for f in skipped[:5])
+            print(f"→ 入れ物ではありません (飛ばしました): {len(skipped)} 個 "
+                  f"{names}{' …' if len(skipped) > 5 else ''}。"
+                  f"MAP のファイルのつもりなら、その名前ごと報告してください",
+                  file=sys.stderr)
     elif args.cmd == "text":
         glyphs = load_font(args.font)
         rows = []
