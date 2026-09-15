@@ -180,5 +180,49 @@ sys.stdout.write(binascii.hexlify(t).decode())
   checked++;
 }
 
-if (checked < 17) fail(`確かめた場合が ${checked} 通りしかない`);
+
+/* ---- 7. 実物の大きさでも 2 枚目に届くか (#171) ---- */
+{
+  const m4 = new Function("u32le", "u16le", "FONT_COLS", "FONT_CELL",
+    src.slice(s, e) + "\nreturn { tim2Pages };")(u32le, u16le, FONT_COLS, FONT_CELL);
+  const { execFileSync } = await import("node:child_process");
+  const os = await import("node:os");
+  /* 実物と同じ行数で組み立てる。1 枚目は 512×1012 ドットの 8bit 索引で **51 万バイト**
+     あり、2 枚目はそのずっと後ろに来る。ここを先頭 64KB だけ見ていたのが #171 の穴。
+     大きいのでファイル経由で受け取る (標準出力に流すと入りきらない) */
+  const tmp = path.join(os.tmpdir(), "fontgrid_real.bin");
+  execFileSync("python3", ["-c", `
+import sys, struct
+sys.path.insert(0, "tools")
+import make_tim2, boku2
+p1, _ = make_tim2.font_sheet(rows=46, cols=boku2.FONT_COLS, cell=boku2.FONT_CELL)
+p2, _ = make_tim2.font_sheet(rows=26, cols=boku2.FONT_COLS, cell=boku2.FONT_CELL)
+open(${JSON.stringify(tmp)}, "wb").write(
+    b"TMS\\0" + struct.pack("<I", 0x80) + b"\\0" * (0x80 - 8) + p1 + p2)
+`], { cwd: repo });
+  const file = new Uint8Array(fs.readFileSync(tmp));
+  fs.unlinkSync(tmp);
+
+  const numOf = (name) => {
+    const m = src.match(new RegExp(`^const ${name} = ([0-9* ]+);`, "m"));
+    if (!m) { console.error(`app.js に ${name} が無い`); process.exit(2); }
+    return m[1].split("*").reduce((a, b) => a * Number(b.trim()), 1);
+  };
+  const OWN = numOf("FONT_OWN_CAP"), HUNT = numOf("FONT_HUNT_HEAD");
+
+  const pages = m4.tim2Pages(file, 8, true);
+  if (pages.length !== 2) fail(`実物の大きさで頁が ${pages.length} 枚 (2 枚あるはず)`);
+  /* この検査が意味を持つ前提: 2 枚目が「ほかのファイル用の窓」より十分後ろにあること */
+  if (!(pages[1].at > HUNT * 4)) {
+    fail(`2 枚目が ${pages[1].at} で、窓 ${HUNT} より十分後ろでない (検査に意味が無い)`);
+  }
+  if (!(OWN > pages[1].at)) fail(`FONT_OWN_CAP ${OWN} が 2 枚目 ${pages[1].at} に届かない`);
+  /* 先頭だけを渡したら 1 枚しか見つからないこと —— それが直す前の姿。
+     数が違うときは **実際に何枚だったか** を言う (0 枚と 2 枚では原因が違う) */
+  const head = m4.tim2Pages(file.subarray(0, HUNT), 8, true).length;
+  if (head !== 1) fail(`先頭 ${HUNT} バイトだけだと頁が ${head} 枚 (1 枚のはず)`);
+  checked += 3;
+}
+
+if (checked < 20) fail(`確かめた場合が ${checked} 通りしかない`);
 console.log(`OK (${checked} 通り)`);

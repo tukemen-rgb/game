@@ -664,6 +664,47 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                              f"数えた頁 0x{pg['at']:X} を候補としても挙げている")
         del struct
 
+    def test_the_hunt_reaches_a_real_sized_second_page(self):
+        """**実物の大きさ**でも同じファイルの 2 枚目に届くこと (#171).
+
+        #168〜#170 の探索は、ファイルの先頭 64KB しか読んでいませんでした。
+        練習データは頁が小さい (2 枚目が 0xB2B0 = 45KB) ので通っていましたが、
+        **実物の頁 1 枚は 512×1024 ドットの 8bit 索引で 51 万バイト**あり、
+        2 枚目は 0x7D508 あたりに来ます。64KB しか読まなければ、実物では
+        **必ず見落とす** —— 練習データの形に合わせた検査だけでは見えない穴でした。
+
+        ここでは実物と同じ行数 (46 行 + 26 行) で組み立てて確かめます。
+        """
+        import io as _io
+        import struct
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+            import make_tim2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+
+        # 実物と同じ: 1 枚目 46 行 (1058 マス)、2 枚目 26 行 (598 マス)
+        p1, _ = make_tim2.font_sheet(rows=46, cols=boku2.FONT_COLS, cell=boku2.FONT_CELL)
+        p2, _ = make_tim2.font_sheet(rows=26, cols=boku2.FONT_COLS, cell=boku2.FONT_CELL)
+        blob = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + p1 + p2
+        second_at = 0x80 + len(p1)
+        # 前提: 2 枚目が「先頭だけ」の窓より **ずっと後ろ** にあること。
+        # ここが成り立たないと、この検査は穴を見張れていない
+        self.assertGreater(second_at, boku2.FONT_HUNT_HEAD * 4,
+                           f"2 枚目が 0x{second_at:X}。窓 {boku2.FONT_HUNT_HEAD} より"
+                           "十分後ろでないと、この検査に意味が無い")
+        self.assertEqual(boku2.font_page_cells(boku2.tim2_pages(blob)[0]), 1058)
+
+        entry = {"path": "system/bk_font.tms", "at": 0, "len": len(blob)}
+        lines = boku2.font_page_hunt(_io.BytesIO(blob), [entry], entry,
+                                     46 * boku2.FONT_COLS, {0x80})
+        joined = "\n".join(lines)
+        self.assertIn(f"同じファイルの位置 0x{second_at:X}", joined,
+                      f"実物の大きさだと 2 枚目に届いていない:\n{joined}")
+        self.assertIn(f"{26 * boku2.FONT_COLS} マス", joined, "2 枚目のマス数が違う")
+
     def test_enough_cells_is_said_plainly(self):
         """マスが足りているときは、**足りていると言う** (#170).
 

@@ -3578,7 +3578,11 @@ $("idxrun").addEventListener("click", async () => {
  */
 /* 文字表の続きを探すときの上限。**一括処理 (boku2.py) と同じ数字**にしておくこと。
    ずれると、同じ吸い出しで 2 つの報告が食い違う (tests/e2e/broken.py が見張る) */
-const FONT_HUNT_HEAD = 64 * 1024;
+const FONT_HUNT_HEAD = 64 * 1024;          /* ほかのファイル */
+/* **フォント自身**のファイルから読む上限 (#171)。ここを 64KB にしていたのが誤りだった。
+   実物の頁 1 枚は 512×1024 ドットの 8bit 索引で 51 万バイトあり、2 枚目は 0x7D508
+   あたりに来る。64KB しか読まなければ、同じファイルの 2 枚目は必ず見落とす */
+const FONT_OWN_CAP = 4 * 1024 * 1024;
 const FONT_HUNT_FILES = 400;
 
 /** 1 行 23 字の幅で割り切れる画像か (文字表の続きが入っていそうか、#168) */
@@ -3601,7 +3605,7 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry) {
   const out = [];
 
   const own = await readRange(dataEntry.file, dataEntry.offset + fontItem.at,
-                              Math.min(fontItem.len, FONT_HUNT_HEAD));
+                              Math.min(fontItem.len, FONT_OWN_CAP));
   for (const p of tim2Pages(own, 8, true)) {
     /* known は上で既に数えた頁の位置。**そこを候補に数えない** ——
        数えた画像をもう一度挙げると、足し算が二重になる */
@@ -3768,7 +3772,7 @@ async function buildIdxReport() {
         /* **このファイルに入っている頁を全部数える** (#170)。1 枚目だけで数えていたので、
            「1 枚では N 字足りない」と言った直後に 2 枚目を挙げていて、足し算が
            合っていなかった */
-        const own = tim2Pages(bytes.subarray(0, FONT_HUNT_HEAD), 8, true)
+        const own = tim2Pages(bytes.subarray(0, FONT_OWN_CAP), 8, true)
           .filter((q) => looksLikeAFontPage(q.t.pictures[0]));
         const cells = own.reduce((sum, q) => sum + fontPageCells(q.t.pictures[0]), 0)
           || fontPageCells(p);

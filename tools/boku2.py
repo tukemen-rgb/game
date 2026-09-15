@@ -807,9 +807,14 @@ def looks_like_a_font_page(info: dict) -> bool:
     return (info.get("width") or 0) // FONT_CELL == FONT_COLS and font_page_cells(info) > 0
 
 
-#: 文字表の続きを探すとき、1 つのファイルから読む上限。実物の索引は 1951 個あるので、
-#: 全部を丸ごと読むと遅い。TIM2 の見出しは前のほうにあるので、この長さで足りる
+#: **ほかの**ファイルから読む上限。実物の索引は 1951 個あるので、全部を丸ごと読むと
+#: 遅い。続きが独立したファイルなら見出しは前のほうに来るので、この長さで足りる
 FONT_HUNT_HEAD = 64 * 1024
+#: **フォント自身**のファイルから読む上限 (#171)。ここを 64KB にしていたのが誤りだった。
+#: 実物の頁 1 枚は 512×1024 ドットの 8bit 索引で **51 万バイト**あり、2 枚目は 0x7D508
+#: あたりに来る。64KB しか読まなければ、同じファイルの 2 枚目は**必ず見落とす** ——
+#: 練習データは頁が小さいので通っていただけだった
+FONT_OWN_CAP = 4 * 1024 * 1024
 #: 探す相手の上限 (索引が大きいので、見当のつくものから順に打ち切る)
 FONT_HUNT_FILES = 400
 
@@ -839,7 +844,7 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
     # known は上で既に数えた頁の位置。**そこを候補に数えない** ——
     # 数えた画像を「もう 1 枚あります」と出すと、足し算が二重になる
     seen = known or set()
-    same = [p for p in tim2_pages(img.read(min(font_entry["len"], FONT_HUNT_HEAD)))
+    same = [p for p in tim2_pages(img.read(min(font_entry["len"], FONT_OWN_CAP)))
             if p["at"] not in seen and looks_like_a_font_page(p)]
     for p in same:
         out.append(f"  ・同じファイルの位置 0x{p['at']:X} にもう 1 枚 "
@@ -1061,7 +1066,7 @@ def check(folder: str, out=sys.stdout) -> int:
                     # 数えていたので、「1 枚では N 字足りない」と言った直後に 2 枚目を
                     # 挙げていて、足し算が合っていなかった
                     img.seek(e["at"])
-                    own = [p for p in tim2_pages(img.read(min(e["len"], FONT_HUNT_HEAD)))
+                    own = [p for p in tim2_pages(img.read(min(e["len"], FONT_OWN_CAP)))
                            if looks_like_a_font_page(p)]
                     cells = sum(font_page_cells(p) for p in own) or font_page_cells(info)
                     if len(own) > 1:
