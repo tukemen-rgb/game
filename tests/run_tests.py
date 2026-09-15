@@ -4413,6 +4413,181 @@ class TestAgainstThePublicSource(unittest.TestCase):
             self.assertEqual(ours, theirs, f"先頭 u32 が {ident} の入れ物で食い違う")
 
 
+class TestTheCitationsPointAtSomethingReal(unittest.TestCase):
+    """文書が挙げる**出典そのもの**を、公開ソースと突き合わせる (#165).
+
+    #107 の検査は公開ソースの**関数を走らせて**答えを比べます。それで形式の
+    読み違いは防げますが、文書の書き方は防げません。docs は随所で
+    「`MSG.py` の `ALT_NEWLINE_FILES`」のように **どのファイルの何** を挙げて
+    います。社長がその名前で公開ソースを開いて**見つからなければ**、そこから先の
+    話は確かめようがありません。
+
+    これは絵空事ではなく、docs/11 自身が 「数字 1 つでも出典を 2 つ以上で
+    突き合わせる」「出典の行番号まで追い直した」と書いている文書です。
+    ところが **その出典の書き方だけは、今まで一度も機械で見ていません**でした。
+
+    実際、この検査を書くために手で確かめたとき、私は 2 回間違えました。
+    `grep ... | head -4` で `reprint.py` の行が画面から落ち「`N_COLUMNS` は
+    別のファイルにある」と早合点し、`BUGGED_LINES` を `[...]` の形で探して
+    「無い」と読みました (本当は `{...}` の辞書)。**手で読むと間違える**という
+    証拠がその場で 2 つ出たので、検査にします。
+
+    公開ソースはリポジトリに**入れていない**ので、置き場が無ければ飛ばします。
+    """
+
+    #: 文書の「`ファイル名` の `名前`」という書き方
+    CITE = r"`([A-Za-z_0-9]+\.(?:py|java|txt|asm))`\s*の\s*`([A-Za-z_0-9]+)`"
+    #: 上の書き方で挙げている出典は、今この数だけある。**減ったら探し方が壊れた合図**
+    CITE_MIN = 4
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.isdir(PUBLIC_SRC):
+            raise unittest.SkipTest(f"公開ソースが無い ({PUBLIC_SRC})")
+
+    @staticmethod
+    def doc_paths() -> list:
+        base = os.path.join(REPO, "docs")
+        return [os.path.join(base, n) for n in sorted(os.listdir(base)) if n.endswith(".md")]
+
+    @classmethod
+    def doc_text(cls) -> str:
+        out = []
+        for path in cls.doc_paths():
+            with open(path, encoding="utf-8") as fh:
+                out.append(fh.read())
+        return "\n".join(out)
+
+    @staticmethod
+    def public(name: str) -> str:
+        with open(os.path.join(PUBLIC_SRC, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_every_named_constant_is_in_the_file_the_doc_names(self):
+        """「`ファイル` の `名前`」と書いたら、その名前がそのファイルに在ること."""
+        import re
+
+        found, bad = [], []
+        for path in self.doc_paths():
+            rel = os.path.relpath(path, REPO)
+            with open(path, encoding="utf-8") as fh:
+                for i, line in enumerate(fh, 1):
+                    for m in re.finditer(self.CITE, line):
+                        fname, name = m.group(1), m.group(2)
+                        found.append(f"{rel}:{i} {fname} の {name}")
+                        src = os.path.join(PUBLIC_SRC, fname)
+                        if not os.path.isfile(src):
+                            bad.append(f"{rel}:{i} 公開ソースに {fname} が無い")
+                        elif not re.search(rf"\b{re.escape(name)}\b", self.public(fname)):
+                            bad.append(f"{rel}:{i} {fname} に {name} という名前が無い")
+        # 出典を 1 つも拾えないまま緑になるのを防ぐ
+        self.assertGreaterEqual(len(found), self.CITE_MIN,
+                                f"出典の書き方を {len(found)} 件しか拾えない (探し方が壊れた)")
+        self.assertEqual(bad, [], "文書の出典が公開ソースに無い:\n  " + "\n  ".join(bad))
+
+    def test_the_font_grid_numbers_are_the_public_sources_own(self):
+        """升目の数字が、挙げた行の**書かれ方そのまま**で公開ソースに在ること.
+
+        #158 の検査は文書どうし・道具との食い違いを見ます。こちらは
+        **その大もと**が本当にそう書いてあるかを見ます。
+        """
+        import boku2
+
+        src = self.public("reprint.py")
+        for line in (f"N_COLUMNS = {boku2.FONT_COLS}", f"CELL_WIDTH = {boku2.FONT_CELL}"):
+            self.assertTrue(line in src,
+                            f"reprint.py に「{line}」の行が無い (出典の書き方が変わった)")
+        # 三つ目の証人。**文字表の各行の幅**が、そのまま 1 行の字数
+        rows = [r for r in self.public("font.txt").split("\n") if r]
+        widths = {len(r) for r in rows}
+        self.assertGreater(len(rows), 60, f"文字表が {len(rows)} 行しかない")
+        self.assertEqual(widths, {boku2.FONT_COLS},
+                         f"文字表の行の幅が {sorted(widths)} (1 行 {boku2.FONT_COLS} 字のはず)")
+
+    def test_the_assembly_note_is_quoted_word_for_word(self):
+        """docs/11 が `asm_notes.txt` から引いた字句が、そのまま在ること.
+
+        書き落とし (`char%17`) も **在ることが前提の話** なので、一緒に見る。
+        向こうが直したら、docs/11 の「書き落とし」の説明は成り立たなくなる。
+        """
+        import re
+
+        notes = self.public("asm_notes.txt")
+        # **文書が引いている字句のほうを集める**。こちら側に写しを持つと、
+        # 写しと出典だけが合っていて文書は野放し、という素通しになる (#150)
+        pat = re.compile(r"`([^`\n]+)`|「([^」\n]+)」")
+        found, bad = [], []
+        for path in self.doc_paths():
+            rel = os.path.relpath(path, REPO)
+            with open(path, encoding="utf-8") as fh:
+                for i, line in enumerate(fh, 1):
+                    if "asm_notes" not in line:
+                        continue
+                    for m in pat.finditer(line):
+                        q = m.group(1) or m.group(2)
+                        if "char" not in q and not re.fullmatch(r"[+*]0x[0-9a-fA-F]+", q):
+                            continue
+                        found.append(f"{rel}:{i} {q}")
+                        if q not in notes:
+                            bad.append(f"{rel}:{i} asm_notes.txt に「{q}」が無い")
+        self.assertGreaterEqual(len(found), 10,
+                                f"引用を {len(found)} 件しか拾えない (探し方が壊れた)")
+        self.assertEqual(bad, [], "文書の引用が asm_notes.txt に無い:\n  " + "\n  ".join(bad))
+        # 書き落とし (`char%17`) は **在ることが前提の話**。向こうが直したら
+        # 文書の「書き落とし」の説明ごと成り立たなくなる
+        self.assertTrue("char%17" in notes, "asm_notes.txt から書き落としが消えた")
+        self.assertTrue("char%0x17" in notes, "asm_notes.txt から正しい側の行が消えた")
+
+    def test_the_lookalike_examples_really_use_the_kanji(self):
+        """docs/04 の「形が同じで別の字」の実例が、公開ソースの綴りどおりであること.
+
+        docs/04 は買い物と虫相撲の語を挙げて「全部 `一` (漢数字)」と言い切って
+        います。**言い切りの根拠は向こうの綴り**なので、1 文字ずつ確かめる。
+        """
+        import re
+
+        src = self.public("MSG.py")
+        with open(os.path.join(REPO, "docs", "04-校正とQA.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        # **言い切っている一文だけ**を見る。文書ぜんぶから鉤括弧を拾うと、
+        # 「ゲーム」のような地の文まで実例に数えてしまう (#151 と同じ形)
+        claim = "**全部 `一` (漢数字)** です"
+        self.assertTrue(claim in doc, f"docs/04 に「{claim}」の言い切りが無い")
+        head = doc[:doc.index(claim)]
+        sentence = head[head.rindex("。") + 1:] if "。" in head else head
+        words = re.findall(r"「([^」\n]{2,20})」", sentence)
+        self.assertGreaterEqual(len(words), 5,
+                                f"言い切った一文から実例を {len(words)} 語しか拾えない: {words}")
+        bad = []
+        for w in words:
+            if "ー" in w:
+                bad.append(f"「{w}」は長音記号 (U+30FC) で書いてある")
+            elif w not in src:
+                bad.append(f"「{w}」が MSG.py に無い (綴りが違う)")
+        self.assertEqual(bad, [], "docs/04 の実例が公開ソースと合わない:\n  " + "\n  ".join(bad))
+
+    def test_the_glyph_numbers_match_the_public_table(self):
+        """docs/04 の字の番号 (`ー` 1589 / `一` 279) が、文字表から出る番号と合うこと."""
+        import re
+
+        import boku2
+
+        with open(os.path.join(REPO, "docs", "04-校正とQA.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        want = {m.group(1): int(m.group(2))
+                for m in re.finditer(r"`(.)` \(番号 (\d+)\)", doc)}
+        self.assertEqual(set(want), {"一", "ー"},
+                         f"番号を書いた字を拾えない: {want}")
+        rows = [r for r in self.public("font.txt").split("\n") if r]
+        for ch, num in sorted(want.items()):
+            spot = [(r, row.find(ch)) for r, row in enumerate(rows) if ch in row]
+            self.assertEqual(len(spot), 1, f"文字表に `{ch}` が {len(spot)} 個ある")
+            r, c = spot[0]
+            self.assertEqual(r * boku2.FONT_COLS + c, num,
+                             f"`{ch}` は {r} 行 {c} 列 = 番号 "
+                             f"{r * boku2.FONT_COLS + c} で、文書の {num} と違う")
+
+
 class TestEveryTagTheExtractorWritesIsUnderstood(unittest.TestCase):
     """取り出す側が書く記号を、測る側が全部知っていること (#105).
 
