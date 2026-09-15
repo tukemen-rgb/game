@@ -19,7 +19,9 @@ import asyncio
 import csv
 import os
 import re
+import subprocess
 import sys
+import tempfile
 
 from playwright.async_api import async_playwright
 
@@ -48,6 +50,11 @@ def plain(text: str) -> str:
     """
     out = re.sub(r"<[^>]*>|\{[^}]*\}", "", text)
     return re.sub(r"\s+", "", out)
+
+
+def doc_commands(steps: str) -> list:
+    """「次の一手」に書いてある `python3 tools/...` を、書いてある順に返す."""
+    return re.findall(r"`(python3 tools/[^`]+)`", steps)
 
 
 def answers() -> dict:
@@ -186,6 +193,87 @@ async def main() -> int:
                     if miss:
                         errors.append(f"手順 4: 読めない会話がある {miss[:2]} "
                                       f"(画面: {talk[-160:]!r})")
+
+        # --- 手順 5: 校正用の TSV をコピーして proofread.py にかける ---
+        # 画面が組み立てた TSV を、そのまま CLI が読めること。
+        # **画面と CLI の継ぎ目**はここだけで、切れていても他の検査は落ちない
+        await select_file(page, "msg", leaf)
+        await page.click('[data-tab="format"]')
+        await page.click("#msgparse")
+        await page.wait_for_timeout(800)
+        tsv = await page.eval_on_selector("#msgtsvtext", "el => el.value") or ""
+        browser_rows = [ln for ln in tsv.strip("\n").split("\n") if ln][1:]
+        print(f"  手順 5: 画面の TSV は {len(browser_rows)} 行")
+        if len(browser_rows) < 2:
+            errors.append(f"手順 5: 画面の TSV が {len(browser_rows)} 行しかない")
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "from_browser.tsv")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(tsv)
+                cmd = [c for c in doc_commands(steps) if "proofread.py" in c]
+                if not cmd:
+                    errors.append("docs/09 の手順 5 から proofread の呼び方を読めない")
+                else:
+                    # 書いてある形のまま。相手のファイル名だけ実物に差し替える
+                    argv = cmd[0].split()
+                    argv = [sys.executable if a == "python3" else
+                            (path if a == "そのファイル" else a) for a in argv]
+                    res = subprocess.run(argv, capture_output=True, text=True, cwd=REPO)
+                    print(f"  手順 5: {' '.join(cmd[0].split()[1:])} → 終了コード "
+                          f"{res.returncode}")
+                    if res.returncode != 0:
+                        errors.append(f"手順 5: 画面の TSV を proofread.py が受け取れない "
+                                      f"(終了コード {res.returncode}) "
+                                      f"{(res.stdout + res.stderr)[-200:]!r}")
+                    elif "行をチェック" not in res.stdout:
+                        errors.append(f"手順 5: 校正の結果が出ない {res.stdout[-200:]!r}")
+
+        # --- 手順 6: 同じ読み方を CLI で一括にかけ、画面と一致すること ---
+        # 手順 6 は「画面で確かめた読み方が合っていたら、全部を一括で」と書いてある。
+        # **画面と CLI が食い違えば、画面で確かめた意味が無くなる**ので、突き合わせる
+        cmds = [c for c in doc_commands(steps) if "boku2.py" in c and "check" not in c]
+        if len(cmds) != 3:
+            errors.append(f"docs/09 の手順 6 から一括のコマンドを 3 本読めない ({len(cmds)})")
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = os.path.join(tmp, "OUT")
+                subs = {
+                    "BOKU2.IDX": os.path.join(SAMPLE, "BOKU2.IDX"),
+                    "BOKU2.IMG": os.path.join(SAMPLE, "BOKU2.IMG"),
+                    "OUT/": out, "MAP/*.*": os.path.join(SAMPLE, "MAP", "*.*"),
+                    "OUT/system/*.msg": os.path.join(out, "system", "*.msg"),
+                    "OUT/maps": os.path.join(out, "maps"),
+                    "OUT/maps/*/1.bin": os.path.join(out, "maps", "*", "1.bin"),
+                    "font.txt": os.path.join(SAMPLE, "font.txt"),
+                    "all.tsv": os.path.join(tmp, "all.tsv"),
+                }
+                bad = False
+                for cmd in cmds:
+                    argv = [sys.executable if a == "python3" else subs.get(a, a)
+                            for a in cmd.split()]
+                    # * を含む語は、道具側が展開する約束 (docs/10)。そのまま渡す
+                    res = subprocess.run(argv, capture_output=True, text=True, cwd=REPO)
+                    if res.returncode != 0:
+                        errors.append(f"手順 6: {cmd} が落ちた (終了コード "
+                                      f"{res.returncode}) {(res.stdout+res.stderr)[-200:]!r}")
+                        bad = True
+                        break
+                if not bad:
+                    with open(subs["all.tsv"], encoding="utf-8") as fh:
+                        cli = fh.read().lstrip("\ufeff")
+                    cli_rows = {ln.split("\t")[0]: ln for ln in cli.split("\n") if ln}
+                    stem2 = leaf.rsplit(".", 1)[0]
+                    mine = [ln for ln in browser_rows if ln.split("\t")[0].startswith(stem2)]
+                    print(f"  手順 6: CLI は {len(cli_rows) - 1} 行。"
+                          f"画面の {len(mine)} 行と突き合わせる")
+                    for line in mine:
+                        rid = line.split("\t")[0]
+                        if rid not in cli_rows:
+                            errors.append(f"手順 6: 画面にある {rid} が CLI の出力に無い")
+                        elif cli_rows[rid] != line:
+                            errors.append(f"手順 6: {rid} が画面と CLI で違う\n"
+                                          f"    画面: {line!r}\n    CLI : {cli_rows[rid]!r}")
 
         await browser.close()
 
