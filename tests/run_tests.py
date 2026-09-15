@@ -4536,7 +4536,9 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
 
         with open(os.path.join(REPO, "docs", "08-コードを読む.md"), encoding="utf-8") as fh:
             doc = fh.read()
-        quoted = re.findall(r"^([0-9A-F]{8})  (\S+)\s+(.*)$", doc, re.M)
+        # 機械語の桁は**あってもなくてもよい**。#164 で docs/08 を道具の出力どおりに
+        # 直したとき、この桁が増えてここが落ちた (命令を機械語と読み違えていた)
+        quoted = re.findall(r"^([0-9A-F]{8})  (?:[0-9A-F]{8}  )?(\S+)\s+(.*)$", doc, re.M)
         self.assertTrue(quoted, "docs/08 に逆アセンブルの例が無い")
         for at, mn, ops in quoted:
             want = (mn, re.split(r"\s{2,}|←", ops)[0].strip())
@@ -6625,6 +6627,108 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
         self.assertGreater(got["ratio"], 6,
                            f"なめらかな波の相関が {got['ratio']:.2f}。"
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
+
+
+class TestTheDisassemblyInTheDocIsReal(unittest.TestCase):
+    """docs/08 が見せている逆アセンブルと `SYSTEM.CNF` が、本物であること (#164).
+
+    #163 で作った網は「コマンドの**すぐ下**」の出力しか見ない。docs/08 は
+    命令を 2 行だけ抜き出して説明に使うので、その網に掛からなかった。
+    しかも docs/08 は **「上の 2 行は練習用の `work/BOOT.ELF` から実際に出る
+    ものです」と言い切って**いた。
+
+    確かめたら、**命令とアドレスは本物だが、行の形は違った**。道具は
+
+        0010003C  03E00008  jr       $ra
+        00100040  27BD0020  addiu    $sp, $sp, 0x20   ← 遅延スロット
+
+    と機械語の桁と自前の注釈を出すのに、文書は桁を省いて注釈を自分の言葉に
+    差し替えていた。**打った人の画面と違う。** 嘘ではないが、
+    「実際に出るもの」と言うなら**そのまま写す**のが筋。
+
+    `SYSTEM.CNF` も 4 行あるのに 3 行しか載せていなかった
+    (`HDDUNITPOWER = NICHDD` が抜けていた)。
+
+    直したので、**道具が出すとおりか**をここで見張る。文書の行は
+    そのまま出力に含まれていなければいけない。
+    """
+
+    #: (docs/08 のブロックの目印, その行を出すコマンド)
+    BLOCKS = [
+        ("0010003C", ["tools/elfdump.py", "work/BOOT.ELF", "--disasm", "--count", "64"]),
+        ("0010000C", ["tools/elfdump.py", "work/BOOT.ELF", "--disasm", "--count", "64"]),
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/BOOT.ELF", "make_elf.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        with open(os.path.join(REPO, "docs", "08-コードを読む.md"), encoding="utf-8") as fh:
+            cls.doc = fh.read()
+
+    @staticmethod
+    def run_tool(argv: list) -> str:
+        # **`run` という名前にしない。** unittest.TestCase.run を
+        # 覆ってしまい、検査そのものが走らなくなる (#164 で踏んだ)
+        import subprocess
+
+        res = subprocess.run([sys.executable, *argv], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError(f"{argv} が落ちた: {(res.stdout + res.stderr)[-200:]}")
+        return res.stdout
+
+    def block_with(self, mark: str) -> list:
+        """目印の行を含む ``` ブロックの中身を行で返す."""
+        import re
+
+        for m in re.finditer(r"```\w*\n(.*?)\n```", self.doc, re.S):
+            if mark in m.group(1):
+                return [ln.rstrip() for ln in m.group(1).splitlines() if ln.strip()]
+        return []
+
+    def test_every_shown_instruction_line_is_printed_verbatim(self):
+        bad = []
+        for mark, argv in self.BLOCKS:
+            lines = self.block_with(mark)
+            self.assertTrue(lines, f"docs/08 に {mark} のブロックが無い (書き方が変わった)")
+            real = self.run_tool(argv)
+            for line in lines:
+                if line not in real:
+                    bad.append(f"docs/08 [{mark}] の行が出力に無い:\n"
+                               f"      文書: {line!r}")
+        self.assertEqual(bad, [], "docs/08 の逆アセンブルが実際と違う:\n  " + "\n  ".join(bad))
+
+    def test_the_delay_slot_note_is_the_tools_own_words(self):
+        """遅延スロットの注釈は、**道具が出す言葉**であること.
+
+        文書が自分で書いた矢印だと、打った人の画面に出ない。
+        """
+        lines = self.block_with("0010003C")
+        self.assertTrue(any("← 遅延スロット" in ln for ln in lines),
+                        f"道具の注釈が載っていない: {lines}")
+        real = self.run_tool(self.BLOCKS[0][1])
+        self.assertTrue("← 遅延スロット" in real, "道具が遅延スロットの注釈を出さなくなった")
+
+    def test_the_boot_config_block_matches_the_real_file(self):
+        """`SYSTEM.CNF` のブロックが、練習用イメージに入る中身と同じであること."""
+        import make_iso
+
+        lines = self.block_with("BOOT2")
+        self.assertTrue(lines, "docs/08 に SYSTEM.CNF のブロックが無い")
+        real = [ln for ln in make_iso.SYSTEM_CNF.replace("\r\n", "\n").split("\n") if ln]
+        self.assertEqual(lines, real,
+                         "docs/08 の SYSTEM.CNF が実物と違う "
+                         f"(文書 {len(lines)} 行 / 実物 {len(real)} 行)")
+
+    def test_the_lui_pair_shows_what_the_tool_resolves(self):
+        """`lui`/`addiu` の組で、**道具が解いた指し先**まで載っていること.
+
+        手で復元する方法だけを教えて、道具がやってくれることを伏せない。
+        """
+        lines = self.block_with("0010000C")
+        self.assertTrue(any("→ 0x" in ln for ln in lines),
+                        f"道具が出す指し先が載っていない: {lines}")
 
 
 class TestTheOutputUnderACommandIsRealOutput(unittest.TestCase):
