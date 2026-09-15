@@ -753,6 +753,89 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_what_was_not_checked_is_counted(self):
+        """**診ていない段**を数えて、報告に必ず出すこと (#175).
+
+        #174 で MAP について 1 件だけ直しましたが、同じ形はほかにもあります。
+        `→` が 1 本も出なければ「問題なし」と言う —— それは「全部を診た結果」では
+        なく「**診た分には**問題が無かった」でしかありません。社長は前者の意味で
+        読みます。何を診ていないかは、毎回数えて出す形にしました。
+
+        練習データは全部そろっているので、**わざと段を欠けさせて**数が動くことを
+        見ます。数えているだけで出していない、という素通しを防ぐため、
+        **欠けさせる前は 0 件であること**も一緒に確かめます。
+        """
+        import re
+        import shutil
+        import struct
+        import tempfile
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+
+        def skipped_of(folder: str) -> list[str]:
+            out = self.check(folder).stdout
+            line = next((l for l in out.splitlines() if l.startswith("診ていない段:")), None)
+            if line is None:
+                return []
+            got = re.search(r"(\d+) 件 \((.+)\)$", line)
+            self.assertTrue(got, f"数と中身を言っていない: {line}")
+            names = got.group(2).split(", ")
+            self.assertEqual(int(got.group(1)), len(names),
+                             f"数と並びが合っていない: {line}")
+            return names
+
+        # 1. そろっているときは 0 件 (要らない心配をさせない)
+        self.assertEqual(skipped_of(self.folder), [],
+                         "全部そろっているのに「診ていない段」が出ている")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 2. font.txt が無ければ、文字表の段が数に入る
+            nofont = os.path.join(tmp, "nofont")
+            shutil.copytree(self.folder, nofont)
+            os.remove(os.path.join(nofont, "font.txt"))
+            names = skipped_of(nofont)
+            self.assertTrue(any("文字表" in n for n in names),
+                            f"font.txt が無いのに文字表を数えていない: {names}")
+
+            # 3. 入れ子の無い索引なら、フォルダの閉じ方も数に入る。
+            #    **2 つ同時に欠けさせて、数が 2 になること**まで見る
+            #    (1 件ずつしか試さないと、足し方が壊れていても気づけない)
+            flat = os.path.join(tmp, "flat")
+            shutil.copytree(self.folder, flat)
+            os.remove(os.path.join(flat, "font.txt"))
+            idx_path = os.path.join(flat, "BOKU2.IDX")
+            with open(idx_path, "rb") as fh:
+                idx = bytearray(fh.read())
+            # フォルダの印 (先頭 u16 の is_dir) を全部落として、入れ子を無くす
+            at = 16
+            while at + 16 <= len(idx) and (idx[at] | (idx[at + 1] << 8)) in (0, 1):
+                struct.pack_into("<H", idx, at, 0)
+                at += 16
+            with open(idx_path, "wb") as fh:
+                fh.write(bytes(idx))
+            names = skipped_of(flat)
+            self.assertGreaterEqual(len(names), 2,
+                                    f"2 つ欠けさせたのに {len(names)} 件しか数えていない: {names}")
+            self.assertTrue(any("フォルダ" in n for n in names),
+                            f"フォルダの閉じ方を数えていない: {names}")
+            # 画面側にも同じ言葉があること (片側にだけ足して忘れない)。
+            # **`skipped.push(…)` の中だけ**を見る。ファイル全体を探すと、
+            # 同じ言い回しを書いた注釈で通ってしまう (#63 の「説明文を拾う」と同じ)
+            with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+                ui = fh.read()
+            pushed = re.findall(r'skipped\.push\("([^"]+)"\)', ui)
+            self.assertGreaterEqual(len(pushed), 2,
+                                    f"画面側が {len(pushed)} 件しか数えていない: {pushed}")
+            for n in names:
+                head = n.split(" (")[0]
+                self.assertTrue(any(p.startswith(head) for p in pushed),
+                                f"画面側が「{head}」を数えていない: {pushed}")
+        del boku2
+
     def test_a_missing_map_is_not_called_a_clean_bill(self):
         """MAP が無いのに「問題なし」で終わらせないこと (#174).
 

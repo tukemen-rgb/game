@@ -977,6 +977,10 @@ def check(folder: str, out=sys.stdout) -> int:
         out.write(s + "\n")
 
     problems = 0
+    # **診ていない段**を数える (#175)。→ が 1 本も出なければ「問題なし」と言って
+    # いたが、それは「全部を診た結果」ではなく「診た分には問題が無かった」でしかない。
+    # 社長は前者の意味で読む。何を診ていないかは、結果の行に必ず出す
+    skipped: list[str] = []
     idx_path = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "boku2.idx"), None)
     img_path = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "boku2.img"), None)
     map_dir = find_map_dir(folder)
@@ -1062,6 +1066,7 @@ def check(folder: str, out=sys.stdout) -> int:
     else:
         # 入れ子が無ければ 2 通りは必ず同じ答えを出す。「一致」と書くと裏付けに見える
         say("フォルダの規則: この索引に入れ子が無いので、2 通りの違いは出ません (試せていない)")
+        skipped.append("フォルダの閉じ方 (この索引に入れ子が無い)")
     msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
     bases = {os.path.basename(e["path"]).lower() for e in entries}
     found = [n for n in TEXT_CONTAINERS if n in bases]
@@ -1148,6 +1153,7 @@ def check(folder: str, out=sys.stdout) -> int:
                    else "。この範囲は全部読める"))
         else:
             say("[文字表] font.txt はまだ無い (作ったらこのフォルダに置くと、ここで出来具合を確かめられる)")
+            skipped.append("文字表の出来具合 (font.txt がまだ無い)")
         # 名前で拾えなければ**形で拾う** (#172)。本体を開いた後でないと中身を見られない
         fonts, by_shape = pick_fonts(img, entries)
         # **どうやって見つけたか**を言う。名前で拾えなかったのに黙って形で拾うと、
@@ -1279,7 +1285,14 @@ def check(folder: str, out=sys.stdout) -> int:
             f" ({folder} の下を 2 段まで探しました)。会話は MAP/ の中にあるので、"
             "ここを診ないと診断の半分が欠けます。吸い出したフォルダを指定し直すか、"
             "MAP が別の場所にあるならその名前ごと報告してください")
-    say("\n== 結果: " + ("問題なし。docs/10 の手順へ" if not problems else f"確認事項 {problems} 件 (上の → の行)。この出力ごと報告してください"))
+    # **別の行にする。** 締めの行に混ぜると、画面と CLI で「文字表」の見方が違う分
+    # (CLI はフォルダの font.txt、画面は貼ってある表) がそのまま締めの行に出てしまい、
+    # 2 つの報告を 1 行ずつ突き合わせられなくなる (tests/e2e/broken.py)
+    if skipped:
+        say()
+        say(f"診ていない段: {len(skipped)} 件 ({', '.join(skipped)})")
+    say("\n== 結果: " + ("問題なし。docs/10 の手順へ" if not problems
+                       else f"確認事項 {problems} 件 (上の → の行)。この出力ごと報告してください"))
     return 1 if problems else 0
 
 

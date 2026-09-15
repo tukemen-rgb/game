@@ -3645,6 +3645,11 @@ async function buildIdxReport() {
   const { idxEntry, dataEntry } = state.idxPair;
   const lines = [];
   let problems = 0;
+  /* **診ていない段**を数える (#175)。→ が 1 本も出なければ「問題なし」と言って
+     いたが、それは「全部を診た結果」ではなく「診た分には問題が無かった」でしかない。
+     社長は前者の意味で読む。何を診ていないかは、結果の行に必ず出す。
+     一括処理 (boku2.py) と**同じ言葉**にしておくこと */
+  const skipped = [];
   const b = state.idxBuf;
   lines.push(`== 診断 (構造探査台): ${idxEntry.name} → ${dataEntry.name}`);
   lines.push(`[索引] ${b.length.toLocaleString()} バイト / 先頭 4 バイト ${[...b.subarray(0, 4)].map((v) => hex(v, 2)).join(" ")}`
@@ -3691,6 +3696,7 @@ async function buildIdxReport() {
       lines.push(tested
         ? `フォルダの規則: 2 通り (stack / flag) で一致 (フォルダの中のファイル ${tested} 件で突き合わせた)`
         : "フォルダの規則: この索引に入れ子が無いので、2 通りの違いは出ません (試せていない)");
+      if (!tested) skipped.push("フォルダの閉じ方 (この索引に入れ子が無い)");
     }
   }
 
@@ -3784,6 +3790,7 @@ async function buildIdxReport() {
             ok: "。この範囲は全部読める" }[verdict]);
     } else {
       lines.push("[文字表] 文字表はまだ貼っていない (「.msg として読む」の欄に貼ってから、もう一度この要約を作ると出来具合が出る)");
+      skipped.push("文字表の出来具合 (文字表をまだ貼っていない)");
     }
   }
   /* 名前で拾えなければ**形で拾う** (#172)。社長の実物では名前が付かず `#0 #1 …` の
@@ -3914,6 +3921,9 @@ async function buildIdxReport() {
       + "会話は MAP/ の中にあるので、ここを診ないと診断の半分が欠けます。"
       + "「フォルダごと読む」で吸い出したフォルダを開き直すか、MAP のファイルも一緒に選んでください");
   }
+  /* **別の行にする。** 締めの行に混ぜると、画面と CLI で「文字表」の見方が違う分が
+     そのまま締めの行に出て、2 つの報告を 1 行ずつ突き合わせられなくなる */
+  if (skipped.length) lines.push(`診ていない段: ${skipped.length} 件 (${skipped.join(", ")})`);
   lines.push("== 結果: " + (problems ? `確認事項 ${problems} 件 (上の → の行)。この出力ごと報告してください` : "問題なし。docs/10 の手順へ"));
   return lines.join("\n");
 }
