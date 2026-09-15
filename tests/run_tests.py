@@ -753,6 +753,55 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_a_missing_map_is_not_called_a_clean_bill(self):
+        """MAP が無いのに「問題なし」で終わらせないこと (#174).
+
+        `check` は `MAP/` を **指定フォルダの直下だけ** で探していました。
+        吸い出しに包みのフォルダが 1 つ増えるだけ (`吸い出し/DATA/MAP`) で
+        「MAP/: 無い」となり、**物語の会話をまるごと診ないまま**
+
+            == 結果: 問題なし。docs/10 の手順へ
+
+        と言って終了コード 0 を返していました。社長はこれを「診た結果、大丈夫」と
+        読みます。この学習の目的そのもの (物語の本文) を、いちばん静かに落とす形でした。
+
+        見るのは 2 つ: **少し下まで探すこと**と、**それでも無ければ言うこと**。
+        """
+        import re
+        import shutil
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. 1 段深い所にある MAP を見つけること
+            nested = os.path.join(tmp, "nested")
+            os.makedirs(nested)
+            for n in ("BOKU2.IDX", "BOKU2.IMG"):
+                shutil.copy(os.path.join(self.folder, n), nested)
+            shutil.copytree(os.path.join(self.folder, "MAP"),
+                            os.path.join(nested, "DATA", "MAP"))
+            res = self.check(nested)
+            self.assertIn("MAP/: あり", res.stdout, f"1 段下の MAP を見つけていない:\n{res.stdout}")
+            self.assertIn("DATA/MAP", res.stdout, "どこで見つけたかを言っていない")
+            # 会話まで診ていること (「あり」と言うだけで中を見ていないのが最悪)
+            talk = next(l for l in res.stdout.splitlines() if l.startswith("[MAP]"))
+            got = re.search(r"会話 ([\d,]+) 行", talk)
+            self.assertTrue(got, f"会話の行数を言っていない: {talk}")
+            self.assertGreater(int(got.group(1).replace(",", "")), 0,
+                               f"MAP は見つけたのに会話を 1 行も読めていない: {talk}")
+            self.assertEqual(res.returncode, 0, f"見つかったのに赤くなっている:\n{res.stdout}")
+
+            # 2. 本当に無ければ、「問題なし」で終わらせないこと
+            bare = os.path.join(tmp, "bare")
+            os.makedirs(bare)
+            for n in ("BOKU2.IDX", "BOKU2.IMG"):
+                shutil.copy(os.path.join(self.folder, n), bare)
+            res = self.check(bare)
+            self.assertNotIn("問題なし", res.stdout,
+                             f"会話を診ていないのに問題なしと言っている:\n{res.stdout[-400:]}")
+            self.assertEqual(res.returncode, 1, "終了コードが 0 のまま")
+            self.assertIn("物語の会話は 1 つも診ていません", res.stdout,
+                          "何を診ていないのかを言っていない")
+
     def test_text_is_found_by_shape_when_names_are_gone(self):
         """名前が無くても、**本文と入れ物**の診断が飛ばないこと (#173).
 

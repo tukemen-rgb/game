@@ -938,6 +938,37 @@ def stopped_here(problems: int, why: str) -> str:
             "。この先 (本体・.msg・フォント・MAP) は診ていません。この出力ごと報告してください")
 
 
+def find_map_dir(folder: str, depth: int = 2) -> str | None:
+    """`MAP` フォルダを、直下だけでなく**少し下まで**探す (#174).
+
+    今までは指定されたフォルダの直下しか見ていなかった。吸い出し方によっては
+    包みのフォルダが 1 つ増える (`吸い出し/DATA/MAP` など) ので、そのとき
+    「MAP/: 無い」となり、**物語の会話をまるごと診ないまま「問題なし」**で
+    終わっていた。
+
+    深さは 2 段まで。それ以上潜ると、無関係なフォルダを拾う危険のほうが大きい。
+    """
+    for d in range(depth + 1):
+        base = [folder]
+        for _ in range(d):
+            nxt = []
+            for b in base:
+                try:
+                    nxt += [os.path.join(b, n) for n in sorted(os.listdir(b))
+                            if os.path.isdir(os.path.join(b, n))]
+                except OSError:
+                    continue
+            base = nxt[:16]          # 枝が増えすぎないように
+        for b in base:
+            try:
+                for n in sorted(os.listdir(b)):
+                    if n.lower() == "map" and os.path.isdir(os.path.join(b, n)):
+                        return os.path.join(b, n)
+            except OSError:
+                continue
+    return None
+
+
 def check(folder: str, out=sys.stdout) -> int:
     """吸い出したフォルダを一通り診て、報告用の要約を出す (ゲームの本文は出さない).
 
@@ -948,9 +979,12 @@ def check(folder: str, out=sys.stdout) -> int:
     problems = 0
     idx_path = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "boku2.idx"), None)
     img_path = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "boku2.img"), None)
-    map_dir = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "map"), None)
+    map_dir = find_map_dir(folder)
     say(f"== 診断: {folder}")
-    say(f"BOKU2.IDX: {'あり' if idx_path else '無い'} / BOKU2.IMG: {'あり' if img_path else '無い'} / MAP/: {'あり' if map_dir else '無い'}")
+    say(f"BOKU2.IDX: {'あり' if idx_path else '無い'} / BOKU2.IMG: {'あり' if img_path else '無い'}"
+        + " / MAP/: " + ("あり" if map_dir else "無い")
+        + (f" ({os.path.relpath(map_dir, folder)})"
+           if map_dir and os.path.dirname(os.path.relpath(map_dir, folder)) else ""))
     if not (idx_path and img_path):
         say("→ 索引と本体が揃っていません。吸い出したフォルダの直下を指定してください")
         # よくある間違いを 2 つ見分ける: ISO のまま / 一段深いフォルダに入っている
@@ -1232,6 +1266,19 @@ def check(folder: str, out=sys.stdout) -> int:
             say("→ 入れ物として読めないファイルの例 (名前: 先頭 16 バイト):")
             for name, head in bad_examples[:5]:
                 say(f"   {name}: {head}")
+    # **診ていない段があるなら、「問題なし」で終わらせない** (#174)。
+    # MAP が見つからないと物語の会話をまるごと診ないのに、終了コード 0 で
+    # 「docs/10 の手順へ」と言っていた。社長は「診た結果、大丈夫」と読む
+    if not map_dir:
+        problems += 1
+        say()
+        # 矢印は文字列の先頭に置くこと。見張り
+        # (test_every_diagnosis_arrow_is_explained) は矢印で始まる文字列だけを
+        # 拾うので、改行を先に付けると数え落とされる
+        say("→ MAP が無いので、**物語の会話は 1 つも診ていません**"
+            f" ({folder} の下を 2 段まで探しました)。会話は MAP/ の中にあるので、"
+            "ここを診ないと診断の半分が欠けます。吸い出したフォルダを指定し直すか、"
+            "MAP が別の場所にあるならその名前ごと報告してください")
     say("\n== 結果: " + ("問題なし。docs/10 の手順へ" if not problems else f"確認事項 {problems} 件 (上の → の行)。この出力ごと報告してください"))
     return 1 if problems else 0
 

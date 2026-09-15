@@ -286,6 +286,29 @@ async def main():
         print(f"TSV 突き合わせ (部品も含む): {compared} 行")
         if compared < 16:
             errors.append(f"突き合わせた行が {compared} 行しかない (素通りの疑い)")
+        # MAP を渡さないときは、**「問題なし」で終わらせないこと** (#174)。
+        # 物語の会話をまるごと診ていないのに「診た結果、大丈夫」と読める終わり方を
+        # していた。CLI 側は tests/run_tests.py が見ているので、ここは画面の分
+        p2 = await b.new_page()
+        p2.on("pageerror", lambda e: errors.append(str(e)))
+        await p2.goto("file://" + REPO + "/web/index.html")
+        await p2.set_input_files("#fileinput", [os.path.join(S, "BOKU2.IDX"),
+                                                os.path.join(S, "BOKU2.IMG")])
+        await p2.wait_for_selector("#shell:not([hidden])")
+        await p2.click('[data-tab="index"]')
+        await p2.click("#idxrun")
+        await p2.wait_for_selector("#idxpreview button.btn.primary")
+        await p2.click("#idxreport")
+        await p2.wait_for_function(
+            "document.querySelector('#idxreporttext').value.includes('== 結果')", timeout=20000)
+        nomap = await p2.input_value("#idxreporttext")
+        await p2.close()
+        print("MAP なしの結果:", nomap.strip().split("\n")[-1][:80])
+        if "問題なし" in nomap:
+            errors.append("MAP を渡していないのに「問題なし」と言っている")
+        if "物語の会話は 1 つも診ていません" not in nomap:
+            errors.append(f"何を診ていないのかを言っていない: {nomap[-200:]!r}")
+
         print("idxnote:", note); print("dirs:", dirs); print("names:", names[:12])
         print("msg note:", note_msg); print("font:", "TIM2" in fmt, "位置 0x80" in fmt)
         print("menu:", menu); print("talk:", talk); print("errors:", errors)
