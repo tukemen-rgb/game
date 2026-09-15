@@ -6620,6 +6620,187 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
 
 
+class TestThePeriodGuessIsCounted(unittest.TestCase):
+    """繰り返しの周期の見当を、正解の分かる 8 通りで数える (#154).
+
+    「タイル」タブの **「見当を付ける」** ボタンは `guessPeriods` の **1 位**を
+    1 タイルのバイト数として使っていた。数えたら **1/8**。外し方が 2 つあった。
+
+    1. **周期が無くても 1 位が出る。** 並べ替えれば必ず先頭は決まるので、
+       乱数でも「繰り返しの周期が強い順: 96 バイト …」と出ていた。
+       候補どうしの差は 1% 程度 —— 並びは中身ではなく誤差だった。
+       #148 の「黙って 0 件」や #150 の「当てはめた結果」と同じ形で、
+       **根拠が無いのに結論だけ出る。**
+    2. **本物の周期があっても、その倍数が同じ点を取る。** 8 バイト周期のデータでは
+       16・32・64… も同じだけ合うので、1 位はしばしば 128 や 256 になる。
+       それを 1 タイルの大きさとして使うと、**絵が何枚も 1 枚に潰れて**出る。
+
+    直したのは 2 段。**強さ**で「そもそも周期があるか」を見て、あるときは
+    **自分の倍数もすべて良い側に入っている最小の刻み**を採る。8/8 になった。
+    """
+
+    #: (名前, 正解の刻み。0 は「周期なしと言うのが正解」, 作り方の JS)
+    CASES = [
+        ("合成タイル 8 バイト", 8, "glyphs(8)"),
+        ("合成タイル 16 バイト", 16, "glyphs(16)"),
+        ("合成タイル 32 バイト", 32, "glyphs(32)"),
+        ("合成タイル 64 バイト", 64, "glyphs(64)"),
+        ("合成タイル 128 バイト", 128, "glyphs(128)"),
+        ("FONT.BIN (実物)", 32, "new Uint8Array(fs.readFileSync('work/FONT.BIN'))"),
+        ("乱数", 0, "noise(32768)"),
+        ("ゼロ埋め", 0, "new Uint8Array(32768)"),
+    ]
+
+    #: 作り方。**1 タイルごとに絵が違う**のが肝 (同じ絵を並べると、どんな見方でも
+    #: 当たってしまって検査にならない)。端に余白があるところだけが共通
+    MAKE_JS = (
+        "function noise(n,seed){let r=(seed||1)>>>0;const o=new Uint8Array(n);"
+        "for(let i=0;i<n;i++){r=(Math.imul(r,1103515245)+12345)>>>0;o[i]=(r>>>16)&0xFF;}"
+        "return o;}"
+        "function glyphs(per,n){n=n||256;let r=7>>>0;"
+        "const rnd=()=>{r=(Math.imul(r,1103515245)+12345)>>>0;return (r>>>16)&0xFF;};"
+        "const o=new Uint8Array(per*n);"
+        "for(let t=0;t<n;t++)for(let i=0;i<per;i++){"
+        "const e=(i<per/8||i>=per-per/8);o[t*per+i]=e?0:rnd();}return o;}"
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/FONT.BIN", "make_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+
+    @classmethod
+    def measure(cls, how: str) -> dict:
+        """web/app.js の bestPeriod と guessPeriods をそのまま動かす."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('function guessPeriods');"
+            "const e=s.indexOf('/* ======================= 4. 構造の推定');"
+            "if(a<0||e<0){console.error('no period funcs');process.exit(2);}"
+            "const m=new Function(s.slice(a,e)+"
+            "'\\nreturn {guessPeriods,bestPeriod,PERIOD_MIN_STRENGTH};')();"
+            + cls.MAKE_JS
+            + f"const v={how};"
+            "const got=m.bestPeriod(v);const raw=m.guessPeriods(v);"
+            "console.log(JSON.stringify({lag:got.lag,strength:got.strength,"
+            "raw:raw.length?raw[0].lag:0,cut:m.PERIOD_MIN_STRENGTH}));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("測れない: " + res.stdout + res.stderr)
+        return json.loads(res.stdout)
+
+    def doc_rows(self) -> list:
+        """docs/07 の表を (データ, 正解, 強さ, 直す前, 直したあと) で返す."""
+        with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        head = "### 繰り返しの周期の見当"
+        self.assertTrue(head in doc, "docs/07 に周期の見当の節が無い")
+        body = doc.split(head, 1)[1].split("\n###", 1)[0]
+        out = []
+        for line in body.split("\n"):
+            if not line.startswith("|"):
+                if out:
+                    break
+                continue
+            cells = [c.strip().strip("*").replace("`", "") for c in
+                     line.strip().strip("|").split("|")]
+            if len(cells) != 5 or "---" in cells[1] or cells[0] == "データ":
+                continue
+            out.append(cells)
+        return out
+
+    def test_every_case_is_read_correctly(self):
+        wrong = []
+        for name, want, how in self.CASES:
+            got = self.measure(how)
+            if got["lag"] != want:
+                wrong.append(f"{name}: 正解 {want} / 見当 {got['lag']} "
+                             f"(強さ {got['strength']:.2f})")
+        self.assertEqual(wrong, [], "周期の見当が外れている:\n  " + "\n  ".join(wrong))
+
+    def test_the_table_in_the_doc_is_measured(self):
+        """docs/07 の表を行ごとに測り直す.
+
+        #154 で壊して確かめていて気づいた —— **表の数字を誰も読んでいなかった**。
+        「直したあと」の欄を書き換えても検査が通ってしまう。#147 で学んだのと
+        同じことを、書いた当日にやりかけていた。
+        """
+        rows = self.doc_rows()
+        self.assertEqual(len(rows), len(self.CASES),
+                         f"docs/07 の表から {len(rows)} 行しか読めない")
+        by_name = {c[0]: c for c in self.CASES}
+        for name, want, strength, before, after in rows:
+            self.assertIn(name, by_name, f"docs/07 の「{name}」に対応する例がこの検査に無い")
+            _n, real_want, how = by_name[name]
+            said_want = 0 if want == "周期なし" else int(want)
+            self.assertEqual(said_want, real_want,
+                             f"{name}: docs/07 の正解が {want} (この検査は {real_want})")
+            got = self.measure(how)
+            self.assertEqual(round(got["strength"], 2), float(strength),
+                             f"{name}: 強さが {got['strength']:.2f} (docs/07 は {strength})")
+            self.assertEqual(got["raw"], int(before),
+                             f"{name}: 1 位が {got['raw']} (docs/07 は {before})")
+            said_after = 0 if after == "周期なし" else int(after)
+            self.assertEqual(got["lag"], said_after,
+                             f"{name}: 見当が {got['lag']} (docs/07 は {after})")
+
+    def test_the_old_way_really_was_worse(self):
+        """直す前のやり方 (1 位をそのまま採る) では当たらなかったこと.
+
+        「直して良くなった」と言うには、**直す前が悪かったこと**も測っておく。
+        ここが当たるようになったら、直しはもう要らないということ。
+        """
+        hits = 0
+        for _name, want, how in self.CASES:
+            got = self.measure(how)
+            if want and got["raw"] == want:
+                hits += 1
+        self.assertLessEqual(hits, 2,
+                             f"1 位をそのまま採る昔のやり方が {hits} 件当たる。"
+                             f"直しの前提が変わったので #154 の言い分を見直すこと")
+
+    def test_no_period_is_said_plainly_instead_of_ranking_noise(self):
+        """周期が無いものには 0 を返すこと (誤差の並びを順位として出さない)."""
+        for name, want, how in self.CASES:
+            if want:
+                continue
+            got = self.measure(how)
+            self.assertEqual(got["lag"], 0, f"{name} に周期 {got['lag']} を出した")
+            self.assertLess(got["strength"], got["cut"],
+                            f"{name} の強さが {got['strength']:.3f} (しきい値未満のはず)")
+
+    def test_a_real_period_is_far_above_the_threshold(self):
+        """本物の周期は、しきい値すれすれではなくはっきり上にあること.
+
+        すれすれなら、しきい値をいじっただけで答えが変わる = 測れていない。
+        """
+        weak = []
+        for name, want, how in self.CASES:
+            if not want:
+                continue
+            got = self.measure(how)
+            if got["strength"] < got["cut"] * 1.5:
+                weak.append(f"{name}: 強さ {got['strength']:.2f} (しきい値 {got['cut']})")
+        self.assertEqual(weak, [], "しきい値すれすれの例がある:\n  " + "\n  ".join(weak))
+
+    def test_the_screen_says_when_it_cannot_tell(self):
+        """画面側が「見当を付けられなかった」と言うようになっていること."""
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        for word in ("はっきりした繰り返しは見つかりませんでした",
+                     "はっきりした繰り返しが見つからないので、見当を付けられませんでした"):
+            self.assertTrue(word in js, f"web/app.js に「{word}」が無い")
+
+
 class TestTheKindGuessIsCountedOnKnownFiles(unittest.TestCase):
     """名前の無いファイルへの見当を、**正解の分かる 20 件**で数える (#153).
 

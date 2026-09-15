@@ -228,6 +228,45 @@ function guessPeriods(b, candidates = [2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256
   return scores;
 }
 
+/**
+ * 繰り返しの周期を 1 つ選ぶ。選べなければ `lag: 0` (#154)。
+ *
+ * `guessPeriods` の 1 位をそのまま答えにしていたので、**2 つの外し方**をしていました。
+ *
+ * 1. **周期が無くても 1 位が出る。** 乱数でも並べ替えれば必ず先頭が決まるので、
+ *    画面には「繰り返しの周期が強い順: 96 バイト …」と出ていました。
+ *    候補どうしの差は 1% 程度 —— 並びは中身ではなく誤差です。
+ * 2. **本物の周期があっても、その倍数が同じ点を取る。** 8 バイト周期のデータでは
+ *    16・32・64… も同じだけ合うので、1 位はしばしば 128 や 256。
+ *    それを 1 タイルの大きさとして使うと、**絵が何枚も 1 枚に潰れて**出ます。
+ *
+ * そこで 2 段にしました。
+ *
+ * - **強さ** = (いちばん悪い点 − いちばん良い点) ÷ いちばん悪い点。
+ *   これが小さければ「どの刻みでも同じ」= 周期なし。乱数で 0.01、ゼロ埋めで 0.00、
+ *   本物のタイルで 0.29〜0.43 と、はっきり分かれます。
+ * - **倍数も合うことを求める。** 本物の周期 P なら 2P・3P… も合うはず。
+ *   良い側に入った刻みのうち、**自分の倍数がすべて良い側に入っている最小のもの**を
+ *   採ります。見つからなければ 1 位に戻ります (`FONT.BIN` がこの道で 32 になります)。
+ */
+const PERIOD_MIN_STRENGTH = 0.15;
+
+function bestPeriod(b) {
+  const scores = guessPeriods(b);
+  if (scores.length < 3) return { lag: 0, strength: 0, scores };
+  const best = scores[0].score, worst = scores[scores.length - 1].score;
+  const strength = worst > 0 ? (worst - best) / worst : 0;
+  if (strength < PERIOD_MIN_STRENGTH) return { lag: 0, strength, scores };
+  const cut = best + 0.25 * (worst - best);
+  const near = scores.filter((s) => s.score <= cut).map((s) => s.lag).sort((x, y) => x - y);
+  for (const lag of near) {
+    if (scores.every((s) => s.lag <= lag || s.lag % lag !== 0 || s.score <= cut)) {
+      return { lag, strength, scores };
+    }
+  }
+  return { lag: scores[0].lag, strength, scores };
+}
+
 /* ======================= 4. 構造の推定 ======================= */
 
 /** よく使われる文字の範囲。乱数がたまたま Shift-JIS に見えるだけの並びを弾く */
@@ -2992,20 +3031,33 @@ function renderTiles() {
     drawTiles(cv, { off, bpp, tw, th, cols, zoom, maxTiles: 2048 });
   cv.style.width = cv.width + "px";      /* タイルタブは実寸で見せる */
 
-  const periods = guessPeriods(state.buf.subarray(off, off + 64 * 1024));
-  const top = periods.slice(0, 3).map((p) => `${p.lag} バイト`).join(" / ");
+  /* 並べた順をそのまま「強い順」と見せない。どの刻みでも同じなら、その旨を言う (#154) */
+  const found = bestPeriod(state.buf.subarray(off, off + 64 * 1024));
   $("tilehint").textContent =
     `${nTiles} タイル (1 タイル ${bytesPerTile} バイト)。`
-    + (top ? `  繰り返しの周期が強い順: ${top}` : "");
+    + (found.lag
+      ? `  繰り返しの周期は ${found.lag} バイトとみられます`
+        + ` (強さ ${found.strength.toFixed(2)})。倍数も同じだけ合うので、`
+        + `絵が潰れて見えるときは半分を試してください`
+      : "  はっきりした繰り返しは見つかりませんでした"
+        + ` (どの刻みでも同じくらい。強さ ${found.strength.toFixed(2)})`);
 }
 for (const id of ["tileoff", "tilebpp", "tilew", "tileh", "tilecols", "tilezoom"]) {
   $(id).addEventListener("change", renderTiles);
 }
 $("tileguess").addEventListener("click", () => {
   const off = parseOffset($("tileoff").value, 0);
-  const periods = guessPeriods(state.buf.subarray(off, off + 64 * 1024));
-  if (!periods.length) return;
-  const shape = guessTileShape(state.buf, off, 8192, periods[0].lag);
+  const found = bestPeriod(state.buf.subarray(off, off + 64 * 1024));
+  if (!found.lag) {
+    /* 周期が読めないのに数字を入れると、**当てずっぽうを設定として見せる**ことになる。
+       入れずに理由を言う (#154) */
+    $("tilehint").textContent =
+      "はっきりした繰り返しが見つからないので、見当を付けられませんでした"
+      + ` (どの刻みでも同じくらい。強さ ${found.strength.toFixed(2)})。`
+      + "1 行の長さを 16・32・64・128 と手で試してみてください";
+    return;
+  }
+  const shape = guessTileShape(state.buf, off, 8192, found.lag);
   $("tilebpp").value = String(shape.bpp);
   $("tilew").value = String(shape.tw);
   $("tileh").value = String(shape.th);
