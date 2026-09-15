@@ -753,6 +753,66 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_text_is_found_by_shape_when_names_are_gone(self):
+        """名前が無くても、**本文と入れ物**の診断が飛ばないこと (#173).
+
+        #172 でフォントを形で拾えるようにしました。ところが同じ吸い出しで
+        `.msg` と文言の入れ物は名前だけで選んだままで、報告はこうなっていました:
+
+            .msg: 0 件 (例: )
+            [入れ物] 文言の入れ物: あり なし / 見つからない diary.bin, …
+            [文字表] … 文字番号を使っている行が無いので、文字表は試せていない
+
+        **0 件と言うだけで、→ も出ない。** 社長には「この作品に本文が無い」のか
+        「名前が読めていないだけ」なのか区別できません。文字表の出来具合も
+        まるごと試せなくなります。
+
+        `TestDamageDrill` の `allnames` は「中身の形」で照合しますが、それは
+        **フォントの行でも通ってしまう** (#172 の言葉)。ここは 3 つの道を
+        1 つずつ見ます。
+        """
+        import re
+        import shutil
+        import tempfile
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+            import make_boku2_sample
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            shutil.copytree(self.folder, folder)
+            make_boku2_sample.damage(folder, "allnames")
+            with open(os.path.join(folder, "BOKU2.IDX"), "rb") as fh:
+                idx = fh.read()
+            entries = boku2.read_dfi(idx, os.path.getsize(os.path.join(folder, "BOKU2.IMG")))
+            # 前提: 名前が 1 つも残っていないこと
+            self.assertEqual([e for e in entries if not e["path"].startswith("#")], [],
+                             "名前が残っている (この検査は形の探索を試せていない)")
+
+            out = self.check(folder).stdout
+            lines = {l.split(":")[0].strip(): l for l in out.splitlines()}
+            # 1. .msg —— 0 件のままにしない
+            msg_line = next(l for l in out.splitlines() if l.startswith(".msg:"))
+            self.assertNotIn(".msg: 0 件", msg_line, f"本文を 1 つも拾えていない: {msg_line}")
+            self.assertIn("中身の形", msg_line, f"形で拾ったと言っていない: {msg_line}")
+            # 2. 入れ物 —— 「あり なし」で終わらせない
+            box_line = next(l for l in out.splitlines() if l.startswith("[入れ物]"))
+            self.assertNotIn("あり なし", box_line, f"日本語として壊れている: {box_line}")
+            self.assertIn("中身の形", box_line, f"形で探したと言っていない: {box_line}")
+            # **「0 件」でも言葉は出る**ので、数も見る (これが無いと探索を外しても緑)
+            got = re.search(r"で探すと (\d+) 件", box_line)
+            self.assertTrue(got, f"探した件数を言っていない: {box_line}")
+            self.assertGreater(int(got.group(1)), 0, f"入れ物を 1 つも拾えていない: {box_line}")
+            # 3. 文字表 —— 本文が拾えたので、出来具合まで進むこと
+            table_line = next(l for l in out.splitlines() if l.startswith("[文字表]"))
+            self.assertNotIn("試せていない", table_line,
+                             f"本文を拾えたのに文字表を試していない: {table_line}")
+            del lines
+
     def test_nothing_font_like_is_said_not_skipped(self):
         """フォントらしい画像が 1 つも無ければ、**黙らずに言う** (#172)."""
         sys.path.insert(0, os.path.join(REPO, "tools"))
@@ -3659,6 +3719,9 @@ class TestDamageDrill(unittest.TestCase):
     EXPECT = {
         "idx": "DFI でないので",
         "name": "名前が付かないファイルが多い",
+        # 名前が 1 つも付かない吸い出し。**形で探す道** (#172・#173) が通ること。
+        # ここが黙って飛ぶと、本文もフォントも診られないまま最後まで進んでしまう
+        "allnames": "中身の形",
         "msg": "読めない .msg の例: system/system.msg",
         "font": "TIM2 として読めません",
         "map": "入れ物として読めないファイルの例",

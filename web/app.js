@@ -3694,13 +3694,52 @@ async function buildIdxReport() {
     }
   }
 
-  const msgs = items.filter((it) => /\.msg$/i.test(it.name));
-  lines.push(`.msg: ${msgs.length} 件 (例: ${msgs.slice(0, 4).map((it) => it.base || it.name).join(", ")})`);
+  /* 名前で 1 つも拾えなければ**中身の形**で探す (#173)。名前が付かない索引でも、
+     本文と入れ物の診断が黙って飛ばないように (#172 をフォントから広げた)。
+     一括処理 (boku2.py の pick_by_shape) と同じ順・同じ言葉 */
+  const pickByShape = async (test, limit = 50) => {
+    const out = [];
+    for (const it of items.slice(0, FONT_HUNT_FILES)) {
+      if (it.len < 16) continue;
+      const head = await readRange(dataEntry.file, dataEntry.offset + it.at,
+                                   Math.min(it.len, FONT_HUNT_HEAD));
+      if (test(head)) out.push(it);
+      if (out.length >= limit) break;
+    }
+    return out;
+  };
+  let msgs = items.filter((it) => /\.msg$/i.test(it.name));
+  let msgByShape = false;
+  if (!msgs.length) {
+    msgByShape = true;
+    msgs = await pickByShape((b) => !!detectBokuMsg(b));
+  }
+  lines.push(`.msg: ${msgs.length} 件`
+    + (msgs.length ? ` (例: ${msgs.slice(0, 4).map((it) => it.base || it.name).join(", ")})` : "")
+    + (msgByShape && msgs.length ? "。名前で拾えなかったので**中身の形**で探しました" : ""));
   /* 文言の入れ物 (公開ソースの一覧): 日記・保存画面・出来事・釣り */
   const CONTAINERS = TEXT_CONTAINERS;
   const bases = new Set(items.map((it) => (it.base || it.name).toLowerCase()));
   const found = CONTAINERS.filter((n) => bases.has(n)), missing = CONTAINERS.filter((n) => !bases.has(n));
-  lines.push(`[入れ物] 文言の入れ物: あり ${found.join(", ") || "なし"}` + (missing.length ? ` / 見つからない ${missing.join(", ")}` : ""));
+  let shapedContainers = [], containerByShape = false;
+  if (!found.length) {
+    containerByShape = true;
+    shapedContainers = await pickByShape((b) => !!parseBokuMap(b));
+  }
+  if (found.length || !containerByShape) {
+    lines.push(`[入れ物] 文言の入れ物: あり ${found.join(", ") || "なし"}` + (missing.length ? ` / 見つからない ${missing.join(", ")}` : ""));
+  } else {
+    lines.push(`[入れ物] 名前で拾える文言の入れ物はありません (${CONTAINERS.join(", ")})。`
+      + `**中身の形**で探すと ${shapedContainers.length} 件`
+      + (shapedContainers.length
+        ? ` (例: ${shapedContainers.slice(0, 4).map((it) => it.name).join(", ")})` : ""));
+  }
+  if (!msgs.length && !shapedContainers.length) {
+    problems++;
+    lines.push("→ 本文の入っていそうなファイルが 1 つも見つかりません。"
+      + `名前 (\`.msg\` / ${CONTAINERS.join(", ")}) でも、中身の形でも `
+      + `${Math.min(items.length, FONT_HUNT_FILES)} 個まで探しました。この行ごと報告してください`);
+  }
   let okMsg = 0, badMsg = null, lenOk = 0, lenNg = 0;
   const usedHere = new Set();                                   /* 読めた .msg で使われている文字番号 (文字表の出来具合を診る) */
   const sjisDecode = DECODERS.sjis ? (x) => DECODERS.sjis.decode(x) : null;
@@ -3720,7 +3759,12 @@ async function buildIdxReport() {
     if (lenOk || lenNg) {
       /* 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が実物でも本当に長さかを見る行 */
       lines.push(`  位置表の長さの欄: 合う ${lenOk} 件 / 合わない ${lenNg} 件`);
-      if (lenNg) {
+      if (lenNg && msgByShape) {
+        /* **形で拾ったときは、選び方そのものが当て推量**なので → にしない (#173) */
+        lines.push(`  位置表の長さの欄: 合わない ${lenNg} 件。`
+          + "ただし**名前ではなく形で拾った**ので、本文でないものが混ざっています。"
+          + "名前が読めるようになってから見直してください");
+      } else if (lenNg) {
         problems++;
         lines.push(`→ 位置表の長さの欄が ${lenNg} 件合いません。8 バイト刻みの後ろ 4 バイトが`
           + "その項目のバイト長だ、という読みがこの作品では違うかもしれません"

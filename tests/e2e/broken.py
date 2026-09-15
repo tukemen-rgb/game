@@ -13,6 +13,9 @@ from common import REPO, WORK, launch  # noqa: E402
 
 EXPECT = {
     "name": "名前が付かないファイルが多い",
+    # 名前が 1 つも付かない吸い出し。**形で探す道** (#172・#173) が通ること。
+    # ここが黙って飛ぶと、本文もフォントも診断されないまま「問題なし」になる
+    "allnames": "中身の形",
     "msg": "読めない .msg の例: system/system.msg",
     "font": "TIM2 として読めません",
     "map": "入れ物として読めないファイルの例",
@@ -133,7 +136,7 @@ async def main():
     async with async_playwright() as p:
         b = await launch(p)
         errors = []
-        for kind in ["ok", "idx", "name", "msg", "font", "map"]:
+        for kind in ["ok", "idx", "name", "allnames", "msg", "font", "map"]:
             await run_kind(b, kind, errors)
         await b.close()
         print("errors:", errors)

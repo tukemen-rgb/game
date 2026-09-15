@@ -283,6 +283,7 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
 DAMAGE = {
     "idx":  "索引の先頭 4 バイトを壊す (DFI ではなくなる → 索引が読めない)",
     "name": "索引の名前の置き場を壊す (名前が付かないファイルが多い)",
+    "allnames": "索引の名前を最後まで壊す (名前が 1 つも付かない → 形で探す道)",
     "msg":  "system.msg の先頭を壊す (.msg が読めない)",
     "font": "bk_font.tms の TIM2 の目印を壊す (フォントが TIM2 として読めない)",
     "map":  "MAP の 1 つを壊す (入れ物として読めない)",
@@ -307,6 +308,16 @@ def damage(out_dir: str, kind: str) -> str:
             fh.seek(rec_end)
             fh.write(b"\xff" * 64)
         return f"BOKU2.IDX の名前の置き場 (0x{rec_end:X} から 64 バイト) を FF で埋めた"
+    if kind == "allnames":
+        # 名前を**最後まで**潰す。`name` は 64 バイトだけなので名前が残り、
+        # 「名前が 1 つも付かない」ときの道 (#172・#173 の形の探索) に届かない
+        rec_end = 16
+        while rec_end + 16 <= len(idx) and (idx[rec_end] | (idx[rec_end + 1] << 8)) in (0, 1):
+            rec_end += 16
+        with open(idx_path, "r+b") as fh:
+            fh.seek(rec_end)
+            fh.write(b"\xff" * (len(idx) - rec_end))
+        return f"BOKU2.IDX の名前の置き場 (0x{rec_end:X} から最後まで) を FF で埋めた"
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import boku2
     entries = boku2.read_dfi(idx, os.path.getsize(img_path))

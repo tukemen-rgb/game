@@ -850,6 +850,29 @@ def pick_fonts(img, entries: list[dict]) -> tuple[list[dict], bool]:
     return found, True
 
 
+def pick_by_shape(img, entries: list[dict], test, limit: int = 50) -> list[dict]:
+    """名前ではなく**中身**で選ぶ (#173).
+
+    `pick_fonts` (#172) と同じ考え方を、本文と入れ物にも広げる。索引は 1951 個
+    あるので、1 つあたりは先頭だけを読み、見つかった数で打ち切る。
+
+    @param test 読めたら真を返す関数 (bytes -> bool)
+    """
+    out = []
+    for e in entries[:FONT_HUNT_FILES]:
+        if e["len"] < 16:
+            continue
+        img.seek(e["at"])
+        try:
+            if test(img.read(min(e["len"], FONT_HUNT_HEAD))):
+                out.append(e)
+        except (ValueError, struct.error, IndexError):
+            continue
+        if len(out) >= limit:
+            break
+    return out
+
+
 def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
                    known: set | None = None) -> list[str]:
     """文字表の続きが入っていそうな画像を、**同じ吸い出しの中から**挙げる (#168).
@@ -1006,15 +1029,39 @@ def check(folder: str, out=sys.stdout) -> int:
         # 入れ子が無ければ 2 通りは必ず同じ答えを出す。「一致」と書くと裏付けに見える
         say("フォルダの規則: この索引に入れ子が無いので、2 通りの違いは出ません (試せていない)")
     msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
-    say(f".msg: {len(msgs)} 件 (例: {', '.join(os.path.basename(e['path']) for e in msgs[:4])})")
     bases = {os.path.basename(e["path"]).lower() for e in entries}
     found = [n for n in TEXT_CONTAINERS if n in bases]
     missing = [n for n in TEXT_CONTAINERS if n not in bases]
-    say(f"[入れ物] 文言の入れ物: あり {', '.join(found) or 'なし'}"
-        + (f" / 見つからない {', '.join(missing)}" if missing else ""))
 
     used_here: set[int] = set()
     with open(img_path, "rb") as img:
+        # 名前で 1 つも拾えなければ**中身の形**で探す (#173)。名前が付かない索引でも、
+        # 本文と入れ物の診断が黙って飛ばないように (#172 をフォントから広げた)
+        msg_by_shape = container_by_shape = False
+        if not msgs:
+            msg_by_shape = True
+            msgs = pick_by_shape(img, entries, lambda b: bool(pick_msg(b, {})))
+        say(f".msg: {len(msgs)} 件"
+            + (f" (例: {', '.join(os.path.basename(e['path']) for e in msgs[:4])})" if msgs else "")
+            + ("。名前で拾えなかったので**中身の形**で探しました" if msg_by_shape and msgs else ""))
+        shaped_containers: list[dict] = []
+        if not found:
+            container_by_shape = True
+            shaped_containers = pick_by_shape(img, entries, lambda b: parse_map(b) is not None)
+        if found or not container_by_shape:
+            say(f"[入れ物] 文言の入れ物: あり {', '.join(found) or 'なし'}"
+                + (f" / 見つからない {', '.join(missing)}" if missing else ""))
+        else:
+            say(f"[入れ物] 名前で拾える文言の入れ物はありません ({', '.join(TEXT_CONTAINERS)})。"
+                f"**中身の形**で探すと {len(shaped_containers)} 件"
+                + (f" (例: {', '.join(e['path'] for e in shaped_containers[:4])})"
+                   if shaped_containers else ""))
+        if not msgs and not shaped_containers:
+            problems += 1
+            say("→ 本文の入っていそうなファイルが 1 つも見つかりません。"
+                f"名前 (`.msg` / {', '.join(TEXT_CONTAINERS)}) でも、中身の形でも "
+                f"{min(len(entries), FONT_HUNT_FILES)} 個まで探しました。"
+                "この行ごと報告してください")
         ok_msg, first_bad = 0, None
         len_ok, len_ng = 0, 0            # 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が合うか
         for e in msgs[:50]:
@@ -1036,7 +1083,14 @@ def check(folder: str, out=sys.stdout) -> int:
             say(f"  先頭 {min(50, len(msgs))} 件のうち読めた形: {ok_msg} 件")
             if len_ok or len_ng:
                 say(f"  位置表の長さの欄: 合う {len_ok} 件 / 合わない {len_ng} 件")
-                if len_ng:
+                if len_ng and msg_by_shape:
+                    # **形で拾ったときは、選び方そのものが当て推量**なので → にしない (#173)。
+                    # 入れ物も「読めてしまう」ので、長さの欄が合わないのは当たり前。
+                    # ここで → を出すと、名前が読めないだけの吸い出しで毎回赤が出る
+                    say(f"  位置表の長さの欄: 合わない {len_ng} 件。"
+                        "ただし**名前ではなく形で拾った**ので、本文でないものが混ざっています。"
+                        "名前が読めるようになってから見直してください")
+                elif len_ng:
                     # 「この行ごと報告」と言いながら確認事項に数えていなかったので、
                     # 最後の行は「問題なし」のままだった。報告してほしいなら数える (#97)
                     problems += 1
