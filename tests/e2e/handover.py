@@ -135,6 +135,13 @@ async def main() -> int:
         return 1
     target = want_name.group(1)                     # 例: system/system.msg
     want = answers()
+    # **正解が空でも「0 件中 0 件」で緑になる。** 突き合わせる相手の数を先に確かめる
+    # (#159 で、答えを空にする壊し方をしたら手順 3 と 6 が素通りした)
+    if len(want) < 20:
+        print(f"work/BOKU2SAMPLE/answer.tsv の正解が {len(want)} 件しかない "
+              f"(突き合わせにならない。make_boku2_sample.py を作り直す)")
+        print("RESULT NG")
+        return 1
 
     with open(os.path.join(SAMPLE, "font.txt"), encoding="utf-8") as fh:
         font = fh.read()
@@ -196,6 +203,8 @@ async def main() -> int:
         shown = [v for k, v in want.items() if k.startswith("system:")]
         hit = [t for t in shown if t in after]
         print(f"  手順 3: 文字表を貼ったあと、正解 {len(shown)} 件中 {len(hit)} 件が画面に出た")
+        if not shown:
+            errors.append("手順 3: 突き合わせる正解が 0 件 (検査になっていない)")
         if len(hit) < len(shown):
             missing = [t for t in shown if t not in after][:3]
             errors.append(f"手順 3: 文字表を貼っても読めない本文がある {missing} "
@@ -305,9 +314,13 @@ async def main() -> int:
                 subs = {
                     "BOKU2.IDX": os.path.join(SAMPLE, "BOKU2.IDX"),
                     "BOKU2.IMG": os.path.join(SAMPLE, "BOKU2.IMG"),
-                    "OUT/": out, "MAP/*.*": os.path.join(SAMPLE, "MAP", "*.*"),
-                    "OUT/system/*.msg": os.path.join(out, "system", "*.msg"),
+                    "OUT/": out, "OUT": out,
+                    "MAP/*.*": os.path.join(SAMPLE, "MAP", "*.*"),
                     "OUT/maps": os.path.join(out, "maps"),
+                    # 昔の書き方 (ファイルを列挙する形) も**走れる**ようにしておく。
+                    # 走れないと「取りこぼし」ではなく「コマンドが落ちた」になり、
+                    # 拾い漏れを見張る検査が働いたのか分からない (#159)
+                    "OUT/system/*.msg": os.path.join(out, "system", "*.msg"),
                     "OUT/maps/*/1.bin": os.path.join(out, "maps", "*", "1.bin"),
                     "font.txt": os.path.join(SAMPLE, "font.txt"),
                     "all.tsv": os.path.join(tmp, "all.tsv"),
@@ -327,6 +340,15 @@ async def main() -> int:
                     with open(subs["all.tsv"], encoding="utf-8") as fh:
                         cli = fh.read().lstrip("\ufeff")
                     cli_rows = {ln.split("\t")[0]: ln for ln in cli.split("\n") if ln}
+                    # **正解を全部拾えていること。** 書き方によっては黙って
+                    # 取りこぼす (#159: ファイルを列挙すると 31 行中 12 行だけ)。
+                    # しかも「文字表で全部読めました」と出るので気づけない
+                    missing = [k for k in want if k not in cli_rows]
+                    print(f"  手順 6: 正解 {len(want)} 件のうち "
+                          f"{len(want) - len(missing)} 件を一括で拾った")
+                    if missing:
+                        errors.append(f"手順 6: 一括処理が {len(missing)} 件取りこぼした "
+                                      f"{missing[:5]}。`text` にはフォルダを渡すこと")
                     stem2 = leaf.rsplit(".", 1)[0]
                     mine = [ln for ln in browser_rows if ln.split("\t")[0].startswith(stem2)]
                     print(f"  手順 6: CLI は {len(cli_rows) - 1} 行。"
