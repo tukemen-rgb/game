@@ -753,6 +753,56 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_no_section_can_see_nothing_and_still_pass(self):
+        """**段まるごと 0 件で「問題なし」にならない**ことを、まとめて見張る (#176).
+
+        #174 (MAP が無い)、#175 (診ていない段を数える) と 1 件ずつ直してきましたが、
+        1 件ずつでは漏れます。実際 #175 の直後に確かめたら、**`MAP/` はあるが空**の
+        とき (吸い出しの失敗、フォルダ違い) がまだ通り抜けていました:
+
+            [MAP] 0 件 / 入れ物として読めた 0 件 / … / 会話 0 行
+            == 結果: 問題なし。docs/10 の手順へ
+
+        そこで、**段を 1 つずつ欠けさせた吸い出しを作って回す**形にします。
+        どの段が欠けても、`問題なし` で終わってはいけない (→ が出るか、
+        「診ていない段」に数えるか、どちらかは必ず起きる)。
+        新しい段を足したら、ここに 1 行足せば同じ見張りが効きます。
+        """
+        import shutil
+        import tempfile
+
+        def strip_map_files(folder):
+            for f in os.listdir(os.path.join(folder, "MAP")):
+                os.remove(os.path.join(folder, "MAP", f))
+
+        def drop_map_dir(folder):
+            shutil.rmtree(os.path.join(folder, "MAP"))
+
+        def blank_img(folder):
+            with open(os.path.join(folder, "BOKU2.IMG"), "wb") as fh:
+                fh.write(b"\0" * 2048)
+
+        #: (欠けさせ方, その段の名前)。**欠けさせたら診断が黙ってはいけない**もの
+        CASES = [
+            (strip_map_files, "MAP はあるが空 (会話を 1 つも診ない)"),
+            (drop_map_dir, "MAP が無い (会話を 1 つも診ない)"),
+            (blank_img, "本体が空 (本文もフォントも診ない)"),
+        ]
+        bad = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, (break_it, what) in enumerate(CASES):
+                folder = os.path.join(tmp, f"c{i}")
+                shutil.copytree(self.folder, folder)
+                break_it(folder)
+                res = self.check(folder)
+                out = res.stdout
+                said = ("問題なし" not in out) or ("診ていない段" in out)
+                if not said or res.returncode == 0 and "問題なし" in out:
+                    bad.append(f"{what}: 「{out.strip().splitlines()[-1]}」で終わっている")
+        self.assertEqual(len(CASES), 3, "欠けさせ方を足したら数も直すこと")
+        self.assertEqual(bad, [],
+                         "段がまるごと 0 件なのに、そのまま通している:\n  " + "\n  ".join(bad))
+
     def test_what_was_not_checked_is_counted(self):
         """**診ていない段**を数えて、報告に必ず出すこと (#175).
 
