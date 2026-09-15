@@ -3742,7 +3742,35 @@ async function buildIdxReport() {
       lines.push("[文字表] 文字表はまだ貼っていない (「.msg として読む」の欄に貼ってから、もう一度この要約を作ると出来具合が出る)");
     }
   }
-  for (const it of items.filter((x) => /font/i.test(x.base || x.name)).slice(0, 3)) {
+  /* 名前で拾えなければ**形で拾う** (#172)。社長の実物では名前が付かず `#0 #1 …` の
+     ままだったことがある (docs/09 の #1・#3)。名前だけで選ぶと、そのときフォントの
+     診断がまるごと飛ぶ。一括処理 (boku2.py の pick_fonts) と同じ順・同じ言葉 */
+  let fonts = items.filter((x) => /font/i.test(x.base || x.name)).slice(0, 3);
+  let byShape = false;
+  if (!fonts.length) {
+    byShape = true;
+    for (const it of items.slice(0, FONT_HUNT_FILES)) {
+      if (it.len < 1024) continue;
+      const head = await readRange(dataEntry.file, dataEntry.offset + it.at,
+                                   Math.min(it.len, FONT_HUNT_HEAD));
+      if (tim2Pages(head, 2, true).some((q) => looksLikeAFontPage(q.t.pictures[0]))) {
+        fonts.push(it);
+        if (fonts.length >= 3) break;
+      }
+    }
+  }
+  if (!fonts.length) {
+    problems++;
+    lines.push(`→ [フォント] フォント画像が見つかりません。名前に font が付いたファイルも、`
+      + `1 行 ${FONT_COLS} 字の幅の画像もありませんでした `
+      + `(${Math.min(items.length, FONT_HUNT_FILES)} 個まで探した)。この行ごと報告してください`);
+  } else if (byShape) {
+    lines.push(`[フォント] 名前に font が付いたファイルが無いので、**中身の形**で探しました `
+      + `(1 行 ${FONT_COLS} 字の幅): ${fonts.slice(0, 3).map((x) => x.name).join(", ")}`
+      + "。名前が `#0` のような番号のままなら、索引の名前の読みがこの作品では"
+      + "違うということなので、その行も報告してください");
+  }
+  for (const it of fonts.slice(0, 3)) {
     /* 見出しの検証は画素の長さまで見るので、ファイル全体を読む (フォントは数百 KB) */
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, Math.min(it.len, 4 * 1024 * 1024));
     const at = findTim2(bytes);

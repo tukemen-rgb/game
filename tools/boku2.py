@@ -819,6 +819,37 @@ FONT_OWN_CAP = 4 * 1024 * 1024
 FONT_HUNT_FILES = 400
 
 
+def pick_fonts(img, entries: list[dict]) -> tuple[list[dict], bool]:
+    """フォント画像らしいファイルを選ぶ。名前で拾えなければ**形で拾う** (#172).
+
+    今までは名前に `font` が入っているかだけで選んでいた。ところが docs/09 の
+    「実物で確かめたこと」に書いてあるとおり、**社長の実物では名前が付かず
+    `#0 #1 …` のままだった** (#1・#3)。名前の並びの読み方はその後直したが、
+    実物で通ったことはまだ一度も無い。**名前が付かなかったら、フォントの診断が
+    まるごと飛ぶ** —— しかも「フォントが見つかりません」とも言わずに。
+
+    そこで、名前で 1 つも拾えなかったときは中身を見る。決め手は
+    `looks_like_a_font_page` (1 行 23 字の幅で割り切れること)。
+
+    @returns (選んだファイル, 形で拾ったか)
+    """
+    named = [e for e in entries if "font" in os.path.basename(e["path"]).lower()]
+    if named:
+        return named, False
+    found = []
+    for e in entries[:FONT_HUNT_FILES]:
+        if e["len"] < 1024:
+            continue
+        img.seek(e["at"])
+        for p in tim2_pages(img.read(min(e["len"], FONT_HUNT_HEAD)), limit=2):
+            if looks_like_a_font_page(p):
+                found.append(e)
+                break
+        if len(found) >= 3:
+            break
+    return found, True
+
+
 def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
                    known: set | None = None) -> list[str]:
     """文字表の続きが入っていそうな画像を、**同じ吸い出しの中から**挙げる (#168).
@@ -975,7 +1006,6 @@ def check(folder: str, out=sys.stdout) -> int:
         # 入れ子が無ければ 2 通りは必ず同じ答えを出す。「一致」と書くと裏付けに見える
         say("フォルダの規則: この索引に入れ子が無いので、2 通りの違いは出ません (試せていない)")
     msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
-    fonts = [e for e in entries if "font" in os.path.basename(e["path"]).lower()]
     say(f".msg: {len(msgs)} 件 (例: {', '.join(os.path.basename(e['path']) for e in msgs[:4])})")
     bases = {os.path.basename(e["path"]).lower() for e in entries}
     found = [n for n in TEXT_CONTAINERS if n in bases]
@@ -1030,6 +1060,22 @@ def check(folder: str, out=sys.stdout) -> int:
                    else "。この範囲は全部読める"))
         else:
             say("[文字表] font.txt はまだ無い (作ったらこのフォルダに置くと、ここで出来具合を確かめられる)")
+        # 名前で拾えなければ**形で拾う** (#172)。本体を開いた後でないと中身を見られない
+        fonts, by_shape = pick_fonts(img, entries)
+        # **どうやって見つけたか**を言う。名前で拾えなかったのに黙って形で拾うと、
+        # 社長は「名前が読めていない」という大事な手がかりを受け取れない (#172)
+        if not fonts:
+            problems += 1
+            say(f"→ [フォント] フォント画像が見つかりません。名前に font が付いたファイルも、"
+                f"1 行 {FONT_COLS} 字の幅の画像もありませんでした "
+                f"({min(len(entries), FONT_HUNT_FILES)} 個まで探した)。"
+                "この行ごと報告してください")
+        elif by_shape:
+            say(f"[フォント] 名前に font が付いたファイルが無いので、**中身の形**で探しました "
+                f"(1 行 {FONT_COLS} 字の幅): "
+                + ", ".join(e["path"] for e in fonts[:3])
+                + "。名前が `#0` のような番号のままなら、索引の名前の読みがこの作品では"
+                  "違うということなので、その行も報告してください")
         for e in fonts[:3]:
             img.seek(e["at"])
             info = tim2_info(img.read(min(e["len"], 0x100)))

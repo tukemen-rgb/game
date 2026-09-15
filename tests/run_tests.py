@@ -705,6 +705,91 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                       f"実物の大きさだと 2 枚目に届いていない:\n{joined}")
         self.assertIn(f"{26 * boku2.FONT_COLS} マス", joined, "2 枚目のマス数が違う")
 
+    def test_fonts_are_found_by_shape_when_names_are_gone(self):
+        """名前が付かなくても、フォントの診断が飛ばないこと (#172).
+
+        今までフォントは **名前に `font` が入っているか** だけで選んでいました。
+        ところが docs/09 の「実物で確かめたこと」に書いてあるとおり、
+        **社長の実物では名前が付かず `#0 #1 …` のままでした** (#1・#3)。
+        名前の並びの読み方はその後直しましたが、実物で通ったことはまだありません。
+
+        名前が付かなければ、フォントの診断 (幅・マス数・2 枚目の探索) が
+        **まるごと飛びます** —— しかも「見つかりません」とも言わずに。
+        いちばん要るときに、いちばん静かに落ちる形でした。
+        """
+        import shutil
+        import tempfile
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            shutil.copytree(self.folder, folder)
+            idx_path = os.path.join(folder, "BOKU2.IDX")
+            with open(idx_path, "rb") as fh:
+                idx = bytearray(fh.read())
+            # 名前はレコードの直後から並ぶ。**そこから先を全部**潰す
+            # (e2e の name の傷は 64 バイトだけなので、名前が残って fallback に届かない)
+            names_at = 16 + 27 * 16
+            idx[names_at:] = b"\xff" * (len(idx) - names_at)
+            with open(idx_path, "wb") as fh:
+                fh.write(bytes(idx))
+
+            # 前提: 本当に名前が 1 つも付かなくなったこと
+            entries = boku2.read_dfi(bytes(idx), os.path.getsize(os.path.join(folder, "BOKU2.IMG")))
+            named = [e for e in entries if "font" in os.path.basename(e["path"]).lower()]
+            self.assertEqual(named, [],
+                             f"名前がまだ残っている ({named}) ので、この検査は形の探索を試せていない")
+
+            res = self.check(folder)
+            self.assertIn("中身の形", res.stdout,
+                          f"名前で拾えないのに、形で探したと言っていない:\n{res.stdout[-600:]}")
+            # 形で拾ったうえで、**中身の診断まで進んでいる**こと
+            self.assertIn("ドット / 1 画素 1 バイトのパレット番号", res.stdout,
+                          "形で拾ったのに、フォントの中身を診ていない")
+            self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
+
+    def test_nothing_font_like_is_said_not_skipped(self):
+        """フォントらしい画像が 1 つも無ければ、**黙らずに言う** (#172)."""
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        import io as _io
+
+        # 名前に font が無く、形も合わない吸い出し。**中身が空では検査にならない** ——
+        # TIM2 が 1 つも無ければ、幅の見極めをどう緩めても結果が変わらない (#160 と同じ)。
+        # 本物の TIM2 を、**1 行 23 字にならない幅**で置く (この作品の 1024 幅の画像と同じ形)
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import make_tim2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        wide, _ = make_tim2.font_sheet(rows=4, cols=boku2.FONT_COLS * 2, cell=boku2.FONT_CELL)
+        self.assertNotEqual(
+            (boku2.FONT_COLS * 2 * boku2.FONT_CELL) // boku2.FONT_CELL, boku2.FONT_COLS,
+            "この幅でも 1 行 23 字になってしまう (検査にならない)")
+        entries = [{"path": "#0", "at": 0, "len": len(wide)}]
+        blob = wide
+        # 前提: 中身は**ちゃんと TIM2 として読める**こと。読めなければ形の判定に届かない
+        self.assertEqual(len(boku2.tim2_pages(blob)), 1, "置いた TIM2 が読めていない")
+        fonts, by_shape = boku2.pick_fonts(_io.BytesIO(blob), entries)
+        self.assertEqual(fonts, [],
+                         "1 行 23 字にならない画像をフォントとして拾っている")
+        self.assertTrue(by_shape, "名前で拾えなかったのに、形で探していない")
+        # 見つからなかったことを言う言葉が、両側にあること
+        for path in (os.path.join(REPO, "tools", "boku2.py"),
+                     os.path.join(REPO, "web", "app.js")):
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+            self.assertTrue("フォント画像が見つかりません" in src,
+                            f"{os.path.basename(path)} に、見つからないときの言葉が無い")
+
     def test_enough_cells_is_said_plainly(self):
         """マスが足りているときは、**足りていると言う** (#170).
 
