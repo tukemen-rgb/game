@@ -6620,6 +6620,126 @@ class TestLooseningTheWaveFilterIsMeasured(unittest.TestCase):
                            f"docs/07 の「いちばん短い候補 (8) でも 8 前後」の説明が崩れた")
 
 
+class TestTheFontGridIsTheSameEverywhere(unittest.TestCase):
+    """フォントの升目の数字が、全部の文書で道具と揃っていること (#158).
+
+    実物のフォントは **1 行 23 字 (0x17)、刻み 22 ドット (0x16)**。
+    描かれる枠は 23 ドットで 1 ドット重なる。出典は英語化パッチの公開ソース
+    `reprint.py` の `N_COLUMNS = 23` / `CELL_WIDTH = 22` と `asm_notes.txt`。
+
+    **`asm_notes.txt` には `char%17` という書き落としがあります** (同じ文書の
+    別の行は `char%0x17`)。10 進の 17 と読むと升目がずれ、**文字表が丸ごと
+    別物になります**。しかも出てくる字は日本語に見えるので、目では気づけません。
+
+    ところが `docs/10` —— **社長が実物を相手に読む唯一の手順書** —— の
+    「文字の番号を重ねる」の行が、まさに `(1 文字 23、1 行 17)` でした。
+    刻みに枠の 23 を使い、列数に書き落としの 17 を使う、**二重に間違い**。
+    同じ文書の別の行 (困ったときの表) は正しく「1 行 23 字を 22 ドット刻みで」と
+    書いてあり、**docs/10 が自分と食い違って**いました。
+
+    #99 でこの取り違えを見つけたときは「案内文・docs/09・docs/11 を直した」と
+    記録してある —— **docs/10 だけ漏れていた。** 手で直して回ると 1 つ漏れる。
+    #152 と同じで、**漏れないようにするには仕掛けにする**しかない。
+    """
+
+    #: (文書の書き方, 道具のどの定数と合うべきか)
+    PATTERNS = [
+        (r"1 行 (\d+) 字", "FONT_COLS"),
+        (r"刻み (\d+) ドット", "FONT_CELL"),
+        (r"(\d+) ドット刻み", "FONT_CELL"),
+        (r"1 文字 (\d+)", "FONT_CELL"),
+    ]
+
+    #: 実機の書き落としをそのまま書いてしまった形。見つけたら必ず落とす
+    MISREADINGS = ["1 行 17"]
+
+    @staticmethod
+    def docs() -> list:
+        base = os.path.join(REPO, "docs")
+        return [os.path.join(base, n) for n in sorted(os.listdir(base)) if n.endswith(".md")]
+
+    def test_every_doc_agrees_with_the_tool(self):
+        import re
+
+        import boku2
+
+        want = {"FONT_COLS": boku2.FONT_COLS, "FONT_CELL": boku2.FONT_CELL}
+        found, bad = 0, []
+        for path in self.docs():
+            rel = os.path.relpath(path, REPO)
+            with open(path, encoding="utf-8") as fh:
+                for i, line in enumerate(fh, 1):
+                    for pat, key in self.PATTERNS:
+                        for m in re.finditer(pat, line):
+                            found += 1
+                            if int(m.group(1)) != want[key]:
+                                bad.append(f"{rel}:{i} 「{m.group(0)}」 "
+                                           f"({key} は {want[key]}): {line.strip()[:70]}")
+        # **見つけた記述が 0 件でも緑になる**ので、数も見る (#134 と同じ形)
+        self.assertGreater(found, 8, f"升目の記述が {found} 件しか見つからない (探し方が壊れた)")
+        self.assertEqual(bad, [], "文書と道具で升目の数字が違う:\n  " + "\n  ".join(bad))
+
+    def test_the_known_misreading_is_nowhere(self):
+        """`asm_notes.txt` の書き落とし (10 進の 17) を、どの文書も書いていないこと."""
+        bad = []
+        for path in self.docs():
+            rel = os.path.relpath(path, REPO)
+            with open(path, encoding="utf-8") as fh:
+                for i, line in enumerate(fh, 1):
+                    for word in self.MISREADINGS:
+                        if word in line:
+                            bad.append(f"{rel}:{i} 「{word}」: {line.strip()[:70]}")
+        self.assertEqual(bad, [], "実機の書き落とし (0x17 を 10 進の 17 と読んだ形) がある:\n  "
+                                  + "\n  ".join(bad))
+
+    def test_the_screen_says_the_same_numbers(self):
+        """画面の案内文も同じ数字であること (文書だけ直して画面が古い、を防ぐ)."""
+        import re
+
+        import boku2
+
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        m = re.search(r"1 行 (\d+) 字、刻み (\d+) ドット", js)
+        self.assertTrue(m, "web/app.js の案内文から升目の数字を読めない")
+        self.assertEqual((int(m.group(1)), int(m.group(2))),
+                         (boku2.FONT_COLS, boku2.FONT_CELL),
+                         f"画面の案内文が {m.group(0)} (道具は "
+                         f"{boku2.FONT_COLS} 字 / {boku2.FONT_CELL} ドット)")
+        # 目盛りの既定値そのものも刻みと同じであること (#99 でここを直した)
+        d = re.search(r'mk\("1 文字の幅", "tim2cw", (\d+)\), '
+                      r'chIn = mk\("1 文字の高さ", "tim2ch", (\d+)\)', js)
+        self.assertTrue(d, "目盛りの既定値を読めない (書き方が変わった)")
+        self.assertEqual((int(d.group(1)), int(d.group(2))),
+                         (boku2.FONT_CELL, boku2.FONT_CELL),
+                         f"目盛りの既定値が {d.group(1)}×{d.group(2)} "
+                         f"(刻みは {boku2.FONT_CELL})")
+
+    def test_the_two_handover_docs_do_not_contradict(self):
+        """docs/09 の「次の一手」と docs/10 の手順が、升目について食い違わないこと.
+
+        2 つとも社長が読む手順で、**内容が重なっている**。片方だけ直すと、
+        読んだほうによって違うことをする。
+        """
+        import re
+
+        said = {}
+        for name in ("09-調査ログと引き継ぎ.md", "10-僕夏2の手順.md"):
+            with open(os.path.join(REPO, "docs", name), encoding="utf-8") as fh:
+                doc = fh.read()
+            block = [ln for ln in doc.split("\n")
+                     if "文字の番号を重ねる" in ln or "1 行 23 字" in ln]
+            nums = set()
+            for line in block:
+                nums |= {int(x) for x in re.findall(r"1 行 (\d+) 字", line)}
+                nums |= {int(x) for x in re.findall(r"刻み (\d+) ドット", line)}
+            said[name] = nums
+        for name, nums in said.items():
+            self.assertTrue(nums, f"docs/{name} から升目の数字を読めない (書き方が変わった)")
+        self.assertEqual(said["09-調査ログと引き継ぎ.md"], said["10-僕夏2の手順.md"],
+                         f"docs/09 と docs/10 で升目の言い分が違う: {said}")
+
+
 class TestThePeriodGuessIsCounted(unittest.TestCase):
     """繰り返しの周期の見当を、正解の分かる 8 通りで数える (#154).
 
