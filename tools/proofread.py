@@ -434,6 +434,23 @@ def main() -> int:
     print(f"{len(rows)} 行をチェック: "
           f"ERROR {counts['ERROR']} 件 / WARN {counts['WARN']} 件 / "
           f"問題なし {len(rows) - len({f.row_id for f in findings})} 行")
+    # **練習用の文字表のまま実物にかけると、正しい原文が大量に ERROR になる** (#182)。
+    # 練習用は 347 字、僕の夏休み 2 は 1656 字。実物の会話を 20 行かけただけで
+    # 「フォントに無い文字」が 14 件出た —— **全部まちがい**。社長はこれを見て
+    # 正しい原文を直しにかかるか、道具を信じなくなる。
+    # 下のほうに「練習用のものです」とは書いてあったが、22 件の ERROR に埋もれていた
+    font_rows = {f.row_id for f in findings if f.rule == "font"}
+    if font_rows and os.path.abspath(args.font_chars) == os.path.abspath(DEFAULT_FONT_CHARS):
+        bad_chars = set()
+        for f in findings:
+            if f.rule == "font":
+                bad_chars |= set(f.message.split(": ")[-1])
+        print(f"\n注意: 「フォントに無い文字」が {len(font_rows)} 行 "
+              f"({len(bad_chars)} 種: {''.join(sorted(bad_chars))[:20]}) 出ています。"
+              f"**使っている文字表は練習用の作品のもの ({len(font_chars or ())} 字) です。**")
+        print("  この作品の文字表を渡していないなら、これらの ERROR は"
+              "**訳文ではなく文字表のせい**です。docs/10 の手順 6 で作った文字表を渡してください:")
+        print("    --font-chars font.txt")
     orig_chars = sum(len(scrp.strip_tags(r.get("original", ""))) for r in rows)
     new_chars = sum(len(scrp.strip_tags(scrp.final_text(r))) for r in rows)
     print(f"表示文字数: 原文 {orig_chars:,} → 訳文 {new_chars:,} ({new_chars - orig_chars:+,})")

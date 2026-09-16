@@ -2615,6 +2615,68 @@ class TestProofread(unittest.TestCase):
                                    f"日記が最大 {max(counts)} 行。上限 {lines_max} で"
                                    "収まってしまうなら、枠が違うという読みが崩れた")
 
+    def test_the_practice_font_table_does_not_condemn_real_text(self):
+        """**練習用の文字表のまま実物にかけると、正しい原文が大量に ERROR になる** (#182).
+
+        #180 の幅、#181 の行数と同じで、`data/font_chars.txt` も練習用の作品の
+        ものです。ところがこれは前の 2 つより悪く、**偽の ERROR を出します**。
+
+        練習用は 347 字、僕の夏休み 2 は 1656 字。公開ソースの会話 (`test.txt`) を
+        20 行かけると「フォントに無い文字」が **14 件** —— 全部まちがいです。
+        社長はこれを見て正しい原文を直しにかかるか、道具を信じなくなります。
+
+        下のほうに「この文字表は練習用のものです」とは書いてありましたが、
+        **22 件の ERROR に埋もれていました**。数えて、原因を名指しします。
+        """
+        import subprocess
+        import tempfile
+
+        if not os.path.isdir(PUBLIC_SRC):
+            self.skipTest(f"公開ソースが無い ({PUBLIC_SRC})")
+        src = os.path.join(PUBLIC_SRC, "test.txt")
+        table = os.path.join(PUBLIC_SRC, "font.txt")
+        for path in (src, table):
+            if not os.path.isfile(path):
+                self.skipTest(f"公開ソースに {os.path.basename(path)} が無い")
+
+        with open(src, encoding="utf-8", errors="replace") as fh:
+            lines = [re.sub(r"\{[^}]*\}|^///.*|^&\d+", "", ln).strip() for ln in fh]
+        lines = [ln for ln in lines if ln][:20]
+        self.assertGreaterEqual(len(lines), 20, f"{len(lines)} 行しか取れない")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = os.path.join(tmp, "a.tsv")
+            with open(tsv, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                for i, ln in enumerate(lines):
+                    fh.write(f"{i}\t{ln}\t{ln}\n")
+
+            def run(*extra):
+                res = subprocess.run(
+                    [sys.executable, os.path.join(REPO, "tools", "proofread.py"), tsv, *extra],
+                    capture_output=True, text=True)
+                out = res.stdout + res.stderr
+                return out, out.count("フォントに無い文字です")
+
+            # 1. 既定 (練習用) では大量に落ち、**原因を名指しする**
+            out, n_default = run()
+            self.assertGreater(n_default, 5,
+                               f"練習用の文字表で {n_default} 件しか落ちない (前提が崩れた)")
+            self.assertIn("文字表のせい", out,
+                          f"原因が文字表だと言っていない:\n{out[-600:]}")
+            # **下にもとからある案内にも `--font-chars` は出る**ので、
+            # 「含むか」では見ない。docs/10 で作る名前まで言っていること
+            self.assertIn("--font-chars font.txt", out,
+                          f"この作品の文字表の渡し方を具体的に言っていない:\n{out[-500:]}")
+
+            # 2. **この作品の文字表を渡せば、ぐっと減る** (減らなければ読みが崩れている)
+            out, n_real = run("--font-chars", table)
+            self.assertLess(n_real, n_default / 2,
+                            f"実物の文字表でも {n_real} 件 (練習用は {n_default} 件)。"
+                            "文字表のせいだという読みが崩れた")
+            self.assertNotIn("文字表のせい", out,
+                             f"この作品の文字表を渡したのに文字表のせいにしている:\n{out[-400:]}")
+
     def test_a_changed_number_is_caught(self):
         """数字の取り違えは、字数も用語も禁則も通ってしまう (#86)."""
         hit = self.rules_hit("報酬は<COLOR:02>８５０<COLOR:00>ギルだ。",
