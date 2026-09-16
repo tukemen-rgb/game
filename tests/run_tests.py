@@ -1347,10 +1347,58 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         "索引が本体をどれだけ使い切っているか",
     )
 
+    #: `check` にだけあって画面に無くてよい → と、その理由。
+    #: **理由の書けるものだけ**をここに置く。書けないなら片側の抜けなので直すこと
+    ONLY_CLI = {
+        "索引と本体が揃っていません":
+            "画面は 2 つのファイルを選ばせるので、揃っていない状態そのものが作れない",
+    }
+
     def test_every_judgement_exists_on_both_sides(self):
         for word in self.SHARED:
             self.assertTrue(word in self.cli, f"tools/boku2.py に無い: {word}")
             self.assertTrue(word in self.ui, f"web/app.js に無い: {word}")
+
+    def test_the_two_sides_have_the_same_arrows(self):
+        """**言葉の一覧を手で並べるのをやめる** (#179).
+
+        上の `SHARED` は手で書いた一覧です。**足し忘れれば、片側にしかない判定が
+        あっても誰も気づきません。** #178 で見張りを広げたとき、`text` と `used` の
+        → が一度も docs/10 に載っていなかったのが出てきたのと同じ穴が、
+        ここにも空いていました。
+
+        そこで `check` が出し得る → を**両側から機械で集めて**突き合わせます。
+        `check` 以外の命令 (`unpack` / `maps` / `text` / `used`) の → は、
+        画面に相当する機能が無いので数えません。
+        """
+        import re
+
+        def head(h):
+            return re.split(r"[。、(:]", h)[0].strip()[:14]
+
+        i = self.cli.index("def check(folder: str, out=sys.stdout) -> int:")
+        j = self.cli.index("\ndef ", i + 10)
+        body = self.cli[i:j]
+        cli = {head(h) for h in re.findall(r'(?:say\(|^\s+)f?"→ ([^"{]+)', body, re.M)}
+        # `check` から呼ぶ助けの関数が組み立てる → も、check の → として数える
+        cli |= {head(h) for h in re.findall(r'return \(f?"→ ([^"{]+)', self.cli)}
+        ui = {head(h) for h in re.findall(r'lines\.push\([`"]→ ([^`"$]+)', self.ui)}
+
+        # 拾えていること自体を先に確かめる (0 件どうしは必ず一致する)
+        self.assertGreaterEqual(len(cli), 12, f"CLI の → を {len(cli)} 件しか拾えない")
+        self.assertGreaterEqual(len(ui), 12, f"画面の → を {len(ui)} 件しか拾えない")
+
+        only_cli = cli - ui - set(self.ONLY_CLI)
+        only_ui = ui - cli
+        self.assertEqual(sorted(only_cli), [],
+                         "check にあって画面に無い判定 (片側に足して忘れた):\n  "
+                         + "\n  ".join(sorted(only_cli)))
+        self.assertEqual(sorted(only_ui), [],
+                         "画面にあって check に無い判定:\n  " + "\n  ".join(sorted(only_ui)))
+        # 逃がした分が**本当にまだ CLI にある**こと。消えたのに残しておくと、
+        # そこだけ見張りの外になる
+        for word in self.ONLY_CLI:
+            self.assertTrue(word in cli, f"ONLY_CLI に残っているが CLI にもう無い: {word}")
 
     def test_the_thresholds_are_the_same_number(self):
         """基準の数字が 2 か所でずれていないこと."""
