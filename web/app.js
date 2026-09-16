@@ -3667,6 +3667,27 @@ async function buildIdxReport() {
   const recEnd = 16 + c.count * 16;
   lines.push(`レコード ${c.count} 件 (名前の置き場は ${hx(recEnd)} から) / ファイル ${items.length} 件 / 名前が付いた ${c.named_ok ?? "?"} 件`
     + (c.dupes ? ` / 同じ名前 ${c.dupes} 件` : ""));
+  /* **取り出せない項目があれば、その数と理由を言う** (#178)。使用率の行だけだと、
+     索引の読み違いと「吸い出しが途中で切れている」が同じ見え方になる。
+     一括処理 (boku2.py の dfi_dropped / dropped_note) と同じ言葉・同じ数え方 */
+  {
+    let records = 0, outside = 0;
+    for (let k = 0; k < c.count; k++) {
+      const p = 16 + k * 16;
+      if ((b[p] | (b[p + 1] << 8)) === 1) continue;       /* フォルダの行は数えない */
+      const lba = u32le(b, p + 8), length = u32le(b, p + 12);
+      if (length <= 0) continue;                          /* 空き枠は「落とした」ではない */
+      records++;
+      if (lba * 2048 + length > dataEntry.size) outside++;
+    }
+    if (outside) {
+      problems++;
+      lines.push(`→ 索引は ${records} 個のファイルを名乗っていますが、取り出せるのは `
+        + `${records - outside} 個です (本体の外を指す ${outside} 個)。`
+        + "**吸い出しが途中で切れている**か、索引の読み方 (位置の単位) が"
+        + "外れている疑いがあります。この行ごと報告してください");
+    }
+  }
   lines.push(`最初の名前: ${items.slice(0, 5).map((it) => it.name).join(" / ")}`);
   const used = items.reduce((s, it) => s + it.len, 0);
   const coverage = used / Math.max(1, dataEntry.size);

@@ -753,6 +753,78 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_entries_that_cannot_be_taken_out_are_counted(self):
+        """索引が名乗る数と、**取り出せる数**の差を言うこと (#178).
+
+        `read_dfi` は「本体の外を指す項目」を黙って落とします。落とすこと自体は
+        正しい (読めば本体の外を読む) のですが、**落とした数を捨てていた**ので、
+        吸い出しが途中で切れていても
+
+            12 個に切り分けました → OUT          ← 終了コード 0
+
+        で終わっていました。20 個のうち 8 個が出ていないことが分かりません。
+
+        `check` のほうも、使用率の行から「索引の読み方が外れている疑い」とだけ
+        言っていました。**吸い出しが途中で切れている**ときも同じ見え方になるので、
+        数を出さないと見分けがつきません。
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+
+        with open(os.path.join(self.folder, "BOKU2.IDX"), "rb") as fh:
+            idx = fh.read()
+        whole = os.path.getsize(os.path.join(self.folder, "BOKU2.IMG"))
+
+        # 1. そろっていれば、名乗る数と取り出せる数が同じで、何も言わない
+        full = boku2.dfi_dropped(idx, whole)
+        self.assertEqual(full["records"], full["taken"],
+                         f"健全なのに数が合わない: {full}")
+        self.assertGreater(full["records"], 10, f"前提が崩れた: {full}")
+        self.assertEqual(boku2.dropped_note(full), "", "健全なのに文句を言っている")
+
+        # 2. 本体を半分に切ると、差が出て、その数を言う
+        half = boku2.dfi_dropped(idx, whole // 2)
+        self.assertLess(half["taken"], full["taken"], "半分にしたのに取り出せる数が同じ")
+        self.assertEqual(half["records"], full["records"],
+                         "索引が名乗る数は本体の長さで変わらないはず")
+        self.assertEqual(half["outside"], full["taken"] - half["taken"],
+                         f"外を指す数と減った数が合わない: {half}")
+        note = boku2.dropped_note(half)
+        for must in (str(half["records"]), str(half["taken"]), str(half["outside"])):
+            self.assertIn(must, note, f"{must} を言っていない: {note}")
+        self.assertIn("途中で切れている", note, f"いちばんありそうな原因を言っていない: {note}")
+
+        # 3. 通しで: unpack が赤くなり、check もその行を出すこと
+        with tempfile.TemporaryDirectory() as tmp:
+            d = os.path.join(tmp, "trunc")
+            os.makedirs(d)
+            shutil.copy(os.path.join(self.folder, "BOKU2.IDX"), d)
+            with open(os.path.join(self.folder, "BOKU2.IMG"), "rb") as fh:
+                img = fh.read()
+            with open(os.path.join(d, "BOKU2.IMG"), "wb") as fh:
+                fh.write(img[:len(img) // 2])
+            shutil.copytree(os.path.join(self.folder, "MAP"), os.path.join(d, "MAP"))
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "boku2.py"), "unpack",
+                 os.path.join(d, "BOKU2.IDX"), os.path.join(d, "BOKU2.IMG"),
+                 os.path.join(tmp, "out")], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 1,
+                             f"8 個取り出せていないのに {res.returncode}:\n{res.stdout}{res.stderr}")
+            self.assertIn("取り出せるのは", res.stderr, f"数を言っていない:\n{res.stderr}")
+            self.assertIn("取り出せるのは", self.check(d).stdout, "check が言っていない")
+            # 画面側にも同じ判定があること (片側にだけ足して忘れない)
+            with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+                ui = fh.read()
+            self.assertTrue("本体の外を指す ${outside} 個" in ui,
+                            "web/app.js に同じ判定が無い")
+
     def test_an_arrow_always_means_a_nonzero_exit(self):
         """**→ を出したら終了コードは 1** —— どの命令でも (#177).
 
@@ -3377,10 +3449,12 @@ class TestBoku2Cli(unittest.TestCase):
             with open(img_path, "wb") as fh:
                 fh.write(img)
             out = os.path.join(tmp, "out")
-            # #161 から (切り分けた数, 名前が付かなかった数) を返す
-            n, unnamed = boku2.unpack(idx_path, img_path, out)
+            # #161 から (切り分けた数, 名前が付かなかった数)、#178 で
+            # (取り出せなかった分の内訳) が加わった
+            n, unnamed, dropped = boku2.unpack(idx_path, img_path, out)
             self.assertEqual(n, 11)
             self.assertEqual(unnamed, 0, "この題材では全部に名前が付くはず")
+            self.assertEqual(dropped["outside"], 0, f"取りこぼしがある: {dropped}")
             for path, data in want.items():
                 with open(os.path.join(out, *path.split("/")), "rb") as fh:
                     self.assertEqual(fh.read(), data, path)
@@ -3677,7 +3751,11 @@ class TestDocs(unittest.TestCase):
             src = fh.read()
         with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
             doc = fh.read()
-        arrows = re.findall(r'say\(f?"→ ([^"{]+)', src)
+        # `say("→ …")` だけでなく、**文字列そのものが → で始まるもの全部**を拾う (#178)。
+        # 知らせの文を組み立てる助けの関数 (`dropped_note`) に移すと、`say(` の形では
+        # 見つからず、**新しい → が説明の無いまま増える**。見張りは道具の書き方に
+        # 合わせるのではなく、出る言葉のほうを見る
+        arrows = re.findall(r'(?:say\(|return \(|print\(|^\s+)f?"→ ([^"{]+)', src, re.M)
         self.assertGreaterEqual(len(arrows), 8, arrows)
         keys = set()
         for head in arrows:

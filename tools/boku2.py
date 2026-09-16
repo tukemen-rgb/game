@@ -169,6 +169,55 @@ def safe_parts(path: str) -> list[str]:
     return parts or ["_"]
 
 
+def dfi_dropped(idx: bytes, data_size: int, rule: str = "flag") -> dict:
+    """索引が名乗っているファイル数と、**実際に取り出せる数**の差 (#178).
+
+    `read_dfi` は「本体の外を指す項目」を黙って落とす。落とすこと自体は正しい
+    (読めば本体の外を読む) が、**落とした数を捨てていた**ので、吸い出しが
+    途中で切れていても `unpack` は「12 個に切り分けました」と言って 0 で終わっていた。
+    社長には 20 個のうち 8 個が出ていないことが分からない。
+
+    @returns {"records": 索引が名乗るファイル数, "taken": 取り出せる数,
+              "outside": 本体の外を指す数}
+    """
+    if len(idx) < 16:
+        return {"records": 0, "taken": 0, "outside": 0}
+    # **`read_dfi` と同じ数え方でレコードの終わりを見つける。** 見出しの +4 の値を
+    # そのまま使うと、この索引では 27 件の所を 37 件と数えてしまう
+    # (名前の置き場の先頭が、たまたまレコードに見える)
+    rec_end = 16
+    while rec_end + 16 <= len(idx) and (idx[rec_end] | (idx[rec_end + 1] << 8)) in (0, 1):
+        rec_end += 16
+    rec_count = (rec_end - 16) // 16
+    records = outside = 0
+    for k in range(rec_count):
+        p = 16 + k * 16
+        if (idx[p] | (idx[p + 1] << 8)) == 1:          # フォルダの行は数えない
+            continue
+        records += 1
+        lba, length = struct.unpack_from("<II", idx, p + 8)
+        # **長さ 0 の行は「取り出せなかった」ではない。** 空き枠なので数えない。
+        # 数えると、名前の置き場が壊れた索引 (レコードの終わりがずれる) で
+        # 空き枠 17 個を「落とした」と言ってしまう
+        if length > 0:
+            if lba * SECTOR + length > data_size:
+                outside += 1
+        else:
+            records -= 1
+    return {"records": records, "taken": len(read_dfi(idx, data_size, rule)),
+            "outside": outside}
+
+
+def dropped_note(d: dict) -> str:
+    """`dfi_dropped` の結果を、社長に読める 1 行にする。出す必要が無ければ空文字."""
+    if not d["outside"]:
+        return ""
+    return (f"→ 索引は {d['records']} 個のファイルを名乗っていますが、取り出せるのは "
+            f"{d['taken']} 個です (本体の外を指す {d['outside']} 個)。"
+            "**吸い出しが途中で切れている**か、索引の読み方 (位置の単位) が"
+            "外れている疑いがあります。この行ごと報告してください")
+
+
 def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
     with open(idx_path, "rb") as fh:
         idx = fh.read()
@@ -186,7 +235,7 @@ def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
             with open(dest, "wb") as fo:
                 fo.write(img.read(e["len"]))
     unnamed = sum(1 for e in entries if os.path.basename(e["path"]).startswith("#"))
-    return len(entries), unnamed
+    return len(entries), unnamed, dfi_dropped(idx, size)
 
 
 # ---------- マップの入れ物 ----------
@@ -1026,6 +1075,14 @@ def check(folder: str, out=sys.stdout) -> int:
     used = sum(e["len"] for e in entries)
     say(f"レコード {rec_count} 件 (名前の置き場は 0x{rec_end:X} から) / ファイル {len(entries)} 件 / 名前が付いた {named} 件"
         + (f" / 同じ名前 {dupes} 件" if dupes else ""))
+    # **取り出せない項目があれば、その数と理由を言う** (#178)。今までは使用率の
+    # 行から「索引の読み方が外れている疑い」とだけ言っていたが、**吸い出しが
+    # 途中で切れている**ときも同じ見え方になる。数を出せば見分けがつく
+    dropped = dfi_dropped(idx, img_size)
+    note = dropped_note(dropped)
+    if note:
+        problems += 1
+        say(note)
     # フォルダを解決した後の名前を出す。以前は名前の置き場から生の文字列を順に
     # 読んでいたので、根の "/" やフォルダ名そのもの (`00diary`) が混ざり、
     # ファイルはフォルダ抜きで並んでいた (`nik000.tm2`)。docs/10 が 20 分の所で
@@ -1378,8 +1435,15 @@ def run(args) -> int:
         return check(args.folder)
 
     if args.cmd == "unpack":
-        n, unnamed = unpack(args.idx, args.img, args.out)
+        n, unnamed, dropped = unpack(args.idx, args.img, args.out)
         print(f"{n} 個に切り分けました → {args.out}")
+        # **取り出せなかった分を言う** (#178)。索引が名乗る数より少ないのに
+        # 「N 個に切り分けました」とだけ言って 0 で終わっていた。#177 の
+        # 「出るはずのものが出ていないときだけ赤にする」を unpack にも広げる
+        note = dropped_note(dropped)
+        if note:
+            print(note, file=sys.stderr)
+            return 1
         # **名前が付かなかった数を言う** (#161)。docs/10 は「`#0012.tm2` のように
         # 番号だけなら名前の読み取りに失敗している」と人に見張らせているのに、
         # この道具は数を出していなかった (`check` と画面は出している)
