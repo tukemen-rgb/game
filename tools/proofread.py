@@ -51,6 +51,23 @@ ABSOLUTE_RULES = ("line_width", "line_count", "kinsoku", "font", "halfwidth",
 #: 既定の設定ファイル (この練習用の作品のもの)。別の作品に当てると嘘になる
 DEFAULT_GLOSSARY = os.path.join(REPO, "data", "glossary.tsv")
 DEFAULT_FONT_CHARS = os.path.join(REPO, "data", "font_chars.txt")
+DEFAULT_RULES = os.path.join(REPO, "data", "rules.json")
+DEFAULT_NAMES = os.path.join(REPO, "data", "names.tsv")
+
+#: ファイルを指す指定。(属性名, 旗, 呼び名, 既定, 作り方)。
+#:
+#: **自分で渡したのに無いときは断る。既定が無いだけなら飛ばして先へ進む** (#187)。
+#: 打ち間違いを黙って飛ばすと、その検査だけが止まったまま「ERROR 0 件」が出る
+#: (#186 で文字表がそうだった)。ここに並べたものは全部同じ扱いになり、
+#: 検査 (`test_every_file_option_refuses_a_path_that_is_not_there`) も
+#: この並びをそのまま回るので、**指定を足したら自動で見張られる**
+FILE_OPTIONS = (
+    ("rules", "--rules", "仕様", DEFAULT_RULES, ""),
+    ("glossary", "--glossary", "用語集", DEFAULT_GLOSSARY, ""),
+    ("font_chars", "--font-chars", "文字表", DEFAULT_FONT_CHARS,
+     "python3 tools/boku2.py fontlist font.txt -o font_chars.txt"),
+    ("names", "--names", "名前表", DEFAULT_NAMES, ""),
+)
 
 
 class Finding:
@@ -349,12 +366,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="抽出した TSV を機械的に校正チェックする")
     ap.add_argument("tsv", help="チェックする TSV")
     ap.add_argument("--lang", default="ja", help="rules.json 内の言語キー (既定: ja)")
-    ap.add_argument("--rules", default=os.path.join(REPO, "data", "rules.json"))
-    ap.add_argument("--glossary", default=DEFAULT_GLOSSARY)
-    # 既定は None。**自分で渡したのか、既定のままなのか**を後で見分けるため
-    # (#186)。渡したファイルが無いときは断る、既定なら黙って飛ばす、の違いが要る
-    ap.add_argument("--font-chars", default=None)
-    ap.add_argument("--names", default=os.path.join(REPO, "data", "names.tsv"))
+    # 既定はどれも None。**自分で渡したのか、既定のままなのか**を後で見分けるため
+    # (#186・#187)。渡したファイルが無いときは断る、既定なら黙って飛ばす、の違いが要る
+    for _attr, flag, _label, _default, _how in FILE_OPTIONS:
+        ap.add_argument(flag, default=None)
     ap.add_argument("--no-font-check", action="store_true")
     ap.add_argument("--var-width", type=float, metavar="文字数",
                     help="<VAR:xx> に差し込まれる最大の長さ (既定は data/rules.json の var_width)")
@@ -369,22 +384,29 @@ def main() -> int:
     ap.add_argument("--report", help="指摘一覧を TSV で書き出す")
     args = ap.parse_args()
 
-    rules = load_rules(args.rules, args.lang)
-    glossary = load_glossary(args.glossary) if os.path.exists(args.glossary) else []
-    # **自分で渡した文字表が見つからないときは断る** (#186)。
+    # **自分で渡したファイルが見つからないときは断る** (#186・#187)。
     # ここを `os.path.exists` で黙って飛ばしていたので、docs/10 の手順どおりに
     # `--font-chars font_chars.txt` と打って `fontlist` を忘れた人には、
     # 「ERROR 0 件」と、**font を含む「いま効いている検査」の一覧**が出ていた。
-    # 実機で □ になる字の検査だけが止まっているのに、動いていると読める
-    given = args.font_chars is not None
-    args.font_chars = args.font_chars or DEFAULT_FONT_CHARS
+    # 実機で □ になる字の検査だけが止まっているのに、動いていると読める。
+    # 用語集も同じ落ち方をするので、4 つまとめて同じ扱いにした
+    for attr, flag, label, default, how in FILE_OPTIONS:
+        path = getattr(args, attr)
+        if path is None:
+            setattr(args, attr, default)         # 既定が無いだけなら黙って飛ばす
+            continue
+        if not os.path.exists(path):
+            print(f"→ {label} {path} がありません ({flag} に渡した道を確かめてください)")
+            if how:
+                print(f"   作ってから渡してください: {how}")
+            if attr == "font_chars":
+                print("   フォント検査だけ外して他を見たいなら "
+                      "--no-font-check を付けてください")
+            return 1
+
+    rules = load_rules(args.rules, args.lang)
+    glossary = load_glossary(args.glossary) if os.path.exists(args.glossary) else []
     font_chars = None
-    if not args.no_font_check and given and not os.path.exists(args.font_chars):
-        print(f"→ 文字表 {args.font_chars} がありません。フォント検査ができません")
-        print("   作ってから渡してください: "
-              "python3 tools/boku2.py fontlist font.txt -o font_chars.txt")
-        print("   フォント検査だけ外して他を見たいなら --no-font-check を付けてください")
-        return 1
     if not args.no_font_check and os.path.exists(args.font_chars):
         font_chars = load_font_chars(args.font_chars)
         if not font_chars:
@@ -482,6 +504,10 @@ def main() -> int:
     used = [f"仕様 {os.path.relpath(args.rules, REPO)} ({args.lang})"]
     if glossary:
         used.append(f"用語集 {os.path.relpath(args.glossary, REPO)} {len(glossary)} 語")
+    else:
+        # 文字表と同じ理由で**黙って省かない** (#187)。用語集が空のままだと
+        # glossary の検査は 1 件も出さないのに、「いま効いている検査」には載る
+        used.append("用語集なし → **用語の検査は動いていません**")
     if font_chars is not None:
         used.append(f"文字表 {os.path.relpath(args.font_chars, REPO)} {len(font_chars)} 字")
     else:
@@ -537,9 +563,10 @@ def main() -> int:
         print(f"\n注意: {len(rows)} 行すべて訳文の欄が原文と同じです。"
               "原文と見比べる検査は動いていません:")
         print("  " + " / ".join(COMPARING_RULES))
-        # **止まっている検査を「効いている」側に混ぜない** (#186)。
-        # font は文字表が無ければ動かないので、そのときは名前を外す
-        working = [r for r in ABSOLUTE_RULES if r != "font" or font_chars is not None]
+        # **止まっている検査を「効いている」側に混ぜない** (#186・#187)。
+        # font は文字表が、glossary は用語集が無ければ動かない
+        off = ({"font"} if font_chars is None else set()) | (set() if glossary else {"glossary"})
+        working = [r for r in ABSOLUTE_RULES if r not in off]
         print("  いま効いているのは、訳文だけを見て分かる検査 "
               f"({' / '.join(working)}) です。")
         print("  訳文を入れてからもう一度かけると、残りの検査も働きます。")

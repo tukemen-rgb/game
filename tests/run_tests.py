@@ -2719,6 +2719,68 @@ class TestProofread(unittest.TestCase):
             self.assertFalse("文字表のせい" in out,
                              f"この作品の文字表を渡したのに文字表のせいにしている:\n{out[-400:]}")
 
+    def test_every_file_option_refuses_a_path_that_is_not_there(self):
+        """**ファイルを指す指定は、どれも「渡したのに無い」を断ること** (#187).
+
+        #186 で `--font-chars` だけ直しましたが、同じ書き方
+        (`os.path.exists` で黙って飛ばす) が `--glossary` と `--names` にも
+        残っていました。用語集は実害があります —— 打ち間違えると
+        **用語の検査が 1 件も出ないまま「ERROR 0 件」**になり、
+        「いま効いている検査」には `glossary` が載ったままでした。
+        (`--names` は話し手の名前を出すだけなので、失うのは表示。
+        `--rules` は前から断っていました。)
+
+        1 つずつ書くと、次に指定が増えたときまた漏れます。道具側の
+        `FILE_OPTIONS` の並びをそのまま回るので、**足したら自動で見張られます**。
+        """
+        import importlib.util
+        import subprocess
+        import tempfile
+
+        spec = importlib.util.spec_from_file_location(
+            "proofread_opts", os.path.join(REPO, "tools", "proofread.py"))
+        pr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pr)
+        self.assertGreaterEqual(len(pr.FILE_OPTIONS), 4,
+                                f"ファイルを指す指定が {len(pr.FILE_OPTIONS)} 個しかない")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = os.path.join(tmp, "a.tsv")
+            with open(tsv, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n0\tボク\tボク\n")
+            gone = os.path.join(tmp, "nope.dat")
+
+            for attr, flag, label, default, _how in pr.FILE_OPTIONS:
+                res = subprocess.run(
+                    [sys.executable, os.path.join(REPO, "tools", "proofread.py"),
+                     tsv, flag, gone],
+                    capture_output=True, text=True)
+                out = res.stdout + res.stderr
+                self.assertEqual(res.returncode, 1,
+                                 f"{flag} に無い道を渡したのに通した:\n{out[-300:]}")
+                self.assertTrue(f"→ {label} " in out,
+                                f"{flag} の断りが呼び名 ({label}) を言っていない:\n{out[-300:]}")
+                self.assertTrue(gone in out,
+                                f"{flag} の断りが渡された道を言っていない:\n{out[-300:]}")
+                # 既定の置き場が本当にその名前であること (並びが古くなっていないか)
+                self.assertTrue(os.path.basename(default),
+                                f"{flag} の既定が空です")
+
+            # 用語集が空なら、**効いている検査の一覧から glossary を外す**
+            empty = os.path.join(tmp, "empty.tsv")
+            with open(empty, "w", encoding="utf-8") as fh:
+                fh.write("term\tforbidden\tnote\n")
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "proofread.py"),
+                 tsv, "--glossary", empty], capture_output=True, text=True)
+            out = res.stdout + res.stderr
+            self.assertTrue("用語集なし" in out,
+                            f"「使った設定」が用語集の欄を黙って省いている:\n{out[-400:]}")
+            working = re.search(r"いま効いているのは、訳文だけを見て分かる検査 \(([^)]*)\)", out)
+            self.assertTrue(working, f"効いている検査の一覧が出ていない:\n{out[-400:]}")
+            self.assertFalse("glossary" in working.group(1).split(" / "),
+                             f"止まっている glossary を効いている側に入れている: {working.group(1)}")
+
     def test_a_font_table_that_is_not_there_is_refused(self):
         """**渡した文字表が見つからないときは断ること** (#186).
 
