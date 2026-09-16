@@ -32,6 +32,25 @@ import struct
 import unicodedata
 
 
+def text_encoding(path: str) -> str:
+    """`open_text` がそのファイルをどの形式として読んだか (#200).
+
+    読めるかどうかとは別に、**どれで保存されたか**を知りたいことがある。
+    cp932 (メモ帳の「ANSI」) で保存されたファイルには、cp932 に無い字が
+    そもそも入っていない —— 保存のときに `?` へ変わっているからで、
+    それを「訳文の間違い」と読ませないために、呼ぶ側が形式を見分けられるようにする。
+    """
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+        return "utf-16"
+    try:
+        raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return "cp932"
+    return "utf-8"
+
+
 def open_text(path: str) -> io.StringIO:
     """利用者が作った文字ファイルを、保存形式を問わず読む.
 

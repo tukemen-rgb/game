@@ -3073,6 +3073,71 @@ class TestProofread(unittest.TestCase):
             self.assertFalse("文字表のせい" in out,
                              f"この作品の文字表を渡したのに文字表のせいにしている:\n{out[-400:]}")
 
+    def test_ansi_saving_of_the_translation_is_named_as_the_cause(self):
+        """**訳文の側も、ANSI 保存で字が消える。それを名指しすること** (#200).
+
+        #199 で文字表について直しました。同じことが**訳文**にも起きます ——
+        `all.tsv` を Excel やメモ帳の「ANSI」で保存すると、cp932 に無い字
+        (`¥` `—` `♡` `︙`) がその場で `?` に変わります。`?` は半角なので
+        校正では「半角文字が混ざっています」と出て、**訳文の書き方の問題に
+        見えます**。実際には保存の仕方の問題で、訳文を直しても直りません。
+
+        見分けは 2 通り。ファイルが cp932 で保存されているか、原文には
+        cp932 で書けない字があるのに訳文はその場が `?` になっているか。
+        """
+        import subprocess
+        import tempfile
+
+        def run(path):
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "proofread.py"),
+                 path, "--no-font-check"], capture_output=True, text=True)
+            return res.stdout + res.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. **原文は無事、訳文だけ潰れている** (別の所から貼ったとき)
+            one = os.path.join(tmp, "one.tsv")
+            with open(one, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                fh.write("r0\tぼくの♡なつやすみ\tぼくの?なつやすみ\n")
+            out = run(one)
+            note = next((ln for ln in out.splitlines()
+                         if ln.startswith("注意:") and "`?`" in ln), "")
+            self.assertTrue(note, f"訳文が潰れていると言っていない:\n{out[-600:]}")
+            self.assertTrue("訳文の書き方の問題ではありません" in out,
+                            f"訳文のせいではないと言っていない:\n{out[-600:]}")
+            self.assertTrue("UTF-8" in out, f"直し方を言っていない:\n{out[-600:]}")
+
+            # 2. **ファイルごと ANSI** (このときは原文も潰れているので比べられない)
+            two = os.path.join(tmp, "two.tsv")
+            with open(two, "wb") as fh:
+                fh.write("id\toriginal\ttranslation\n"
+                         "r0\tかわで?をとる\tかわで?をとる\n".encode("cp932"))
+            out = run(two)
+            self.assertTrue("ANSI (cp932) で保存" in out,
+                            f"保存形式そのものを言っていない:\n{out[-600:]}")
+
+            # 3. **無事な TSV では黙る** (毎回出たら誰も読まなくなる)
+            ok = os.path.join(tmp, "ok.tsv")
+            with open(ok, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                fh.write("r0\tぼくの♡なつやすみ\tぼくの♡なつやすみ\n")
+            out = run(ok)
+            # **2 通りのどちらでも出る言葉**で見る。"ANSI" だけだと、
+            # 訳文の比較で出る側 (「原文にある字が訳文では ?」) を見落とす
+            self.assertFalse("保存した瞬間に" in out,
+                             f"無事な TSV に文句を言っている:\n{out[-600:]}")
+
+            # 4. 半角の `?` があっても、**原文に消える字が無ければ**言わない
+            #    (`?` を普通に使っている訳文を、保存のせいにしない)
+            plain = os.path.join(tmp, "plain.tsv")
+            with open(plain, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                fh.write("r0\tなにをしているの\tなにしてる?\n")
+            out = run(plain)
+            self.assertFalse("保存した瞬間に" in out,
+                             f"ただの ? を保存のせいにしている:\n{out[-600:]}")
+
     def test_a_wall_of_findings_does_not_bury_the_summary(self):
         """**実物並みの行数で、締めの行と注意が指摘に埋もれないこと** (#194).
 

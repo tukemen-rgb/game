@@ -48,6 +48,16 @@ COMPARING_RULES = ("placeholder", "control", "number", "empty", "untranslated")
 #: `--report` の TSV に回す。**締めの行と注意を、指摘の壁に埋もれさせない**ため
 SHOW_ROWS_MAX = 20
 
+
+def fits_cp932(ch: str) -> bool:
+    """その字を cp932 (メモ帳の「ANSI」) で保存できるか (#200)."""
+    try:
+        ch.encode("cp932")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 #: 訳文だけを見て分かる検査。取り出したばかりのテキストでも効く
 ABSOLUTE_RULES = ("line_width", "line_count", "kinsoku", "font", "halfwidth",
                   "notation", "glossary", "consistency")
@@ -510,6 +520,28 @@ def main() -> int:
     # **全行に halfwidth の ERROR** を出していた。本当の原因は埋もれる。
     # 一部だけ番号なら、原因は別 —— **文字表がその番号まで届いていない**
     # (この作品の文字表は 1656 字あり、画像 1 枚では 1058 字分しか入らない。#167)
+    # **ANSI で保存すると、訳文の字が消える** (#199 の文字表と同じ話を訳文側で、#200)。
+    # cp932 に無い字 (この作品では ¥ — ♡ ︙) は保存の瞬間に `?` になる。
+    # 出てくるのは半角の ERROR なので、**訳文の書き方の問題に見える**。
+    # 見分けは 2 通り: ファイルが cp932 で保存されている / 原文には cp932 で
+    # 書けない字があるのに、訳文はその場が `?` になっている
+    if any("?" in scrp.final_text(r) or "?" in r.get("original", "") for r in rows):
+        saved_as = scrp.text_encoding(args.tsv)
+        hurt = [r for r in rows
+                if "?" in scrp.final_text(r)
+                and any(not fits_cp932(c) for c in r.get("original", ""))]
+        if saved_as == "cp932" or hurt:
+            print()
+            if saved_as == "cp932":
+                print(f"注意: この TSV は **ANSI (cp932) で保存**されています "
+                      f"({os.path.basename(args.tsv)})。")
+            else:
+                print(f"注意: {len(hurt)} 行で、原文にある字が訳文では `?` になっています。")
+            print("  cp932 に無い字は、保存した瞬間に `?` に変わります "
+                  "(この作品では ¥ — ♡ ︙ の 4 つ)。**訳文の書き方の問題ではありません。**")
+            print("  Excel なら「CSV UTF-8」、メモ帳なら「UTF-8」で保存し直してください。"
+                  "そのあと取り出し直すか、消えた字を書き戻します")
+
     numbered = [r for r in rows if re.search(r"\[\d+\]", r.get("original", ""))]
     if numbered:
         codes = sorted({int(n) for r in rows
