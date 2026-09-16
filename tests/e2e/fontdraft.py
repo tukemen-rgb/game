@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import os
 import sys
 
 from playwright.async_api import async_playwright
@@ -149,6 +150,81 @@ def docs11_says_the_same(shape_only: int, right: int, total: int) -> list[str]:
     return out
 
 
+def docs07_says_the_same(shape_only: int, right: int, total: int, kanji: dict) -> list[str]:
+    """**同じ実測が docs/07 にもあった。3 か所目** (#192).
+
+    #138 で「同じ測定を 2 つの文書に書いた時点で、両方見張るか 1 か所に寄せるかの
+    どちらかが要る」と書きながら、**3 か所目を探さなかった**。docs/07 は
+    率 (81% / 93%) の形で書いてあるので、`46/57` を探す見張りには当たらない。
+
+    漢字の実測 (貼らないと 0 字、貼ると 7 字) も docs/07 にしかない。
+    こちらは今まで「増えたか」「半分は当たるか」の緩い線しか見ていなかった。
+    """
+    import re
+
+    with open(REPO + "/docs/07-構造探査台.md", encoding="utf-8") as fh:
+        doc = fh.read()
+    out = []
+
+    want_shape, want_right = round(shape_only * 100 / total), round(right * 100 / total)
+    said = re.findall(r"実測は形だけで (\d+)%、並び順を足して (\d+)%", doc)
+    if len(said) != 1:
+        out.append(f"docs/07 の率の書き方が見つからない ({len(said)} 件)")
+    elif (int(said[0][0]), int(said[0][1])) != (want_shape, want_right):
+        out.append(f"docs/07 の率が今と違う。{said[0][0]}% / {said[0][1]}% → "
+                   f"{want_shape}% / {want_right}% に書き換える "
+                   f"({shape_only}/{total}, {right}/{total})")
+
+    k = re.findall(r"実測: 漢字 (\d+) 字は貼らないと (\d+) 字、貼ると (\d+) 字当たった", doc)
+    if len(k) != 1:
+        out.append(f"docs/07 の漢字の実測の書き方が見つからない ({len(k)} 件)")
+    else:
+        now = (kanji["total"], kanji["without"], kanji["with"])
+        if tuple(int(x) for x in k[0]) != now:
+            out.append(f"docs/07 の漢字の実測が今と違う。{k[0]} → {now} に書き換える")
+    return out
+
+
+#: この実測を書いてよい文書。ここに挙げたものだけを、上の 3 つの関数が見張る
+MEASURED_IN = {"docs/07-構造探査台.md", "docs/10-僕夏2の手順.md",
+               "docs/11-形式を突き止めるまで.md"}
+
+
+def no_fourth_place_holds_this_measurement() -> list:
+    """**4 か所目が増えていないこと** (#192).
+
+    #138 で「同じ測定を 2 つの文書に書いた時点で、両方見張るか 1 か所に寄せるかの
+    どちらかが要る」と書いて見張る側を選んだ。ところが **3 か所目 (docs/07) を
+    探さなかった**ので、率の形で書かれたものが 4 回分ずっと野放しだった。
+    1 つずつ足していく限り、次も同じことが起きる。**どこにあるかを掃く。**
+
+    docs/09 の記録欄は除く。あそこはその時の数字の記録で、書き換えてはいけない
+    (#191 と同じ)。
+    """
+    import glob
+    import re
+
+    # 3 冊で書き方が違う (率 / `46/57` / 表の行) ので、**言葉の組み合わせ**で探す。
+    # 「形だけ」と「並び順で直す話」が同じ文書にあれば、この実測を書いている
+    shape = re.compile(r"形だけ")
+    order = re.compile(r"並び順を足して|並び順の補正|並び順で直した")
+    found, out = set(), []
+    for path in sorted(glob.glob(REPO + "/docs/*.md")) + [REPO + "/README.md"]:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        if os.path.basename(path).startswith("09-"):
+            text = text.split("## 進め方 (自走ループの記録欄)")[0]
+        if shape.search(text) and order.search(text):
+            found.add(os.path.relpath(path, REPO))
+    if not found:
+        return ["下書きの実測がどの文書にも見つからない (書き方が変わった)"]
+    for extra in sorted(found - MEASURED_IN):
+        out.append(f"{extra} にも下書きの実測がある。MEASURED_IN と突き合わせを足すこと")
+    for gone in sorted(MEASURED_IN - found):
+        out.append(f"{gone} から下書きの実測が消えた (見張りの側も見直すこと)")
+    return out
+
+
 async def main():
     async with async_playwright() as p:
         b = await launch(p)
@@ -195,6 +271,9 @@ async def main():
             bad.append(f"漢字を貼っても当たりが増えない: {k['without']} -> {k['with']}")
         if k["with"] < k["total"] * 0.5:
             bad.append(f"貼った漢字の当たりが少ない: {k['with']}/{k['total']}")
+        # **docs/07 にも同じ実測が書いてある** (3 か所目、#192)。率と漢字の両方を見る
+        bad += docs07_says_the_same(r["shapeOnly"], r["right"], r["total"], k)
+        bad += no_fourth_place_holds_this_measurement()
 
         # 2. 練習データのフォント画像で、操作が最後まで通ること
         await page.set_input_files("#fileinput", [WORK + "/BOKU2SAMPLE/BOKU2.IDX",
