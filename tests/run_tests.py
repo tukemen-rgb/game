@@ -4733,7 +4733,13 @@ class TestDamageDrill(unittest.TestCase):
         import io
         import boku2
         import make_boku2_sample
-        for kind, want in self.EXPECT.items():
+        # **道具の一覧を正にする** (#190)。ここが自前の辞書だけを回っていたので、
+        # `--break` に壊し方が増えても、この検査は**黙って増えないまま**だった。
+        # #189 と同じ型 (一覧を写すと、写した側が古くなっても誰も気づかない)
+        self.assertEqual(set(self.EXPECT), set(make_boku2_sample.DAMAGE),
+                         "--break の壊し方と、ここで待ち受けている行がずれています")
+        for kind in sorted(make_boku2_sample.DAMAGE):
+            want = self.EXPECT[kind]
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 folder = os.path.join(tmp, "S")
                 make_boku2_sample.build_sample(folder)
@@ -4742,12 +4748,15 @@ class TestDamageDrill(unittest.TestCase):
                 out = io.StringIO()
                 rc = boku2.check(folder, out=out)
                 self.assertEqual(rc, 1, f"{kind}: 問題なしになった\n{out.getvalue()}")
-                self.assertIn(want, out.getvalue(), kind)
-                self.assertIn("→", out.getvalue(), kind)
+                # assertIn は落ちたとき診断の全文を吐く。何がまずいのか読めなくなる
+                got = out.getvalue()
+                self.assertTrue(want in got, f"{kind}: 「{want}」が出ていない\n{got[-500:]}")
+                self.assertTrue("→" in got, f"{kind}: → の行が 1 本も無い\n{got[-500:]}")
                 # どの壊れ方でも締めの行まで出ること。途中で止める壊れ方 (idx) だけ
                 # 締めが無く、道具が落ちたのか診た結果なのか分からなかった (#73)
-                self.assertIn("== 結果:", out.getvalue(), f"{kind}: 締めの行が無い\n{out.getvalue()}")
-                self.assertIn("この出力ごと報告してください", out.getvalue(), kind)
+                self.assertTrue("== 結果:" in got, f"{kind}: 締めの行が無い\n{got[-500:]}")
+                self.assertTrue("この出力ごと報告してください" in got,
+                                f"{kind}: 報告の促しが無い\n{got[-500:]}")
 
     def test_stopping_early_says_what_was_not_checked(self):
         """途中で止めたときは、この先を診ていないことまで書くこと (#73)."""

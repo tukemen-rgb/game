@@ -15,8 +15,22 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+#: 走らせる検査。**並びに意味がある** (軽いものから先に出して、落ちた所が読みやすい
+#: ように) ので一覧で持つ。ただし**持っているだけだと古くなる** ので、
+#: このフォルダの .py と突き合わせる (#190)。検査を足して一覧に入れ忘れると、
+#: その検査は**一度も走らないまま緑**になる。ここは全部の見張りの親なので、
+#: 見落としがそのまま全部の見落としになる
 CHECKS = ["split", "msg", "map", "tim2", "fontdraft", "sample", "build", "broken", "viewer",
           "docs07", "miss", "tabs", "strings", "handover", "folder", "fontpage"]
+
+#: 検査ではないもの (共通の道具と、この走らせ役そのもの)
+NOT_A_CHECK = {"common", "run_all"}
+
+
+def missing_checks() -> list:
+    """tests/e2e/ にあるのに CHECKS に入っていない検査の名前."""
+    here = {os.path.splitext(n)[0] for n in os.listdir(HERE) if n.endswith(".py")}
+    return sorted(here - NOT_A_CHECK - set(CHECKS))
 
 #: (これができていれば作らなくてよい印, 作る道具). **上から順に** 実行する。
 #: make_archive.py は make_sample.py の出力 (SCRIPT.BIN など) を材料にするので、
@@ -52,6 +66,13 @@ def build_fixtures(repo: str = REPO) -> str | None:
 
 
 def main() -> int:
+    # **playwright の有無より先に見る。** 一覧の入れ忘れは playwright が
+    # 無い環境でも分かるし、ここで黙ると「飛ばした N 件」の N まで嘘になる
+    forgotten = missing_checks()
+    if forgotten:
+        print(f"tests/e2e/ にあるのに CHECKS に入っていない検査: {forgotten}")
+        print("  一覧に足してください (入れないと一度も走りません)")
+        return 1
     try:
         import playwright  # noqa: F401
     except ImportError:

@@ -1,8 +1,11 @@
 """課題 9 の主張「壊れたデータで、ブラウザの要約も CLI の check と同じ → の行を出す」を確かめる.
 
-make_boku2_sample.damage() で 5 通りに壊した練習データを読ませ、索引タブの
+make_boku2_sample.damage() で壊した練習データを読ませ、索引タブの
 「報告用の要約」に、tests/run_tests.py の TestDamageDrill と同じ行が出ること。
 `idx` (索引の先頭を壊す) だけは索引として読めないので、「DFI: 期待どおり」が出ないことを見る。
+
+**壊し方の数はここに書かない。** `make_boku2_sample.DAMAGE` から取る (#190)。
+数を書くと、壊し方が増えたときに文書だけ古くなる (#185・#189 と同じ)。
 """
 import asyncio, os, subprocess, sys
 from playwright.async_api import async_playwright
@@ -139,7 +142,16 @@ async def main():
     async with async_playwright() as p:
         b = await launch(p)
         errors = []
-        for kind in ["ok", "idx", "name", "allnames", "msg", "font", "map"]:
+        # **壊し方は道具の一覧から取る** (#190)。ここに名前を並べて持っていたので、
+        # `--break` に増えても**この検査だけ増えないまま**だった (#189 と同じ型)。
+        # `idx` は索引として読めない所で止まるので、待ち受ける行が別扱い
+        kinds = sorted(make_boku2_sample.DAMAGE)
+        missing = [k for k in kinds if k != "idx" and k not in EXPECT]
+        if missing:
+            print(f"EXPECT に待ち受ける行が無い壊し方: {missing}")
+            print("RESULT NG")
+            sys.exit(1)
+        for kind in ["ok"] + kinds:
             await run_kind(b, kind, errors)
         await b.close()
         print("errors:", errors)
