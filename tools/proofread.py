@@ -210,7 +210,8 @@ def check_consistency(rows: list[dict], lineno_of) -> list[Finding]:
 def check_row(row: dict, rules: dict, glossary: list[dict],
               font_chars: set[str] | None,
               tag_widths: dict[str, float] | None = None,
-              line_width_override: float | None = None) -> list[Finding]:
+              line_width_override: float | None = None,
+              lines_max_override: int | None = None) -> list[Finding]:
     rid = row.get("id", "?")
     lineno = row.get("_lineno")
     original = row.get("original", "")
@@ -277,7 +278,8 @@ def check_row(row: dict, rules: dict, glossary: list[dict],
     # --- 行の幅と行数 -----------------------------------------------------
     max_width = (line_width_override if line_width_override is not None
                  else float(rules.get("line_max_width", 0) or 0))
-    lines_max = int(rules.get("lines_max", 0) or 0)
+    lines_max = (lines_max_override if lines_max_override is not None
+                 else int(rules.get("lines_max", 0) or 0))
     pages = pages_of(text)
     for p, lines in enumerate(pages):
         if lines_max and len(lines) > lines_max:
@@ -358,6 +360,9 @@ def main() -> int:
     # なので、原文の実測に寄せて試せるようにする (#180)
     ap.add_argument("--line-width", type=float, metavar="文字数",
                     help="1 行に入る文字数の上限 (既定は data/rules.json の line_max_width)")
+    # 枠は 1 種類ではない。会話の枠と日記の頁で行数が違う (#181)
+    ap.add_argument("--lines-max", type=int, metavar="行数",
+                    help="1 ページの行数の上限 (既定は data/rules.json の lines_max)")
     ap.add_argument("--only-errors", action="store_true", help="ERROR だけ表示する")
     ap.add_argument("--report", help="指摘一覧を TSV で書き出す")
     args = ap.parse_args()
@@ -394,7 +399,7 @@ def main() -> int:
     tag_widths = tag_widths_of(rules, args.var_width)
     for row in rows:
         findings += check_row(row, rules, glossary, font_chars, tag_widths,
-                              args.line_width)
+                              args.line_width, args.lines_max)
     lineno_of = {row.get("id", "?"): row.get("_lineno") for row in rows}
     findings += check_consistency(rows, lambda rid: lineno_of.get(rid))
     findings.sort(key=lambda f: f.sort_key())
@@ -448,6 +453,16 @@ def main() -> int:
     # この検査は何も捕まえない。** 公開ソースに残る実物の日本語を測ると、
     # いちばん長い行でも 13.5 文字分しかなかった (diaries / sumo_script / bug_info)。
     # そこで、いま見ている原文の実測を出して、上限と見比べられるようにする
+    # **枠は 1 種類ではない** (#181)。会話の枠と日記の頁で入る行数が違う。
+    # 公開ソースの日記 (Hilltop が実機に収めた英訳) は 111 ページで 5〜9 行あり、
+    # `lines_max: 3` を当てると全ページが ERROR になる。行数で引っかかった行が
+    # 多いときは、**別の枠の文を混ぜている**ほうを先に疑う
+    over_lines = len({f.row_id for f in findings if f.rule == "line_count"})
+    if over_lines and over_lines >= len(rows) * 0.5:
+        print(f"\n注意: {len(rows)} 行のうち {over_lines} 行が行数オーバーです。"
+              f"上限は 1 ページ {int(rules.get('lines_max', 0) or 0)} 行ですが、"
+              "**枠は 1 種類ではありません** (会話の枠と日記の頁で入る行数が違う)。"
+              "日記や説明文を混ぜているなら、その分だけ --lines-max を変えて別に見てください")
     max_width = (args.line_width if args.line_width is not None
                  else float(rules.get("line_max_width", 0) or 0))
     widths = [scrp.display_width(line, tag_widths)

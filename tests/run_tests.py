@@ -2510,27 +2510,110 @@ class TestProofread(unittest.TestCase):
         self.assertEqual(rc, 1, f"上限 13 で 14 文字が通っている:\n{out}")
         self.assertIn("上限 13", out, f"打ち込んだ上限を使っていない:\n{out}")
 
-        # 4. 実物の裏付け: 公開ソースの日本語は、いまの上限に遠く届かない
+        # 4. 実物の裏付け。**日本語の原文**と、**向こうが枠に収めた英訳**を分けて測る。
+        #    #180 で最初に測ったとき、`diaries.txt` などを「実物の日本語」と書いたが、
+        #    あれは **Hilltop の英訳**だった (中を見ずに数だけ取った)。結論
+        #    (18 は広すぎる) は変わらなかったが、**根拠の中身が違っていた**ので、
+        #    ここで言語ごとに分けて、取り違えたら落ちるようにする
         if os.path.isdir(PUBLIC_SRC):
             import unicodedata
-            widest, counted = 0.0, 0
-            for name in ("diaries.txt", "sumo_script.txt", "bug_info.txt"):
+
+            def widths(name):
                 path = os.path.join(PUBLIC_SRC, name)
                 if not os.path.isfile(path):
-                    continue
+                    return []
+                out = []
                 with open(path, encoding="utf-8", errors="replace") as fh:
                     for line in fh:
-                        line = re.sub(r"\{[^}]*\}|<[^>]*>", "", line).strip()
-                        if not line:
-                            continue
-                        counted += 1
-                        widest = max(widest, sum(
-                            1.0 if unicodedata.east_asian_width(c) in "WFA" else 0.5
-                            for c in line))
-            self.assertGreater(counted, 500, f"{counted} 行しか測れていない")
-            self.assertLess(widest, limit,
-                            f"実物の日本語が {widest} 文字分まで使っている。"
+                        line = re.sub(r"\{[^}]*\}|<[^>]*>|^///.*|^&\d+", "", line).strip()
+                        if line:
+                            out.append((line, sum(
+                                1.0 if unicodedata.east_asian_width(c) in "WFA" else 0.5
+                                for c in line)))
+                return out
+
+            def is_jp(s):
+                return any("\u3040" <= c <= "\u30ff" or "\u4e00" <= c <= "\u9fff" for c in s)
+
+            # 日本語の原文が残っているのは test.txt だけ (会話の抜粋)
+            jp = widths("test.txt")
+            self.assertGreater(len(jp), 50, f"日本語の行を {len(jp)} 行しか拾えない")
+            self.assertTrue(all(is_jp(t) for t, _ in jp),
+                            "test.txt に日本語でない行が混ざっている (別のファイルになった)")
+            jp_top = max(w for _, w in jp)
+            self.assertLess(jp_top, limit,
+                            f"日本語の原文が {jp_top} 文字分まで使っている。"
                             f"上限 {limit:g} は広すぎるという読みが崩れた")
+
+            # 向こうが同じ枠に収めた英訳。**日本語ではない**ことを確かめてから使う
+            en = [x for name in ("diaries.txt", "sumo_script.txt", "bug_info.txt")
+                  for x in widths(name)]
+            self.assertGreater(len(en), 500, f"英訳の行を {len(en)} 行しか拾えない")
+            self.assertLess(sum(1 for t, _ in en if is_jp(t)), len(en) * 0.05,
+                            "英訳のつもりのファイルが日本語だった (中を見ずに数えている)")
+            en_top = max(w for _, w in en)
+            self.assertLess(en_top, limit,
+                            f"枠に収めた英訳が {en_top} 文字分まで使っている。"
+                            f"上限 {limit:g} は広すぎるという読みが崩れた")
+
+    def test_the_page_height_is_not_one_number_for_the_whole_game(self):
+        """**枠は 1 種類ではない** —— 行数で総崩れしたら、そう言うこと (#181).
+
+        `lines_max: 3` も `line_max_width` と同じで、練習用の作品の数字です。
+        公開ソースで測ると、Hilltop が実機に収めた**日記**は 111 ページで
+        **5〜9 行** —— `lines_max: 3` を当てると全ページが ERROR になります。
+        日記の頁と会話の枠は別物なので、これは訳文の誤りではありません。
+
+        社長が日記の文を混ぜて `proofread.py` にかけると、**本物の誤りが
+        大量の偽 ERROR に埋もれます**。数字を勝手に変えるのではなく、
+        (1) 大半が行数で落ちたら「枠は 1 種類ではない」と言い、
+        (2) `--lines-max` で枠ごとに見られるようにしました。
+        """
+        import subprocess
+        import tempfile
+
+        def run(body, *extra):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "a.tsv")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(f"id\toriginal\ttranslation\n1\t{body}\t{body}\n")
+                res = subprocess.run(
+                    [sys.executable, os.path.join(REPO, "tools", "proofread.py"),
+                     path, "--no-font-check", *extra], capture_output=True, text=True)
+                return res.returncode, res.stdout + res.stderr
+
+        lines_max = int(self.rules.get("lines_max", 0))
+        self.assertGreater(lines_max, 0, "行数の上限が設定されていない")
+        tall = "<BR>".join("あいうえおかきく"[:lines_max + 2])
+
+        # 1. 既定では落ちて、**枠が 1 種類でないこと**を言う
+        rc, out = run(tall)
+        self.assertEqual(rc, 1, f"上限を超えているのに通っている:\n{out}")
+        self.assertIn("line_count", out, "行数で引っかかっていない")
+        self.assertIn("枠は 1 種類ではありません", out, f"枠の違いを言っていない:\n{out}")
+
+        # 2. --lines-max を上げれば通り、**余計な注意も出ない**
+        rc, out = run(tall, "--lines-max", str(lines_max + 5))
+        self.assertEqual(rc, 0, f"上限を上げたのに落ちている:\n{out}")
+        self.assertNotIn("枠は 1 種類ではありません", out,
+                         f"落ちていないのに注意を出している:\n{out}")
+
+        # 3. 実物の裏付け: 公開ソースの日記は 1 ページに 3 行では収まらない
+        if os.path.isdir(PUBLIC_SRC):
+            path = os.path.join(PUBLIC_SRC, "diaries.txt")
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    raw = fh.read()
+                counts = []
+                for page in re.split(r"^///$", raw, flags=re.M):
+                    got = [ln for ln in page.split("\n")
+                           if ln.strip() and not re.match(r"^&\d+$", ln.strip())]
+                    if got:
+                        counts.append(len(got))
+                self.assertGreater(len(counts), 50, f"{len(counts)} ページしか測れていない")
+                self.assertGreater(max(counts), lines_max,
+                                   f"日記が最大 {max(counts)} 行。上限 {lines_max} で"
+                                   "収まってしまうなら、枠が違うという読みが崩れた")
 
     def test_a_changed_number_is_caught(self):
         """数字の取り違えは、字数も用語も禁則も通ってしまう (#86)."""
