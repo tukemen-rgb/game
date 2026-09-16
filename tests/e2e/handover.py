@@ -284,28 +284,45 @@ async def main() -> int:
                 path = os.path.join(tmp, "from_browser.tsv")
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(tsv)
-                cmd = [c for c in doc_commands(steps) if "proofread.py" in c]
-                if not cmd:
+                # **手順 5 の中だけを読み、書いてある順に全部走らせる** (#186)。
+                # 手順 5 は文字表を作る `fontlist` と `proofread` の 2 本立てになった。
+                # proofread だけ拾うと、**文字表を作らずに渡す**形になり、
+                # #186 で足した「文字表がありません」で落ちる (それが正しい断り方)
+                step5 = steps.split("\n5. ", 1)[-1].split("\n6. ", 1)[0]
+                cmds = doc_commands(step5)
+                fontsrc = os.path.join(tmp, "font.txt")
+                with open(fontsrc, "w", encoding="utf-8") as fh:
+                    fh.write(font)
+                subs = {"そのファイル": path, "font.txt": fontsrc,
+                        "font_chars.txt": os.path.join(tmp, "font_chars.txt")}
+                if not any("proofread.py" in c for c in cmds):
                     errors.append("docs/09 の手順 5 から proofread の呼び方を読めない")
-                else:
-                    # 書いてある形のまま。相手のファイル名だけ実物に差し替える
-                    argv = cmd[0].split()
-                    argv = [sys.executable if a == "python3" else
-                            (path if a == "そのファイル" else a) for a in argv]
+                for cmd in cmds:
+                    argv = [sys.executable if a == "python3" else subs.get(a, a)
+                            for a in cmd.split()]
                     res = subprocess.run(argv, capture_output=True, text=True, cwd=REPO)
-                    print(f"  手順 5: {' '.join(cmd[0].split()[1:])} → 終了コード "
+                    print(f"  手順 5: {' '.join(cmd.split()[1:])} → 終了コード "
                           f"{res.returncode}")
                     if res.returncode != 0:
-                        errors.append(f"手順 5: 画面の TSV を proofread.py が受け取れない "
-                                      f"(終了コード {res.returncode}) "
+                        errors.append(f"手順 5: 書いてある通りに打つと落ちる "
+                                      f"({cmd}) 終了コード {res.returncode} "
                                       f"{(res.stdout + res.stderr)[-200:]!r}")
-                    elif "行をチェック" not in res.stdout:
-                        errors.append(f"手順 5: 校正の結果が出ない {res.stdout[-200:]!r}")
+                    elif "proofread.py" in cmd:
+                        if "行をチェック" not in res.stdout:
+                            errors.append(f"手順 5: 校正の結果が出ない {res.stdout[-200:]!r}")
+                        # **文字表を渡した以上、フォント検査が動いていること** (#186)
+                        elif "文字表なし" in res.stdout:
+                            errors.append("手順 5: 文字表を作って渡したのに"
+                                          f"フォント検査が動いていない {res.stdout[-300:]!r}")
 
         # --- 手順 6: 同じ読み方を CLI で一括にかけ、画面と一致すること ---
         # 手順 6 は「画面で確かめた読み方が合っていたら、全部を一括で」と書いてある。
         # **画面と CLI が食い違えば、画面で確かめた意味が無くなる**ので、突き合わせる
-        cmds = [c for c in doc_commands(steps) if "boku2.py" in c and "check" not in c]
+        # **手順 6 の中だけを読む** (#186)。節ぜんぶから拾っていたので、手順 5 に
+        # `boku2.py fontlist` が 1 本増えた途端に「3 本読めない (4)」で落ちた。
+        # 探す範囲を狭めるのは #185 と同じ話
+        step6 = steps.split("\n6. ", 1)[-1].split("\n7. ", 1)[0]
+        cmds = [c for c in doc_commands(step6) if "boku2.py" in c and "check" not in c]
         if len(cmds) != 3:
             errors.append(f"docs/09 の手順 6 から一括のコマンドを 3 本読めない ({len(cmds)})")
         else:

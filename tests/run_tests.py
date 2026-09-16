@@ -2719,6 +2719,136 @@ class TestProofread(unittest.TestCase):
             self.assertFalse("文字表のせい" in out,
                              f"この作品の文字表を渡したのに文字表のせいにしている:\n{out[-400:]}")
 
+    def test_a_font_table_that_is_not_there_is_refused(self):
+        """**渡した文字表が見つからないときは断ること** (#186).
+
+        docs/10 の手順は `--font-chars font_chars.txt` と打たせますが、その前に
+        `fontlist` で作る必要があります。作り忘れたまま打つと、道具は
+        `os.path.exists` で**黙って飛ばして**いました。出るのは「ERROR 0 件」と、
+        `font` を含む「いま効いている検査」の一覧。**実機で □ になる字の検査だけが
+        止まっているのに、動いていると読める。** #123 で 0 字は断るようにしたのに、
+        「無い」はその手前をすり抜けていました。
+
+        既定 (`data/font_chars.txt`) が無いときまで断ると別の作品で使えなくなるので、
+        **自分で渡したときだけ**断ります。
+        """
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = os.path.join(tmp, "a.tsv")
+            with open(tsv, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n0\tボク\tボク\n")
+
+            def run(*extra):
+                res = subprocess.run(
+                    [sys.executable, os.path.join(REPO, "tools", "proofread.py"), tsv, *extra],
+                    capture_output=True, text=True)
+                return res.returncode, res.stdout + res.stderr
+
+            code, out = run("--font-chars", os.path.join(tmp, "nope.txt"))
+            self.assertEqual(code, 1, f"無い文字表を渡したのに通した:\n{out[-400:]}")
+            self.assertTrue("がありません" in out, f"理由を言っていない:\n{out[-400:]}")
+            self.assertTrue("fontlist" in out, f"作り方を言っていない:\n{out[-400:]}")
+
+            # 既定のままなら、今までどおり通る (別の作品で使えなくならないこと)
+            code, out = run()
+            self.assertEqual(code, 0, f"既定のままで断っている:\n{out[-400:]}")
+
+            # 検査が止まっているときは、**止まっていると言う**。黙って省かない
+            code, out = run("--no-font-check")
+            self.assertEqual(code, 0, out[-200:])
+            self.assertTrue("文字表なし" in out,
+                            f"「使った設定」が文字表の欄を黙って省いている:\n{out[-400:]}")
+            working = re.search(r"いま効いているのは、訳文だけを見て分かる検査 \(([^)]*)\)", out)
+            self.assertTrue(working, f"効いている検査の一覧が出ていない:\n{out[-400:]}")
+            self.assertFalse("font" in working.group(1).split(" / "),
+                             f"止まっている font を効いている側に入れている: {working.group(1)}")
+            # 動いているときは、ちゃんと名前が載ること (0 件で緑にしない)
+            code, out = run()
+            working = re.search(r"いま効いているのは、訳文だけを見て分かる検査 \(([^)]*)\)", out)
+            self.assertTrue(working and "font" in working.group(1).split(" / "),
+                            f"動いている font が一覧に無い: {working and working.group(1)}")
+
+    def test_the_two_handbooks_recommend_the_same_proofreading(self):
+        """**docs/09 の手順 5 と docs/10 の「3. 校正にかける」が、同じ形を勧めること** (#186).
+
+        docs/09 の「次の一手」手順 5 は長いあいだ
+        `proofread.py そのファイル --no-font-check` でした。#96 の回に
+        「画面は `--font-chars`、docs/09 は `--no-font-check`。場面が違うだけ」と
+        判断して残したのですが、その判断は **#182 より前**のものです。#182 で
+        道具が「練習用の文字表のせいだ」と名指しするようになった今、
+        手順 3 で文字表を作った直後の手順 5 が検査を切る理由はありません。
+
+        ここでは 2 つ見ます:
+
+        * **切ると何が止まるのか** —— 実物の文字表に無い字を訳文に入れて、
+          `--font-chars` は捕まえ、`--no-font-check` は黙ることを実際に走らせて確かめる
+        * **2 冊が同じ形を勧めているか** —— 同じ作業を違うコマンドで案内していないこと
+        """
+        import subprocess
+        import tempfile
+
+        if not os.path.isdir(PUBLIC_SRC):
+            self.skipTest(f"公開ソースが無い ({PUBLIC_SRC})")
+        table = os.path.join(PUBLIC_SRC, "font.txt")
+        if not os.path.isfile(table):
+            self.skipTest("公開ソースに font.txt が無い")
+
+        with open(table, encoding="utf-8", errors="replace") as fh:
+            in_font = set(fh.read()) - set(" \t\r\n")
+        self.assertGreater(len(in_font), 1000, f"文字表が {len(in_font)} 字しか無い")
+        # この作品のフォントに**無い**字を 1 つ選ぶ (決め打ちにすると表が変わったとき黙る)
+        missing = next((c for c in "彁鰆躑靉纐咏鴫聢" if c not in in_font), None)
+        self.assertTrue(missing, "文字表に無い字が候補の中に見つからない")
+        base = "".join(c for c in "ボクの夏休み" if c in in_font)
+        self.assertGreaterEqual(len(base), 4, "原文に使える字が足りない")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = os.path.join(tmp, "a.tsv")
+            with open(tsv, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                fh.write(f"0\t{base}\t{base}{missing}\n")
+
+            def run(*extra):
+                res = subprocess.run(
+                    [sys.executable, os.path.join(REPO, "tools", "proofread.py"), tsv, *extra],
+                    capture_output=True, text=True)
+                return res.stdout + res.stderr
+
+            caught = run("--font-chars", table)
+            self.assertTrue("フォントに無い文字" in caught,
+                            f"実物の文字表を渡しても「{missing}」を捕まえない:\n{caught[-400:]}")
+            blind = run("--no-font-check")
+            self.assertFalse("フォントに無い文字" in blind,
+                             f"--no-font-check なのにフォント検査が動いている:\n{blind[-400:]}")
+            # **黙るだけ**なのが怖い所。ほかは同じように通ってしまう
+            self.assertTrue("問題なし" in blind or "ERROR 0 件" in blind,
+                            f"--no-font-check で他の検査まで止まっている:\n{blind[-400:]}")
+
+        # 2 冊が勧める形。節に絞って読む (全文だと説明や記録欄の引用に当たる)
+        def options(doc_path, head, end="\n## "):
+            with open(os.path.join(REPO, "docs", doc_path), encoding="utf-8") as fh:
+                doc = fh.read()
+            self.assertTrue(head in doc, f"{doc_path} に「{head}」がありません")
+            body = doc.split(head, 1)[1].split(end, 1)[0]
+            cmds = re.findall(r"python3 tools/proofread\.py[^\n`]*", body)
+            self.assertTrue(cmds, f"{doc_path} の「{head}」に proofread のコマンドがありません")
+            return [sorted(t for t in c.split() if t.startswith("--")) for c in cmds]
+
+        nine = options("09-調査ログと引き継ぎ.md", "## 次の一手 (優先順)")
+        ten = options("10-僕夏2の手順.md", "## 3. 校正にかける")
+        self.assertEqual(nine[0], ten[0],
+                         f"2 冊が違う形を勧めています\n  docs/09: {nine[0]}\n  docs/10: {ten[0]}")
+        self.assertTrue("--font-chars" in nine[0],
+                        f"docs/09 の手順が文字表を渡していません: {nine[0]}")
+        # 逃げ道として `--no-font-check` に触れるのは構わないが、**何が止まるか**を書くこと
+        with open(os.path.join(REPO, "docs", "09-調査ログと引き継ぎ.md"), encoding="utf-8") as fh:
+            steps = fh.read().split("## 次の一手 (優先順)", 1)[1].split("\n## ", 1)[0]
+        if "--no-font-check" in steps:
+            self.assertTrue("止まります" in steps or "止まる" in steps,
+                            "--no-font-check の逃げ道に、何が止まるのかが書かれていません")
+
     def test_a_changed_number_is_caught(self):
         """数字の取り違えは、字数も用語も禁則も通ってしまう (#86)."""
         hit = self.rules_hit("報酬は<COLOR:02>８５０<COLOR:00>ギルだ。",
@@ -4110,20 +4240,25 @@ class TestDocs(unittest.TestCase):
                 and not ln.startswith("| `→` の行")]
 
         # 道具の → は、隣り合う文字列をつないだ**全文**で見る。先頭だけだと
-        # 「[フォント] 幅が …」の 2 種類 (狭すぎる / 広すぎる) が見分けられない
-        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
-            src = fh.read()
+        # 「[フォント] 幅が …」の 2 種類 (狭すぎる / 広すぎる) が見分けられない。
+        # **取り出す側だけでなく校正の側も見る** (#186)。前書きは「どの道具のものでも」
+        # と言っているのに、見ていたのは boku2.py だけだった
         one = re.compile(r'\s*f?"((?:[^"\\]|\\.)*)"')
         arrows = set()
-        for m in re.finditer(r'(?:say\(|return \(|print\(|^\s+)(?=f?"→ )', src, re.M):
-            pos, parts = m.end(), []
-            while True:
-                s = one.match(src, pos)
-                if not s:
-                    break
-                parts.append(s.group(1))
-                pos = s.end()
-            arrows.add(norm(re.sub(r"\{[^}]*\}", "…", "".join(parts))[2:]))
+        for tool in ("boku2.py", "proofread.py", "compare_tsv.py"):
+            with open(os.path.join(REPO, "tools", tool), encoding="utf-8") as fh:
+                src = fh.read()
+            for m in re.finditer(r'(?:say\(|return \(|print\(|^\s+)(?=f?"(?:\\n)?→ )',
+                                 src, re.M):
+                pos, parts = m.end(), []
+                while True:
+                    s = one.match(src, pos)
+                    if not s:
+                        break
+                    parts.append(s.group(1))
+                    pos = s.end()
+                joined = re.sub(r"\{[^}]*\}", "…", "".join(parts)).replace("\\n", "")
+                arrows.add(norm(joined.split("→ ", 1)[1]))
 
         self.assertGreaterEqual(len(arrows), 20, "→ を拾えていない (0 件なら必ず一致する)")
         self.assertGreaterEqual(len(rows), 20, "表の行を拾えていない")
