@@ -3612,7 +3612,11 @@ const FONT_HUNT_HEAD = 64 * 1024;          /* ほかのファイル */
    実物の頁 1 枚は 512×1024 ドットの 8bit 索引で 51 万バイトあり、2 枚目は 0x7D508
    あたりに来る。64KB しか読まなければ、同じファイルの 2 枚目は必ず見落とす */
 const FONT_OWN_CAP = 4 * 1024 * 1024;
-const FONT_HUNT_FILES = 400;
+/** 名前で拾えなかったときに、**中身の形**で探す索引の件数 (#196)。
+ * **一括処理 (boku2.py) と同じ数字**にしておくこと。
+ * 400 のままだと、401 件目から先にある本文もフォントも永久に見つからない
+ * (実物は 1951 件)。全件の先頭を読んでも 32 MB / 0.03 秒だった。 */
+const SHAPE_HUNT_FILES = 4000;
 
 /** `check` が中身まで開く `.msg` の数。**一括処理 (boku2.py) と同じ数字**にしておくこと。
  *
@@ -3651,7 +3655,7 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry) {
   }
 
   let found = 0;
-  for (const other of items.slice(0, FONT_HUNT_FILES)) {
+  for (const other of items.slice(0, SHAPE_HUNT_FILES)) {
     if (other === fontItem || other.len < 1024) continue;
     const bytes = await readRange(dataEntry.file, dataEntry.offset + other.at,
                                   Math.min(other.len, FONT_HUNT_HEAD));
@@ -3672,7 +3676,7 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry) {
   }
   return [`  この吸い出しの中には続きが見つかりませんでした `
     + `(1 行 ${FONT_COLS} 字の幅で ${want} 字ぶん入るものを `
-    + `${Math.min(items.length, FONT_HUNT_FILES)} 個まで探した)。この行ごと報告してください`];
+    + `${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探した)。この行ごと報告してください`];
 }
 
 async function buildIdxReport() {
@@ -3761,7 +3765,7 @@ async function buildIdxReport() {
      一括処理 (boku2.py の pick_by_shape) と同じ順・同じ言葉 */
   const pickByShape = async (test, limit = 50) => {
     const out = [];
-    for (const it of items.slice(0, FONT_HUNT_FILES)) {
+    for (const it of items.slice(0, SHAPE_HUNT_FILES)) {
       if (it.len < 16) continue;
       const head = await readRange(dataEntry.file, dataEntry.offset + it.at,
                                    Math.min(it.len, FONT_HUNT_HEAD));
@@ -3800,7 +3804,7 @@ async function buildIdxReport() {
     problems++;
     lines.push("→ 本文の入っていそうなファイルが 1 つも見つかりません。"
       + `名前 (\`.msg\` / ${CONTAINERS.join(", ")}) でも、中身の形でも `
-      + `${Math.min(items.length, FONT_HUNT_FILES)} 個まで探しました。この行ごと報告してください`);
+      + `${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探しました。この行ごと報告してください`);
   }
   let okMsg = 0, badMsg = null, lenOk = 0, lenNg = 0;
   const usedHere = new Set();                                   /* 読めた .msg で使われている文字番号 (文字表の出来具合を診る) */
@@ -3862,7 +3866,7 @@ async function buildIdxReport() {
   let byShape = false;
   if (!fonts.length) {
     byShape = true;
-    for (const it of items.slice(0, FONT_HUNT_FILES)) {
+    for (const it of items.slice(0, SHAPE_HUNT_FILES)) {
       if (it.len < 1024) continue;
       const head = await readRange(dataEntry.file, dataEntry.offset + it.at,
                                    Math.min(it.len, FONT_HUNT_HEAD));
@@ -3876,7 +3880,7 @@ async function buildIdxReport() {
     problems++;
     lines.push(`→ [フォント] フォント画像が見つかりません。名前に font が付いたファイルも、`
       + `1 行 ${FONT_COLS} 字の幅の画像もありませんでした `
-      + `(${Math.min(items.length, FONT_HUNT_FILES)} 個まで探した)。この行ごと報告してください`);
+      + `(${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探した)。この行ごと報告してください`);
   } else if (byShape) {
     lines.push(`[フォント] 名前に font が付いたファイルが無いので、**中身の形**で探しました `
       + `(1 行 ${FONT_COLS} 字の幅): ${fonts.slice(0, 3).map((x) => x.name).join(", ")}`

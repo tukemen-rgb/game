@@ -864,9 +864,6 @@ FONT_HUNT_HEAD = 64 * 1024
 #: あたりに来る。64KB しか読まなければ、同じファイルの 2 枚目は**必ず見落とす** ——
 #: 練習データは頁が小さいので通っていただけだった
 FONT_OWN_CAP = 4 * 1024 * 1024
-#: 探す相手の上限 (索引が大きいので、見当のつくものから順に打ち切る)
-FONT_HUNT_FILES = 400
-
 #: `check` が中身まで開く `.msg` の数 (#195)。
 #:
 #: ここは長らく **50** だった。練習データの `.msg` は 4 件なので全部入り、
@@ -876,6 +873,16 @@ FONT_HUNT_FILES = 400
 #: それでも上限は残す (壊れた吸い出しで何万件になっても止まらないように)。
 #: **上限に当たったら「診ていない段」に数える** ので、黙って減ることはない
 MSG_CHECK_FILES = 2000
+
+#: 名前で拾えなかったときに、**中身の形**で探す索引の件数 (#196)。
+#:
+#: 長らく **400** だった (`FONT_HUNT_FILES` という名前で、本文・入れ物・フォントの
+#: 3 か所が使い回していた)。実物は 1951 件あるので、
+#: **401 件目から先にある本文もフォントも、名前が読めないと永久に見つからない**。
+#: 名前が読めない吸い出しはまさにこの道しか無いのに、その道が 2 割で終わっていた。
+#: 数えたら、全件の先頭を読んでも 32 MB / 0.03 秒。上げない理由が無かった。
+#: 上限そのものは残す (壊れた索引が何万件を名乗っても止まらないように)
+SHAPE_HUNT_FILES = 4000
 
 
 def pick_fonts(img, entries: list[dict]) -> tuple[list[dict], bool]:
@@ -896,7 +903,7 @@ def pick_fonts(img, entries: list[dict]) -> tuple[list[dict], bool]:
     if named:
         return named, False
     found = []
-    for e in entries[:FONT_HUNT_FILES]:
+    for e in entries[:SHAPE_HUNT_FILES]:
         if e["len"] < 1024:
             continue
         img.seek(e["at"])
@@ -918,7 +925,7 @@ def pick_by_shape(img, entries: list[dict], test, limit: int = 50) -> list[dict]
     @param test 読めたら真を返す関数 (bytes -> bool)
     """
     out = []
-    for e in entries[:FONT_HUNT_FILES]:
+    for e in entries[:SHAPE_HUNT_FILES]:
         if e["len"] < 16:
             continue
         img.seek(e["at"])
@@ -964,7 +971,7 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
                    f"({p['width']}×{p['height']} ドット / {font_page_cells(p)} マス)")
 
     others = []
-    for other in entries[:FONT_HUNT_FILES]:
+    for other in entries[:SHAPE_HUNT_FILES]:
         if other is font_entry or other["len"] < 1024:
             continue
         img.seek(other["at"])
@@ -983,7 +990,7 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
                 f"(1 行 {FONT_COLS} 字の幅で、残り {want} 字が入る大きさ):"] + out
     return [f"  この吸い出しの中には続きが見つかりませんでした "
             f"(1 行 {FONT_COLS} 字の幅で {want} 字ぶん入るものを "
-            f"{min(len(entries), FONT_HUNT_FILES)} 個まで探した)。"
+            f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探した)。"
             "この行ごと報告してください"]
 
 
@@ -1166,7 +1173,7 @@ def check(folder: str, out=sys.stdout) -> int:
             problems += 1
             say("→ 本文の入っていそうなファイルが 1 つも見つかりません。"
                 f"名前 (`.msg` / {', '.join(TEXT_CONTAINERS)}) でも、中身の形でも "
-                f"{min(len(entries), FONT_HUNT_FILES)} 個まで探しました。"
+                f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探しました。"
                 "この行ごと報告してください")
         ok_msg, first_bad = 0, None
         len_ok, len_ng = 0, 0            # 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が合うか
@@ -1236,7 +1243,7 @@ def check(folder: str, out=sys.stdout) -> int:
             problems += 1
             say(f"→ [フォント] フォント画像が見つかりません。名前に font が付いたファイルも、"
                 f"1 行 {FONT_COLS} 字の幅の画像もありませんでした "
-                f"({min(len(entries), FONT_HUNT_FILES)} 個まで探した)。"
+                f"({min(len(entries), SHAPE_HUNT_FILES)} 個まで探した)。"
                 "この行ごと報告してください")
         elif by_shape:
             say(f"[フォント] 名前に font が付いたファイルが無いので、**中身の形**で探しました "

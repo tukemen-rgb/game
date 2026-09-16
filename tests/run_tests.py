@@ -942,6 +942,79 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         self.assertEqual(bad, [],
                          "段がまるごと 0 件なのに、そのまま通している:\n  " + "\n  ".join(bad))
 
+    def test_the_shape_search_reaches_past_the_first_few_hundred(self):
+        """**名前が読めないとき、401 件目から先も探すこと** (#196).
+
+        名前で拾えなかったときの「中身の形で探す」道 (#172・#173) は、
+        索引の**先頭 400 件**しか見ていませんでした。実物は 1951 件あるので、
+        本文やフォントが 401 件目から先にあれば**永久に見つかりません**。
+        名前が読めない吸い出しは、まさにこの道しか無いのに。
+
+        数えたら、全件の先頭を読んでも 32 MB / 0.03 秒でした。
+        #193〜#195 と同じ「小さいときだけ正しい」型で、今回は**上限の届く範囲**。
+        """
+        import io
+        import boku2
+
+        self.assertGreaterEqual(boku2.SHAPE_HUNT_FILES, 1951,
+                                "実物の 1951 件に届かない上限です")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            os.makedirs(folder)
+            # **本文を 500 件目に 1 つだけ置く** (昔の上限 400 より後ろ)
+            hidden_at = 500
+            total = 700
+            # 「件数 + 位置表 (8 バイト刻み)」の最小形。1 件だけ入れる
+            codes = [1, 2, 3, 0x8000]
+            body = (struct.pack("<I", 1) + struct.pack("<I", 12) + b"\0" * 4
+                    + struct.pack(f"<{len(codes)}H", *codes))
+            data, recs = bytearray(), []
+            for i in range(total):
+                b = body if i == hidden_at else bytes(2048)
+                while len(data) % 2048:
+                    data += b"\0"
+                recs.append((len(data) // 2048, len(b)))
+                data += b
+            idx = bytearray(b"DFI\0" + struct.pack("<III", total, 0, 0))
+            for sector, ln in recs:
+                idx += struct.pack("<HHIII", 0, 0, 0, sector, ln)
+            for i in range(total):
+                idx += f"\xff\xff{i:04d}".encode("latin-1") + b"\0"   # 名前は読めない形
+            with open(os.path.join(folder, "BOKU2.IDX"), "wb") as fh:
+                fh.write(bytes(idx))
+            with open(os.path.join(folder, "BOKU2.IMG"), "wb") as fh:
+                fh.write(bytes(data))
+
+            with open(os.path.join(folder, "BOKU2.IMG"), "rb") as img:
+                entries = boku2.read_dfi(bytes(idx), len(data))
+                self.assertEqual(len(entries), total, "索引を読めていない")
+                got = boku2.pick_by_shape(img, entries,
+                                          lambda b: bool(boku2.pick_msg(b, {})))
+            self.assertTrue(got, "500 件目に置いた本文を、形で探しても見つけられない")
+
+            # **探した件数を、探した分だけ言うこと。** 本文が 1 つも無い吸い出しを
+            # 別に作る (上の材料では見つかるので、その行が出ない。**0 件で緑**を防ぐ)
+            empty = os.path.join(tmp, "E")
+            os.makedirs(empty)
+            data = bytes(2048 * total)
+            idx = bytearray(b"DFI\0" + struct.pack("<III", total, 0, 0))
+            for i in range(total):
+                idx += struct.pack("<HHIII", 0, 0, 0, i, 2048)
+            for i in range(total):
+                idx += f"\xff\xff{i:04d}".encode("latin-1") + b"\0"
+            with open(os.path.join(empty, "BOKU2.IDX"), "wb") as fh:
+                fh.write(bytes(idx))
+            with open(os.path.join(empty, "BOKU2.IMG"), "wb") as fh:
+                fh.write(data)
+            out = io.StringIO()
+            boku2.check(empty, out=out)
+            line = next((ln for ln in out.getvalue().splitlines()
+                         if "個まで探しました" in ln), "")
+            self.assertTrue(line, "本文が 1 つも無いのに、探した件数を言っていない")
+            self.assertTrue(f"{min(total, boku2.SHAPE_HUNT_FILES)} 個まで探しました" in line,
+                            f"探した件数が実際と違う: {line}")
+
     def test_only_a_handful_of_msg_files_is_not_a_clean_bill(self):
         """**開いていない `.msg` を、診ていない段に数えること** (#195).
 
