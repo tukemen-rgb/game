@@ -942,6 +942,90 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         self.assertEqual(bad, [],
                          "段がまるごと 0 件なのに、そのまま通している:\n  " + "\n  ".join(bad))
 
+    def test_an_all_uppercase_dump_reads_the_same(self):
+        """**名前が全部大文字の吸い出しでも、同じように読めること** (#198).
+
+        ディスクから吸い出す道具によっては、名前が `SYSTEM/SYSTEM.MSG` のように
+        全部大文字になります (ISO9660 の作法)。社長の環境がどちらかは分かりません。
+        名前で拾っている所は 5 つあり (`.msg` / 入れ物の一覧 / `font` / `1.bin` /
+        `0x8002` の読み方が変わる 7 ファイル)、**どれか 1 つでも大文字小文字を
+        見分けていると、そこだけ黙って飛びます**。飛んだ先は「形で探す」道に
+        落ちるので、**動いてはいるが診断が別物になる**のがたちが悪い。
+
+        練習データの索引の名前だけを大文字にして、端から端まで通します。
+        """
+        import io
+        import shutil
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            low = os.path.join(tmp, "low")
+            make_boku2_sample.build_sample(low)
+            up = os.path.join(tmp, "up")
+            shutil.copytree(low, up)
+
+            # 名前の置き場 (レコードの直後) から先だけを大文字にする
+            path = os.path.join(up, "BOKU2.IDX")
+            with open(path, "rb") as fh:
+                idx = bytearray(fh.read())
+            end = 16
+            while end + 16 <= len(idx) and (idx[end] | (idx[end + 1] << 8)) in (0, 1):
+                end += 16
+            self.assertGreater(end, 16, "レコードの終わりを見つけられない")
+            before = bytes(idx[end:])
+            idx[end:] = before.upper()
+            self.assertNotEqual(bytes(idx[end:]), before, "大文字にできていない")
+            with open(path, "wb") as fh:
+                fh.write(bytes(idx))
+
+            entries = boku2.read_dfi(bytes(idx),
+                                     os.path.getsize(os.path.join(up, "BOKU2.IMG")))
+            self.assertTrue(any(e["path"].isupper() for e in entries),
+                            "索引の名前が大文字になっていない")
+
+            out = io.StringIO()
+            rc = boku2.check(up, out=out)
+            said = out.getvalue()
+            self.assertEqual(rc, 0, f"大文字の吸い出しで確認事項が出た:\n{said[-600:]}")
+            # **形で探す道に落ちていないこと。** 落ちても動くので、ここを見ないと分からない
+            self.assertFalse("中身の形" in said,
+                             f"名前で拾えず、形で探す道に落ちている:\n{said[-600:]}")
+            msg_line = next((ln for ln in said.splitlines() if ln.startswith(".msg:")), "")
+            self.assertTrue(".MSG" in msg_line, f"大文字の .msg を名前で拾えていない: {msg_line}")
+            font_line = next((ln for ln in said.splitlines() if "[フォント]" in ln), "")
+            self.assertTrue("BK_FONT.TMS" in font_line,
+                            f"大文字のフォントを名前で拾えていない: {font_line}")
+            box_line = next((ln for ln in said.splitlines() if "文言の入れ物" in ln), "")
+            self.assertTrue("あり" in box_line and "なし" not in box_line.split("/")[0],
+                            f"大文字の入れ物を名前で拾えていない: {box_line}")
+
+            # 端まで通して、本文が小文字のときと 1 字も違わないこと
+            outdir = os.path.join(tmp, "OUT")
+            boku2.unpack(os.path.join(up, "BOKU2.IDX"),
+                         os.path.join(up, "BOKU2.IMG"), outdir)
+            # MAP の会話は入れ物を切り分けてから (docs/09 の手順 6 と同じ順)
+            mapdir = os.path.join(up, "MAP")
+            for name in sorted(os.listdir(mapdir)):
+                boku2.split_map(os.path.join(mapdir, name),
+                                os.path.join(outdir, "maps", os.path.splitext(name)[0]))
+            got = {}
+            for root, _dirs, files in os.walk(outdir):
+                for name in files:
+                    for rid, _off, _size, text in boku2.text_rows(
+                            os.path.join(root, name), boku2.load_font(
+                                os.path.join(up, "font.txt"))):
+                        got[rid.lower()] = text
+            with open(os.path.join(low, "answer.tsv"), encoding="utf-8-sig") as fh:
+                import csv
+                want = {r["id"].lower(): r["original"]
+                        for r in csv.DictReader(fh, delimiter="\t")}
+            self.assertGreaterEqual(len(want), 20, f"答えが {len(want)} 行しかない")
+            missing = [k for k in want if k not in got]
+            self.assertFalse(missing, f"大文字だと取り出せない行: {missing[:5]}")
+            wrong = [k for k in want if got[k] != want[k]]
+            self.assertFalse(wrong, f"大文字だと本文が変わる行: {wrong[:5]}")
+
     def test_a_number_that_can_only_be_one_value_is_not_reported_as_evidence(self):
         """**形で拾ったときの「読めた形 N 件」は、必ず全部になる** (#197).
 
