@@ -5915,8 +5915,21 @@ function bokuTsvStem(path) {
   return baseStem + "#" + idx.join("#");
 }
 
+/** TSV に生で置けない字と、その書き換え先 (#201)。
+ * **一括処理 (scrp.py の TSV_ESCAPES) と同じ形**にしておくこと。
+ *
+ * 前はタブを空白に、改行を `<BR>` にしていた。空白にすると**元に戻せない**し、
+ * `<BR>` は実機の改行 (0x8001) なので、**生の 0x0A と混ざる**。別の名前にする。 */
+const TSV_ESCAPES = [["\t", "<TAB>"], ["\r", "<CR>"], ["\n", "<LF>"]];
+
+function tsvEscape(text) {
+  let out = String(text);
+  for (const [raw, tag] of TSV_ESCAPES) out = out.split(raw).join(tag);
+  return out;
+}
+
 function bokuMsgTsv(items, glyphs, alt, stem, baseOff) {
-  const esc = (t) => t.replace(/\t/g, " ").replace(/\r?\n/g, "<BR>");
+  const esc = tsvEscape;
   const lines = ["id\toffset\tsize\toriginal\ttranslation"];
   for (const it of items) {
     if (!it.codes.length) continue;

@@ -1445,11 +1445,28 @@ def check(folder: str, out=sys.stdout) -> int:
     return 1 if problems else 0
 
 
-def write_tsv(rows, out) -> None:
+#: 上の置き換えを人に見せるときの並び (scrp.TSV_ESCAPES と同じもの)
+TSV_ESCAPES_SHOWN = tuple(scrp.TSV_ESCAPES.values())
+
+
+def write_tsv(rows, out) -> int:
+    """校正用の TSV を書き、**書き換えた行の数**を返す (#201).
+
+    TSV は列をタブで、行を改行で分ける。本文にタブか改行が 1 つ入るだけで
+    列がずれ、読み直しは「列数が 7 で、見出しの 5 と違います」で止まる。
+    保存画面の文言は Shift-JIS の生バイトを読むので、0x09 や 0x0A が
+    そのまま文になることがある (合成データで確かめた)。
+
+    前はタブを空白にしていた。**空白にすると元に戻せない**し、改行のほうは
+    何もしていなかったので列がずれていた。`scrp.tsv_escape` で記号に変える。
+    """
     out.write("id\toffset\tsize\toriginal\ttranslation\n")
+    changed = 0
     for rid, off, size, text in rows:
-        text = text.replace("\t", " ")
-        out.write(f"{rid}\t0x{off:X}\t{size}\t{text}\t{text}\n")
+        fixed = scrp.tsv_escape(text)
+        changed += fixed != text
+        out.write(f"{rid}\t0x{off:X}\t{size}\t{fixed}\t{fixed}\n")
+    return changed
 
 
 # ---------- 入口 ----------
@@ -1612,7 +1629,7 @@ def run(args) -> int:
         if args.out:
             # BOM 付き UTF-8: Excel でそのまま開いても日本語が化けない
             with open(args.out, "w", encoding="utf-8-sig", newline="\n") as fo:
-                write_tsv(rows, fo)
+                escaped = write_tsv(rows, fo)
             if glyphs:
                 note = ""
             elif args.font:
@@ -1621,6 +1638,12 @@ def run(args) -> int:
             else:
                 note = " (文字表なし: 番号のまま。-f font.txt を付けると日本語になります)"
             print(f"{len(rows)} 行 → {args.out}" + note)
+            if escaped:
+                # **記号に変えたことを言う。** 言わないと、実機の制御コードだと
+                # 思われる (`<BR>` の仲間に見える) (#201)
+                print(f"   本文にタブか改行があった {escaped} 行を "
+                      f"{' / '.join(TSV_ESCAPES_SHOWN)} に置き換えました "
+                      "(TSV の列がずれるため。読み直すと元に戻ります)")
         else:
             write_tsv(rows, sys.stdout)
         if glyphs:

@@ -1007,6 +1007,61 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
             return False
         return True
 
+    def test_a_tab_in_the_game_text_does_not_break_the_tsv(self):
+        """**本文のタブや改行で、TSV の列がずれないこと** (#201).
+
+        TSV は列をタブで、行を改行で分けます。本文にどちらかが 1 つ入るだけで
+        列がずれ、`proofread` は「**列数が 7 で、見出しの 5 と違います**」で
+        止まります。取り出す側は「31 行 → all.tsv」と言って終わっているので、
+        社長は**校正の段になって初めて**、しかも意味の分からない言葉で知ることになる。
+
+        絵空事ではありません。保存画面の文言は **Shift-JIS の生バイト**を読むので、
+        0x09 や 0x0A がそのまま文になり得ます (ここで実際に作って確かめます)。
+
+        前のやり方は「タブを空白に」でした。**空白にすると元に戻せません。**
+        改行のほうは何もしていませんでした。
+        """
+        import io
+        import boku2
+
+        # 1. **保存画面の道で、本当にタブが出てくる**
+        body = ("ぼく\tなつやすみ".encode("cp932") + b"\0"
+                + "かわ\nあそび".encode("cp932") + b"\0"
+                + "むしとり".encode("cp932") + b"\0")
+        got = boku2.parse_sjis_list(body)
+        self.assertTrue(got, "Shift-JIS の並びとして読めない (前提が崩れた)")
+        texts = [it.get("text", "") for it in got]
+        self.assertTrue(any("\t" in t for t in texts), f"タブが出てこない: {texts}")
+        self.assertTrue(any("\n" in t for t in texts), f"改行が出てこない: {texts}")
+
+        # 2. **その本文を TSV に書いて、読み直せること**
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "all.tsv")
+            rows = [(f"s:{i}", i * 16, len(t) * 2, t) for i, t in enumerate(texts)]
+            with open(path, "w", encoding="utf-8-sig", newline="\n") as fh:
+                changed = boku2.write_tsv(rows, fh)
+            self.assertEqual(changed, 2, f"書き換えた行が {changed} 行 (2 行のはず)")
+            back = scrp.read_tsv(path)
+            self.assertEqual(len(back), len(texts),
+                             f"読み直したら {len(back)} 行 (書いたのは {len(texts)} 行)")
+            # **元に戻ること。** 空白に潰すと戻らない
+            self.assertEqual([r["original"] for r in back], texts,
+                             "読み直した本文が元と違う (元に戻せない形で書いている)")
+
+            # 3. **黙って変えない。** 変えたことを言う
+            out = io.StringIO()
+            boku2.write_tsv(rows, out)
+            self.assertTrue("<TAB>" in out.getvalue() and "<LF>" in out.getvalue(),
+                            "記号に置き換えていない")
+
+        # 4. 画面側も同じ形にしていること (`<BR>` と混ぜない)
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        for tag in ("<TAB>", "<CR>", "<LF>"):
+            self.assertTrue(tag in app, f"画面側の TSV が {tag} を使っていない")
+        self.assertFalse('replace(/\\t/g, " ")' in app,
+                         "画面側がまだタブを空白に潰している")
+
     def test_an_all_uppercase_dump_reads_the_same(self):
         """**名前が全部大文字の吸い出しでも、同じように読めること** (#198).
 

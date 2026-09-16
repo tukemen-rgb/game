@@ -552,12 +552,38 @@ def build_archive(encoding_id: int, blobs: list[bytes], pool_duplicates: bool = 
 TSV_COLUMNS = ["id", "offset", "size", "original", "translation"]
 
 
+#: TSV に生で置けない字と、その書き換え先 (#201)。
+#:
+#: TSV は列をタブで、行を改行で分ける。**本文にタブか改行が 1 つ入るだけで
+#: 列がずれる。** 実物の保存画面の文言は Shift-JIS の生バイトを読むので、
+#: 0x09 や 0x0A がそのまま文になることがある (合成データで確かめた)。
+#: 書き出す側は「31 行 → all.tsv」と言って終わり、壊れていることは
+#: **校正にかけたときに「列数が 7 で、見出しの 5 と違います」**で初めて分かる。
+#: ここで記号に変えておけば、列はずれず、読み直しで元に戻る。
+#: `<BR>` (実機の改行) とは別物なので、別の名前にしてある
+TSV_ESCAPES = {"\t": "<TAB>", "\n": "<LF>", "\r": "<CR>"}
+
+
+def tsv_escape(text: str) -> str:
+    """本文を TSV の 1 つの欄に収まる形にする (#201)."""
+    for raw, tag in TSV_ESCAPES.items():
+        text = text.replace(raw, tag)
+    return text
+
+
+def tsv_unescape(text: str) -> str:
+    """`tsv_escape` の逆。読み直したら元の字に戻す."""
+    for raw, tag in TSV_ESCAPES.items():
+        text = text.replace(tag, raw)
+    return text
+
+
 def write_tsv(path: str, rows: list[dict]) -> None:
     # BOM 付き UTF-8: Excel で開いたとき日本語が化けない (BOM 無しだと cp932 と誤認する)
     with open(path, "w", encoding="utf-8-sig", newline="\n") as fh:
         fh.write("\t".join(TSV_COLUMNS) + "\n")
         for row in rows:
-            fh.write("\t".join(str(row.get(c, "")) for c in TSV_COLUMNS) + "\n")
+            fh.write("\t".join(tsv_escape(str(row.get(c, ""))) for c in TSV_COLUMNS) + "\n")
 
 
 def read_tsv(path: str) -> list[dict]:
@@ -576,7 +602,7 @@ def read_tsv(path: str) -> list[dict]:
                 raise ScrpError(
                     f"{path}:{lineno}: 列数が {len(values)} で、見出しの {len(header)} と違います"
                 )
-            row = dict(zip(header, values))
+            row = {k: tsv_unescape(v) for k, v in zip(header, values)}
             row["_lineno"] = lineno
             rows.append(row)
     return rows
