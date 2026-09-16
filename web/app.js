@@ -3622,6 +3622,34 @@ const SHAPE_HUNT_FILES = 4000;
  * 打ち切ったら「N 件以上」と言う —— 「50 件」と出すと 50 件しか無いと読まれる (#197)。 */
 const SHAPE_PICK_LIMIT = 50;
 
+/** 文字表のうち、**保存のときに潰れた疑いがある**番号 (#199)。
+ *
+ * メモ帳の「ANSI」(cp932) で保存すると、cp932 に無い字は `?` になる。この作品の
+ * フォントには cp932 で書けない字が 4 つある (`¥` `—` `♡` `︙`)。半角の `?` は
+ * フォントに 1 つだけ本当にあるので、**2 つ以上あれば潰れた疑い**。
+ * 一括処理 (boku2.py の ansi_damage) と同じ判定にしておくこと。 */
+function ansiDamage(glyphs) {
+  if (!glyphs) return [];
+  const marks = [], broken = [];
+  glyphs.forEach((g, i) => {
+    if (g === "?") marks.push(i);
+    else if (g === "\uFFFD") broken.push(i);
+  });
+  return broken.concat(marks.length > 1 ? marks : []).sort((a, b) => a - b);
+}
+
+/** `ansiDamage` の番号を、次の一手まで付けて 1 行にする (CLI と同じ言葉)。 */
+function ansiDamageNote(bad) {
+  if (!bad.length) return "";
+  return "→ 文字表に `?` / 置き換え文字が "
+    + `${bad.length} 個あります (番号 `
+    + bad.slice(0, 8).join(" ") + (bad.length > 8 ? "…" : "")
+    + ")。**メモ帳の「ANSI」で保存すると、cp932 に無い字が `?` になります** "
+    + "(この作品では ¥ — ♡ ︙ の 4 つ)。文字表は **UTF-8 で保存し直して**"
+    + "ください。このままだと本文の ♡ などが `?` になり、"
+    + "校正では「半角文字が混ざっています」と出ます";
+}
+
 /** `check` が中身まで開く `.msg` の数。**一括処理 (boku2.py) と同じ数字**にしておくこと。
  *
  * 長らく 50 だった。練習データの `.msg` は 4 件なので全部入るが、実物は 651 件あり、
@@ -3873,6 +3901,13 @@ async function buildIdxReport() {
         + { untested: "。文字番号を使っている行が無いので、文字表は試せていない",
             missing: ` (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""}。フォント画像の目盛りで橙の枠の字を書き足す)`,
             ok: "。この範囲は全部読める" }[verdict]);
+      /* **保存のときに潰れた疑い**があれば、そう言う (#199)。
+         一括処理 (boku2.py の ansi_damage) と同じ判定・同じ言葉 */
+      const damaged = ansiDamage(glyphs);
+      if (damaged.length) {
+        problems++;
+        lines.push(ansiDamageNote(damaged));
+      }
     } else {
       lines.push("[文字表] 文字表はまだ貼っていない (「.msg として読む」の欄に貼ってから、もう一度この要約を作ると出来具合が出る)");
       skipped.push("文字表の出来具合 (文字表をまだ貼っていない)");

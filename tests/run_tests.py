@@ -942,6 +942,71 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         self.assertEqual(bad, [],
                          "段がまるごと 0 件なのに、そのまま通している:\n  " + "\n  ".join(bad))
 
+    def test_saving_the_table_as_ansi_loses_real_glyphs_and_is_said(self):
+        """**ANSI で保存すると `♡` などが `?` になる。それを言うこと** (#199).
+
+        docs/10 は「メモ帳の ANSI でも構いません。どの形式でも道具の側が
+        見分けて読みます」と書いていました。**読むのは確かにできます。**
+        問題は保存のほうで、cp932 に無い字はその場で `?` に変わります。
+
+        公開ソースの `font.txt` (1656 字) を数えると、cp932 で書けない字は
+        **4 つ** —— `¥` `—` `♡` `︙`。`♡` は台詞に普通に出るので、
+        本文がその場で書き換わったまま先へ進むことになります。しかも `?` は
+        半角なので、校正では「半角文字が混ざっています」と出て**訳文のせいに
+        見えます** (#188 と同じ、原因が埋もれる形)。
+
+        半角の `?` は本物のフォントに **1 つだけ**あるので、**2 つ以上あれば
+        潰れた疑い**として言います。
+        """
+        import boku2
+
+        # 1. **前提を実物で確かめる** (ここが崩れたら話ごと変わる)
+        table = os.path.join(PUBLIC_SRC, "font.txt")
+        if not os.path.isfile(table):
+            self.skipTest(f"公開ソースに font.txt が無い ({table})")
+        with open(table, encoding="utf-8", errors="replace") as fh:
+            chars = [c for c in fh.read() if c not in "\r\n"]
+        self.assertGreater(len(chars), 1000, f"文字表が {len(chars)} 字しかない")
+        lost = sorted({c for c in chars if not self._fits_cp932(c)})
+        self.assertTrue(lost, "cp932 で書けない字が 1 つも無い (前提が崩れた)")
+        self.assertEqual(chars.count("?"), 1,
+                         "本物の ? が 1 つでないなら、2 つ以上で疑う読みが崩れる")
+
+        # 2. **実際に ANSI で保存して読み直すと、その字が ? になる**
+        with tempfile.TemporaryDirectory() as tmp:
+            ansi = os.path.join(tmp, "font.txt")
+            with open(ansi, "wb") as fh:
+                fh.write("".join(chars).encode("cp932", "replace"))
+            got = boku2.load_font(ansi)
+            self.assertTrue(got, "ANSI の文字表を読めない")
+            marks = [i for i, g in enumerate(got) if g == "?"]
+            self.assertGreaterEqual(len(marks), 1 + len(lost),
+                                    f"? が {len(marks)} 個 (潰れた {len(lost)} 字 + 本物 1)")
+
+            # 3. **潰れていると言うこと**
+            bad = boku2.ansi_damage(got)
+            self.assertTrue(bad, "潰れているのに気づいていない")
+            note = boku2.ansi_damage_note(bad)
+            self.assertTrue("ANSI" in note and "UTF-8" in note,
+                            f"原因と直し方を言っていない: {note}")
+            # **消える字を並べて言うこと。** ♡ だけで見ると、下の
+            # 「本文の ♡ などが」で通ってしまう (全文から語句を探さない、6 度目)
+            for ch in ("¥", "—", "♡", "︙"):
+                self.assertTrue(ch in note, f"消える字 {ch} を挙げていない: {note}")
+
+            # 4. **無事な文字表には何も言わない** (毎回出たら誰も読まなくなる)
+            ok = boku2.load_font(table)
+            self.assertFalse(boku2.ansi_damage(ok),
+                             "UTF-8 のままの文字表に文句を言っている")
+
+    @staticmethod
+    def _fits_cp932(ch: str) -> bool:
+        try:
+            ch.encode("cp932")
+        except UnicodeEncodeError:
+            return False
+        return True
+
     def test_an_all_uppercase_dump_reads_the_same(self):
         """**名前が全部大文字の吸い出しでも、同じように読めること** (#198).
 
@@ -1668,6 +1733,10 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         # `check` から呼ぶ助けの関数が組み立てる → も、check の → として数える
         cli |= {head(h) for h in re.findall(r'return \(f?"→ ([^"{]+)', self.cli)}
         ui = {head(h) for h in re.findall(r'lines\.push\([`"]→ ([^`"$]+)', self.ui)}
+        # 知らせの文を組み立てる助けの関数 (`ansiDamageNote`) に移すと `lines.push` の
+        # 形では見つからない。**出る言葉のほうを見る** (CLI 側で #178 に直したのと同じ)
+        ui |= {head(h) for h in re.findall(r'return "→ ([^"]+)"', self.ui)}
+        ui |= {head(h) for h in re.findall(r'return `→ ([^`$]+)', self.ui)}
 
         # 拾えていること自体を先に確かめる (0 件どうしは必ず一致する)
         self.assertGreaterEqual(len(cli), 12, f"CLI の → を {len(cli)} 件しか拾えない")
@@ -3756,7 +3825,18 @@ class TestWebBuild(unittest.TestCase):
     def test_no_replacement_character_in_sources_or_build(self):
         """置換文字 (U+FFFD) が生で入っていると公開先に弾かれる。エスケープで書く (#25 で踏んだ)."""
         import glob
-        files = glob.glob(os.path.join(self.webdir, "*")) + glob.glob(os.path.join(REPO, "docs", "*.md"))
+        # **道具と検査も見る** (#199)。ここは web/ と docs/ しか見ていなかったので、
+        # `tools/boku2.py` に生の置換文字を書いても誰も気づかなかった
+        # (見つけたのは手で数えたときだった)
+        files = (glob.glob(os.path.join(self.webdir, "*"))
+                 + glob.glob(os.path.join(REPO, "docs", "*.md"))
+                 + glob.glob(os.path.join(REPO, "tools", "*.py"))
+                 + glob.glob(os.path.join(REPO, "tests", "*.py"))
+                 + glob.glob(os.path.join(REPO, "tests", "e2e", "*.py"))
+                 + glob.glob(os.path.join(REPO, "tests", "*.mjs"))
+                 + [os.path.join(REPO, "README.md")]
+                 + glob.glob(os.path.join(REPO, "exercises", "*.md")))
+        self.assertGreaterEqual(len(files), 40, f"見ているのが {len(files)} 個しかない")
         for path in files:
             if os.path.isdir(path):
                 continue

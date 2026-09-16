@@ -589,6 +589,39 @@ def parse_glyph_table(text: str) -> list:
     return list(text.replace("\r", "").replace("\n", ""))
 
 
+def ansi_damage(glyphs: list | None) -> list[int]:
+    """文字表のうち、**保存のときに潰れた疑いがある**番号 (#199).
+
+    メモ帳の「ANSI」(cp932) で保存すると、cp932 に無い字は `?` になる。
+    この作品のフォントには cp932 で書けない字が **4 つ** ある
+    (`¥` `—` `♡` `︙` —— 公開ソースの font.txt 1656 字から数えた)。
+    `♡` は台詞に普通に出るので、潰れると本文がその場で変わる。しかも
+    半角の `?` になるため、校正では「半角文字が混ざっています」と出て、
+    **訳文のせいに見える**。
+
+    半角の `?` はフォントに 1 つだけ本当にある (公開ソースで確認) ので、
+    **2 つ以上あれば潰れた疑い**。U+FFFD はどんな文字表にも入らない。
+    """
+    if not glyphs:
+        return []
+    marks = [i for i, g in enumerate(glyphs) if g == "?"]
+    broken = [i for i, g in enumerate(glyphs) if g == "\ufffd"]
+    return sorted(broken + (marks if len(marks) > 1 else []))
+
+
+def ansi_damage_note(bad: list[int]) -> str:
+    """`ansi_damage` の番号を、次の一手まで付けて 1 行にする."""
+    if not bad:
+        return ""
+    return ("→ 文字表に `?` / 置き換え文字が "
+            f"{len(bad)} 個あります (番号 "
+            + " ".join(str(i) for i in bad[:8]) + ("…" if len(bad) > 8 else "")
+            + ")。**メモ帳の「ANSI」で保存すると、cp932 に無い字が `?` になります** "
+            "(この作品では ¥ — ♡ ︙ の 4 つ)。文字表は **UTF-8 で保存し直して**"
+            "ください。このままだと本文の ♡ などが `?` になり、"
+            "校正では「半角文字が混ざっています」と出ます")
+
+
 def load_font(path: str | None) -> list | None:
     """フォント画像を左上から書き出したテキスト、または「番号=文字」の対応表."""
     if not path:
@@ -1252,6 +1285,11 @@ def check(folder: str, out=sys.stdout) -> int:
                    "フォント画像のこの番号を書き足す (docs/10 の手順 3)" if missing
                    else "。文字番号を使っている行が無いので、文字表は試せていない" if not used_here
                    else "。この範囲は全部読める"))
+            # **保存のときに潰れた疑い**があれば、そう言う (#199)
+            damaged = ansi_damage(glyphs)
+            if damaged:
+                problems += 1
+                say(ansi_damage_note(damaged))
         else:
             say("[文字表] font.txt はまだ無い (作ったらこのフォルダに置くと、ここで出来具合を確かめられる)")
             skipped.append("文字表の出来具合 (font.txt がまだ無い)")
@@ -1539,6 +1577,11 @@ def run(args) -> int:
                   file=sys.stderr)
     elif args.cmd == "text":
         glyphs = load_font(args.font)
+        # 文字表が ANSI で保存されて潰れていたら、**取り出す前に**言う (#199)。
+        # 潰れたまま取り出すと、本文の ♡ などが `?` になったまま TSV に入る
+        damaged = ansi_damage(glyphs)
+        if damaged:
+            print(ansi_damage_note(damaged), file=sys.stderr)
         rows = []
         given = expand_patterns(args.files)
         files = expand_inputs(given)
