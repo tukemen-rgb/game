@@ -4285,6 +4285,16 @@ class TestDocs(unittest.TestCase):
             self.assertTrue(in_manual in manual, f"docs/07 に無い: {in_manual}")
 
     def test_every_tab_is_documented(self):
+        """**画面のタブが、docs/07 の「タブの一覧」に、画面と同じ順で 1 行ずつあること** (#185).
+
+        前は docs/07 の**全文**からタブ名を探していました。それだと「タイル」は
+        本文に 22 回、「文字列」は 15 回出てくる普通の言葉なので、
+        **タブの説明が 1 行も無くても緑**になります (実際、11 枚のうち 5 枚は
+        どこにも説明がありませんでした)。#184 で踏んだのと同じ「全文から語句を
+        探さない」の 4 度目。
+
+        並び順まで見るのは、素人が画面と表を**左から突き合わせる**からです。
+        """
         import re
         with open(os.path.join(REPO, "web", "index.html"), encoding="utf-8") as fh:
             html = fh.read()
@@ -4292,8 +4302,21 @@ class TestDocs(unittest.TestCase):
         self.assertGreaterEqual(len(tabs), 10)
         with open(os.path.join(REPO, "docs", "07-構造探査台.md"), encoding="utf-8") as fh:
             doc = fh.read()
-        undocumented = [t for t in tabs if t.replace(" ", "") not in doc.replace(" ", "")]
-        self.assertEqual(undocumented, [])
+        self.assertTrue("## タブの一覧" in doc, "docs/07 に「タブの一覧」の節がありません")
+        table = doc.split("## タブの一覧", 1)[1].split("\n## ", 1)[0]
+        listed = [ln.split("|")[1].strip() for ln in table.splitlines()
+                  if ln.startswith("| ") and not ln.startswith("| ---")
+                  and not ln.startswith("| タブ ")]
+        self.assertTrue(listed, "「タブの一覧」に行がありません (0 行なら必ず一致する)")
+        # 画面と同じ順・同じ数。多い / 少ない / 入れ替わりが、そのまま差として出る
+        self.assertEqual(listed, tabs,
+                         f"画面のタブと「タブの一覧」が違います\n  画面: {tabs}\n  一覧: {listed}")
+        # 「使いどき」の欄が空のまま足されていないこと (名前だけ並べても引けない)
+        for ln in table.splitlines():
+            if ln.startswith("| ") and not ln.startswith("| ---") and not ln.startswith("| タブ "):
+                cells = [c.strip() for c in ln.strip("|").split("|")]
+                self.assertEqual(len(cells), 3, f"欄の数が違う行: {ln[:40]}")
+                self.assertGreaterEqual(len(cells[2]), 6, f"「使いどき」が空に近い行: {cells[0]}")
 
     def test_terms_are_unified(self):
         """利用者向けの文書と画面では、同じものを同じ言葉で呼ぶ."""
