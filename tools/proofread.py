@@ -44,6 +44,10 @@ PLACEHOLDER_TAGS = {"NAME", "VAR"}
 
 #: 原文と訳文を**見比べて**初めて分かる検査。訳文の欄が原文のままなら何も見ていない
 COMPARING_RULES = ("placeholder", "control", "number", "empty", "untranslated")
+#: 画面に指摘を出す行の上限 (#194)。これを超えたぶんは数と内訳で言い、
+#: `--report` の TSV に回す。**締めの行と注意を、指摘の壁に埋もれさせない**ため
+SHOW_ROWS_MAX = 20
+
 #: 訳文だけを見て分かる検査。取り出したばかりのテキストでも効く
 ABSOLUTE_RULES = ("line_width", "line_count", "kinsoku", "font", "halfwidth",
                   "notation", "glossary", "consistency")
@@ -449,8 +453,24 @@ def main() -> int:
             speaker_of[row["id"]] = names.get(m.group(1).upper(), "")
 
     shown = [f for f in findings if not (args.only_errors and f.severity != "ERROR")]
+    # **全部を画面に流さない** (#194)。実物並み (12000 行) を練習用の文字表のまま
+    # かけると、指摘は 9500 件、画面に出る行は **47,565 行 (2 MB)** になる。
+    # 締めの「N 行をチェック」も、原因を名指しする注意 (#182) も、
+    # **その 47,000 行の下**に出る。端末の巻き戻しから落ちれば、社長が見るのは
+    # ERROR の壁だけで、いちばん大事な 1 行は無かったことになる。
+    # 最初の何行かを見れば調子は分かるので、残りは数で言って `--report` に回す。
+    shown_rows = []
+    for f in shown:
+        if not shown_rows or shown_rows[-1] != f.row_id:
+            if f.row_id not in shown_rows:
+                shown_rows.append(f.row_id)
+    cut = shown_rows[SHOW_ROWS_MAX:] if len(shown_rows) > SHOW_ROWS_MAX else []
+    keep = set(shown_rows[:SHOW_ROWS_MAX]) if cut else None
+
     current = None
     for f in shown:
+        if keep is not None and f.row_id not in keep:
+            continue
         if f.row_id != current:
             current = f.row_id
             speaker = speaker_of.get(f.row_id, "")
@@ -466,6 +486,17 @@ def main() -> int:
         print(f"  {f.severity:<5} {f.rule:<11} {f.message}")
         if f.detail:
             print(f"        {' ' * 11} └ {f.detail}")
+
+    if cut:
+        by_rule = Counter(f.rule for f in shown)
+        print()
+        print(f"… ほか {len(cut)} 行にも指摘があります "
+              f"(**画面に出したのは最初の {SHOW_ROWS_MAX} 行だけ**です)。")
+        print("  指摘の内訳: "
+              + " / ".join(f"{rule} {n} 件" for rule, n in by_rule.most_common(6)))
+        print("  全部見るなら、TSV に書き出して表計算で開いてください:")
+        print(f"    python3 tools/proofread.py {os.path.basename(args.tsv)} "
+              f"--report 指摘.tsv")
 
     print()
     print(f"{len(rows)} 行をチェック: "

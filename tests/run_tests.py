@@ -2719,6 +2719,66 @@ class TestProofread(unittest.TestCase):
             self.assertFalse("文字表のせい" in out,
                              f"この作品の文字表を渡したのに文字表のせいにしている:\n{out[-400:]}")
 
+    def test_a_wall_of_findings_does_not_bury_the_summary(self):
+        """**実物並みの行数で、締めの行と注意が指摘に埋もれないこと** (#194).
+
+        #182 で「原因を名指しする注意が 22 件の ERROR に埋もれていた」を直しました。
+        ところが実物並み (12000 行) を練習用の文字表のままかけると、指摘は 9509 件、
+        画面に出る行は **47,565 行 (2 MB)**。名指しの注意はその**いちばん下**に出ます。
+        端末の巻き戻しから落ちれば、社長が見るのは ERROR の壁だけ。
+        #193 と同じ「実物の大きさで通っていない」型です。
+
+        最初の何行かを見れば調子は分かるので、残りは**数と内訳**で言い、
+        全部見たい人は `--report` の TSV に回します。
+        """
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = os.path.join(tmp, "big.tsv")
+            rows = 600
+            with open(tsv, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                for i in range(rows):
+                    fh.write(f"r{i}\t夏休みの虫取り\t夏休みの虫取り\n")   # 練習用の表に無い漢字
+            report = os.path.join(tmp, "rep.tsv")
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "proofread.py"), tsv,
+                 "--report", report], capture_output=True, text=True)
+            out = res.stdout + res.stderr
+            lines = out.splitlines()
+
+            # 1. **画面が壁にならない。** 行数が指摘の数に比例して増えない
+            self.assertLess(len(lines), 150,
+                            f"{rows} 行で画面が {len(lines)} 行になった (最初の数行だけ出すこと)")
+            # 2. **切ったことを言う** (黙って隠すと、見たものが全部だと思われる)
+            self.assertTrue("ほか" in out and "画面に出したのは最初の" in out,
+                            f"残りがあることを言っていない:\n{out[-500:]}")
+            self.assertTrue("--report" in out, f"全部の見方を言っていない:\n{out[-500:]}")
+            # 3. **内訳を言う** (どの検査で落ちているかが分かれば、次の手が決まる)
+            self.assertTrue("指摘の内訳" in out and "font" in out,
+                            f"内訳が出ていない:\n{out[-500:]}")
+            # 4. **締めと注意は残る。** ここが今回の本題
+            self.assertTrue(f"{rows} 行をチェック" in out, f"締めの行が無い:\n{out[-500:]}")
+            self.assertTrue("文字表のせい" in out, f"原因の名指しが消えた:\n{out[-500:]}")
+            # 5. **捨てていない。** --report には全部入っている
+            with open(report, encoding="utf-8-sig") as fh:
+                got = [ln for ln in fh.read().splitlines() if ln.strip()]
+            self.assertGreater(len(got) - 1, 150,
+                               f"--report が {len(got) - 1} 件しか書いていない")
+
+            # 少ない行数のときは、今までどおり全部出す (切るのは多いときだけ)
+            small = os.path.join(tmp, "small.tsv")
+            with open(small, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                for i in range(3):
+                    fh.write(f"r{i}\t夏休みの虫取り\t夏休みの虫取り\n")
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "proofread.py"), small],
+                capture_output=True, text=True)
+            self.assertFalse("画面に出したのは最初の" in res.stdout + res.stderr,
+                             "3 行しかないのに切ったと言っている")
+
     def test_text_that_is_still_glyph_numbers_is_named_as_such(self):
         """**文字表を付けずに取り出した TSV を、そうと名指しすること** (#188).
 
