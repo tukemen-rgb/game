@@ -315,7 +315,7 @@ python3 tools/compare_tsv.py work/all.tsv work/BOKU2SAMPLE/answer.tsv
 
 実物では、練習データのように「問題なし」とは限らない。`check` が `→` の行を出したとき、
 それが索引・本体・.msg・フォント・入れ物のどの段で外れたかを読めるようになる練習。
-壊し方は 5 通り (`--break` の選択肢)。
+壊し方は 6 通り (`--break` の選択肢)。
 
 ```text
 python3 tools/make_boku2_sample.py --break idx  --out work/BROKEN   # 索引の先頭 (DFI ではなくなる)
@@ -323,21 +323,23 @@ python3 tools/make_boku2_sample.py --break name --out work/BROKEN   # 索引の�
 python3 tools/make_boku2_sample.py --break msg  --out work/BROKEN   # system.msg の先頭
 python3 tools/make_boku2_sample.py --break font --out work/BROKEN   # bk_font.tms の TIM2 の目印
 python3 tools/make_boku2_sample.py --break map  --out work/BROKEN   # MAP の入れ物の先頭
+python3 tools/make_boku2_sample.py --break allnames --out work/BROKEN  # 索引の名前を最後まで
 python3 tools/boku2.py check work/BROKEN                            # 終了コードは 1 (問題あり)
 ```
 
-やること (5 通りそれぞれで):
+やること (6 通りそれぞれで):
 
 1. `check` の出力から `→` の行を書き出す。「先頭 16 バイト …」のような手がかりが
    付いていれば、それも一緒に
 2. [10-僕夏2の手順.md](../docs/10-僕夏2の手順.md) の
-   **「診断の `→` の行の読み方」** の表で、その行に対応する段と次の手を探す
-   (その少し上の「困ったとき」は**道具が `→` 以外で言うこと**を引く表なので、
-   ここで使うのは下のほう)
+   **「診断の `→` の行の読み方」** の表で、その行に対応する段と次の手を探す。
+   **`→` で始まる行は、どの道具のものでもこの表に載っています** (`check` だけでなく
+   `unpack` / `maps` / `text` / `used` の分も)。その少し上の「困ったとき」は、
+   `→` が付かない出方 —— 数がおかしい、何も起きない —— を引くための別の表
 3. 構造探査台にも同じ `work/BROKEN` を読ませ、「報告用の要約」に **同じ行** が出る
    ことを確かめる (ブラウザと一括処理は同じ診断を出す)
 
-**確認:** 5 通りとも `→` の行が 1 つ以上出て、`== 結果` が「確認事項 N 件」になる
+**確認:** 6 通りとも `→` の行が 1 つ以上出て、`== 結果` が「確認事項 N 件」になる
 (「問題なし」にならない)。`idx` だけは索引が読めないので、そこで診断が止まる (それが正しい)。
 
 要点: 実物で最初に貼るのはこの出力 ([10-僕夏2の手順.md](../docs/10-僕夏2の手順.md) の

@@ -4079,6 +4079,102 @@ class TestDocs(unittest.TestCase):
         for head in js_arrows:
             key = re.split(r"[。、(:]", head)[0].strip()[:14]
             self.assertIn(key, keys, f"ブラウザだけにある → の行 (CLI と docs/10 に合わせる): {head}")
+
+    def test_the_arrow_table_is_the_one_place_to_look_things_up(self):
+        """**docs/10 の → の表が、道具の出す → と 1 対 1 で揃っていること** (#184).
+
+        #63 の上の検査は「docs/10 の**どこかに**あるか」しか見ていませんでした。
+        そのため `maps` / `unpack` / `text` の → 6 種類は、下の「困ったとき」の表に
+        しか無いのに緑のまま。ところが表の前書きは「`→` は次の 12 種類」と言い切り、
+        課題 9 は「`→` の行はこの表で引け」と指示しています。**引けない行がある**。
+
+        ここでは 3 方向から見ます:
+
+        * 道具が出す → は、どれも**この表に**行がある (どこかに、ではない)
+        * 表の行は、どれも道具が実際に出す (消した → の説明が残っていない)
+        * 前書きの「N 種類」が、表の行数と合っている
+
+        行と → は、**行の固定部分が → の中にこの順で出るか**で突き合わせます
+        (行は `N` や `…` で数字や名前を伏せた要約なので、文字どおりには一致しない)。
+        """
+        import re
+
+        def norm(s):
+            return re.sub(r"\s+", " ", s.replace("**", "").replace("`", "")).strip()
+
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        body = doc.split("### 診断の `→` の行の読み方")[1].split("\n\n## ")[0]
+        rows = [norm(ln.split("|")[1]) for ln in body.splitlines()
+                if ln.startswith("| ") and not ln.startswith("| ---")
+                and not ln.startswith("| `→` の行")]
+
+        # 道具の → は、隣り合う文字列をつないだ**全文**で見る。先頭だけだと
+        # 「[フォント] 幅が …」の 2 種類 (狭すぎる / 広すぎる) が見分けられない
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        one = re.compile(r'\s*f?"((?:[^"\\]|\\.)*)"')
+        arrows = set()
+        for m in re.finditer(r'(?:say\(|return \(|print\(|^\s+)(?=f?"→ )', src, re.M):
+            pos, parts = m.end(), []
+            while True:
+                s = one.match(src, pos)
+                if not s:
+                    break
+                parts.append(s.group(1))
+                pos = s.end()
+            arrows.add(norm(re.sub(r"\{[^}]*\}", "…", "".join(parts))[2:]))
+
+        self.assertGreaterEqual(len(arrows), 20, "→ を拾えていない (0 件なら必ず一致する)")
+        self.assertGreaterEqual(len(rows), 20, "表の行を拾えていない")
+
+        def fixed_parts(row):
+            return [c.strip() for c
+                    in re.split(r"…|(?<= )N(?= |%|$)|(?<= )M(?= |$)", row)
+                    if len(c.strip()) >= 2]
+
+        def fits(row, arrow):
+            at = 0
+            for c in fixed_parts(row):
+                i = arrow.find(c, at)
+                if i < 0:
+                    return False
+                at = i + len(c)
+            return True
+
+        used = set()
+        for arrow in sorted(arrows):
+            hit = [r for r in rows if fits(r, arrow)]
+            self.assertTrue(hit, f"この → を引ける行が表にありません: {arrow[:60]}")
+            self.assertEqual(len(hit), 1,
+                             f"1 つの → に表の行が {len(hit)} つ当たります: {arrow[:40]}")
+            used |= set(hit)
+        for row in rows:
+            self.assertTrue(row in used, f"道具が出さない → の行が表に残っています: {row[:60]}")
+
+        # 前書きの数え上げ。ここが合っていないと、読者は表を最後まで読まない
+        said = re.search(r"全部で (\d+) 種類", body)
+        self.assertTrue(said, "前書きが → の数を言っていません")
+        self.assertEqual(int(said.group(1)), len(rows),
+                         f"前書きは {said.group(1)} 種類、表は {len(rows)} 行")
+
+        # 課題 9 の「N 通りの壊し方」も、実際の --break の選択肢と合っていること
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "mk_sample_arrows", os.path.join(REPO, "tools", "make_boku2_sample.py"))
+        mk = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mk)
+        with open(os.path.join(REPO, "exercises", "README.md"), encoding="utf-8") as fh:
+            ex = fh.read()
+        ex9 = ex.split("## 課題 9")[1].split("\n## ")[0]
+        kinds = re.search(r"壊し方は (\d+) 通り", ex9)
+        self.assertTrue(kinds, "課題 9 が壊し方の数を言っていません")
+        self.assertEqual(int(kinds.group(1)), len(mk.DAMAGE),
+                         f"課題 9 は {kinds.group(1)} 通り、--break は {len(mk.DAMAGE)} 通り")
+        for kind in mk.DAMAGE:
+            self.assertTrue(f"--break {kind}" in ex9,
+                            f"課題 9 に --break {kind} の行がありません")
+
     def test_the_road_ends_at_the_tsv_and_the_docs_agree(self):
         """docs/10 が道の終わりを言い、README がそれと食い違わないこと (#78).
 
