@@ -5725,6 +5725,59 @@ class TestAgainstThePublicSource(unittest.TestCase):
         n = self.compare(os.path.join(self.unpacked, "system", "item_info.msg"), 0, 8, alt=True)
         self.assertGreaterEqual(n, 2, f"比べた項目が {n} 件しかない")
 
+    def test_the_copied_file_name_lists_still_match_the_public_source(self):
+        """**公開ソースから書き写した名前の一覧が、ずれていないこと** (#189).
+
+        `ALT_BREAK_FILES` の 7 つは、`0x8002` の読み方が変わるファイルの名前です。
+        名前が 1 字でもずれると、そのファイルだけ `0x8002` を「待ち時間 + u16」で
+        読み、**ページ送りのたびに次の 1 字を飛ばします**。出力は日本語のままなので、
+        見ても分かりません。試しに `turi_info.msg` を `turi_info_TYPO.msg` に
+        変えてみたら、**387 件のテストが全部通りました** —— 振る舞いの検査は
+        `item_info.msg` だけで代表させていて、名前そのものは誰も見ていなかった。
+
+        名前の一覧は**向こうが正解**なので、向こうから読み取って比べます。
+        画面 (`web/app.js`) の写しも同時に見ます。
+        """
+        import re
+
+        msg_py = os.path.join(PUBLIC_SRC, "MSG.py")
+        if not os.path.isfile(msg_py):
+            self.skipTest(f"公開ソースに MSG.py が無い ({msg_py})")
+        with open(msg_py, encoding="utf-8", errors="replace") as fh:
+            public = fh.read()
+
+        def names_in(text, var):
+            m = re.search(re.escape(var) + r"\s*=\s*(?:new Set\()?[\[(]([^\])]*)", text)
+            self.assertTrue(m, f"{var} の一覧を読み取れない")
+            return {n.lower() for n in re.findall(r'"([^"]+\.\w+)"', m.group(1))}
+
+        theirs = names_in(public, "ALT_NEWLINE_FILES")
+        self.assertEqual(len(theirs), 7,
+                         f"公開ソースの一覧が {len(theirs)} 件 (読み取り方が壊れた)")
+        self.assertEqual(set(boku2.ALT_BREAK_FILES), theirs,
+                         "boku2.py の ALT_BREAK_FILES が公開ソースとずれています")
+
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        self.assertEqual(names_in(app, "ALT_BREAK_FILES"), theirs,
+                         "web/app.js の ALT_BREAK_FILES が公開ソースとずれています")
+
+        # 入れ物の一覧は**書き写しではなく要約** (向こうは `fish\\img\\…` のような道)。
+        # そこで「向こうのどこかに同じ名前がある」ことと、画面と CLI が
+        # **同じ並び**であること (#104 で報告の並びがずれた) を見る
+        unpack_py = os.path.join(PUBLIC_SRC, "UNPACK.py")
+        if os.path.isfile(unpack_py):
+            with open(unpack_py, encoding="utf-8", errors="replace") as fh:
+                paths = fh.read()
+            for name in boku2.TEXT_CONTAINERS:
+                self.assertTrue(name in paths.lower() or name in public.lower(),
+                                f"{name} は公開ソースのどの一覧にもありません")
+        m = re.search(r"const TEXT_CONTAINERS = \[([^\]]*)\]", app)
+        self.assertTrue(m, "web/app.js の TEXT_CONTAINERS を読み取れない")
+        self.assertEqual(re.findall(r'"([^"]+)"', m.group(1)),
+                         list(boku2.TEXT_CONTAINERS),
+                         "画面と CLI で入れ物の一覧の並びが違います (#104)")
+
     def test_the_map_conversation_tables_read_the_same(self):
         """マップの会話は「表の一覧 + 4 バイト刻み」。こちらの 12 バイト項目の読みを外から確かめる."""
         path = os.path.join(self.unpacked, "maps", "M_A01000", "1.bin")
