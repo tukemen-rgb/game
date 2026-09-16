@@ -4322,6 +4322,75 @@ class TestDocs(unittest.TestCase):
             key = re.split(r"[。、(:]", head)[0].strip()[:14]
             self.assertIn(key, keys, f"ブラウザだけにある → の行 (CLI と docs/10 に合わせる): {head}")
 
+    def test_the_numbers_written_in_the_docs_are_the_real_ones(self):
+        """**文書に書いた数が、道具の実際の数と合っていること** (#191).
+
+        #184 は「→ は 12 種類」(本当は 24)、#185 は「タブ 11 枚」の裏付け無し、
+        #190 は `broken.py` の「5 通り」(本当は 6) —— **同じ数を 3 回別々に直して**
+        いました。今回まとめて掃いたら、**README の「5 通り」がまだ残っていました**
+        (#184 で exercises を、#190 で broken.py を直したのに、README は 2 回とも
+        見落とし)。1 か所ずつ直す限り、次も必ずどこかに残ります。
+
+        数は**道具から取って**、文書のほうを回ります。
+
+        **docs/09 の記録欄は見ません。** あそこはその時どうだったかの記録で、
+        「ヘッドレス 15」は書いた時点では本当のことでした。**過去の記録を
+        今の数に書き換えるのは、記録を壊すこと**です。見るのは生きている文章だけ。
+        """
+        import glob
+        import importlib.util
+        import re
+        import unittest as ut
+
+        def load(path, name):
+            spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        mk = load("tools/make_boku2_sample.py", "mk_numbers")
+        e2e = load("tests/e2e/run_all.py", "e2e_numbers")
+        with open(os.path.join(REPO, "web", "index.html"), encoding="utf-8") as fh:
+            tabs = len(re.findall(r'role="tab" data-tab="\w+"', fh.read()))
+        tests_here = ut.TestLoader().loadTestsFromModule(sys.modules[__name__]).countTestCases()
+
+        #: (文書での書かれ方, 本当の数, 何の数か)
+        claims = [
+            (r"壊し方は (\d+) 通り", len(mk.DAMAGE), "--break の壊し方"),
+            (r"などで (\d+) 通り", len(mk.DAMAGE), "--break の壊し方"),
+            (r"やること \((\d+) 通り", len(mk.DAMAGE), "--break の壊し方"),
+            (r"(\d+) 通りとも", len(mk.DAMAGE), "--break の壊し方"),
+            (r"タブは (\d+) 枚", tabs, "画面のタブ"),
+            (r"文字表は全部で (\d+) 字", boku2.FONT_GLYPHS, "文字表の字数"),
+            (r"1 行 (\d+) 字", boku2.FONT_COLS, "1 行の字数"),
+            (r"刻み (\d+) ドット", boku2.FONT_CELL, "文字の刻み"),
+            (r"ヘッドレス (\d+)", len(e2e.CHECKS), "ヘッドレスの検査"),
+            (r"テスト (\d+) 件", tests_here, "Python の検査"),
+        ]
+
+        def living(path):
+            """その文書の**生きている部分**。docs/09 は記録欄より前だけ."""
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            if os.path.basename(path).startswith("09-"):
+                return text.split("## 進め方 (自走ループの記録欄)")[0]
+            return text
+
+        docs = (sorted(glob.glob(os.path.join(REPO, "docs", "*.md")))
+                + [os.path.join(REPO, "README.md"),
+                   os.path.join(REPO, "exercises", "README.md")])
+        self.assertGreaterEqual(len(docs), 8, "文書を拾えていない")
+        for pattern, want, label in claims:
+            found = [(p, m.group(0), int(m.group(1)))
+                     for p in docs for m in re.finditer(pattern, living(p))]
+            # **0 件で緑にしない。** 書き方が変わって当たらなくなったら、
+            # 数が合っているのではなく**見ていない**だけになる
+            self.assertTrue(found, f"{label} ({pattern}) の書かれ方が文書に 1 件も無い")
+            for path, text, got in found:
+                self.assertEqual(got, want,
+                                 f"{os.path.relpath(path, REPO)} の「{text}」は "
+                                 f"{label} {want} と合っていません")
+
     def test_the_arrow_table_is_the_one_place_to_look_things_up(self):
         """**docs/10 の → の表が、道具の出す → と 1 対 1 で揃っていること** (#184).
 
