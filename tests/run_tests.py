@@ -2458,6 +2458,80 @@ class TestProofread(unittest.TestCase):
     def rules_hit(self, original: str, translation: str) -> set[str]:
         return {f.rule for f in self.check(original, translation)}
 
+    def test_the_width_limit_is_measured_against_the_real_text(self):
+        """幅の上限が、**原文が一度も使っていない広さ**なら、そう言うこと (#180).
+
+        `data/rules.json` の `line_max_width` は、その注記どおり
+        「開発元から渡される仕様」の欄です。**僕の夏休み 2 については、その仕様が
+        ありません。** 既定の 18 は練習用の作品 (リィンフォルト戦記) の数字が
+        そのまま入っているだけでした。
+
+        公開ソースに残る実物の日本語を測ると、いちばん長い行でも **13.5 文字分**
+        しかありません (`diaries.txt` 825 行 / `sumo_script.txt` 182 行 /
+        `bug_info.txt` 23 行)。**原文が一度も使っていない幅を上限にしても、この検査は
+        何も捕まえません。** 16 文字の訳文を書いても素通りし、実機で枠から出ます。
+
+        数字を当てずっぽうで変えるのは筋が悪い (枠の幅は実物でしか決まらない) ので、
+        **測って見せる**ことと、`--line-width` で試せることの 2 つにしました。
+        """
+        import subprocess
+        import tempfile
+
+        def run(rows, *extra):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "a.tsv")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("id\toriginal\ttranslation\n")
+                    for i, (o, t) in enumerate(rows):
+                        fh.write(f"{i}\t{o}\t{t}\n")
+                res = subprocess.run(
+                    [sys.executable, os.path.join(REPO, "tools", "proofread.py"),
+                     path, "--no-font-check", *extra], capture_output=True, text=True)
+                return res.returncode, res.stdout + res.stderr
+
+        limit = float(self.rules.get("line_max_width", 0))
+        self.assertGreater(limit, 0, "上限が設定されていない")
+
+        # 1. 原文が上限より狭ければ、測った数と「一度も使っていない」ことを言う
+        rc, out = run([("みじかい", "みじかい")])
+        self.assertIn("原文の 1 行の幅", out, f"測って見せていない:\n{out}")
+        self.assertIn(f"上限は {limit:g}", out, "上限を出していない")
+        self.assertIn("一度も使っていない幅です", out, "上限が広すぎることを言っていない")
+
+        # 2. 原文が上限いっぱいなら、余計なことを言わない
+        wide = "あ" * int(limit)
+        rc, out = run([(wide, wide)])
+        self.assertIn("原文の 1 行の幅", out, "測って見せていない")
+        self.assertNotIn("一度も使っていない幅です", out,
+                         f"原文が上限まで使っているのに文句を言っている:\n{out}")
+
+        # 3. --line-width で上限を下げると、その場で捕まえること
+        rc, out = run([("みじかい", "あ" * 14)], "--line-width", "13")
+        self.assertEqual(rc, 1, f"上限 13 で 14 文字が通っている:\n{out}")
+        self.assertIn("上限 13", out, f"打ち込んだ上限を使っていない:\n{out}")
+
+        # 4. 実物の裏付け: 公開ソースの日本語は、いまの上限に遠く届かない
+        if os.path.isdir(PUBLIC_SRC):
+            import unicodedata
+            widest, counted = 0.0, 0
+            for name in ("diaries.txt", "sumo_script.txt", "bug_info.txt"):
+                path = os.path.join(PUBLIC_SRC, name)
+                if not os.path.isfile(path):
+                    continue
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = re.sub(r"\{[^}]*\}|<[^>]*>", "", line).strip()
+                        if not line:
+                            continue
+                        counted += 1
+                        widest = max(widest, sum(
+                            1.0 if unicodedata.east_asian_width(c) in "WFA" else 0.5
+                            for c in line))
+            self.assertGreater(counted, 500, f"{counted} 行しか測れていない")
+            self.assertLess(widest, limit,
+                            f"実物の日本語が {widest} 文字分まで使っている。"
+                            f"上限 {limit:g} は広すぎるという読みが崩れた")
+
     def test_a_changed_number_is_caught(self):
         """数字の取り違えは、字数も用語も禁則も通ってしまう (#86)."""
         hit = self.rules_hit("報酬は<COLOR:02>８５０<COLOR:00>ギルだ。",

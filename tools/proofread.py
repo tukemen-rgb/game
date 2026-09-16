@@ -209,7 +209,8 @@ def check_consistency(rows: list[dict], lineno_of) -> list[Finding]:
 
 def check_row(row: dict, rules: dict, glossary: list[dict],
               font_chars: set[str] | None,
-              tag_widths: dict[str, float] | None = None) -> list[Finding]:
+              tag_widths: dict[str, float] | None = None,
+              line_width_override: float | None = None) -> list[Finding]:
     rid = row.get("id", "?")
     lineno = row.get("_lineno")
     original = row.get("original", "")
@@ -274,7 +275,8 @@ def check_row(row: dict, rules: dict, glossary: list[dict],
                 "使える文字は data/font_chars.txt を参照")
 
     # --- 行の幅と行数 -----------------------------------------------------
-    max_width = float(rules.get("line_max_width", 0) or 0)
+    max_width = (line_width_override if line_width_override is not None
+                 else float(rules.get("line_max_width", 0) or 0))
     lines_max = int(rules.get("lines_max", 0) or 0)
     pages = pages_of(text)
     for p, lines in enumerate(pages):
@@ -352,6 +354,10 @@ def main() -> int:
     ap.add_argument("--no-font-check", action="store_true")
     ap.add_argument("--var-width", type=float, metavar="文字数",
                     help="<VAR:xx> に差し込まれる最大の長さ (既定は data/rules.json の var_width)")
+    # 僕の夏休み 2 は枠の幅の仕様が分かっていない。既定の 18 は練習用の作品の数字
+    # なので、原文の実測に寄せて試せるようにする (#180)
+    ap.add_argument("--line-width", type=float, metavar="文字数",
+                    help="1 行に入る文字数の上限 (既定は data/rules.json の line_max_width)")
     ap.add_argument("--only-errors", action="store_true", help="ERROR だけ表示する")
     ap.add_argument("--report", help="指摘一覧を TSV で書き出す")
     args = ap.parse_args()
@@ -387,7 +393,8 @@ def main() -> int:
     findings: list[Finding] = []
     tag_widths = tag_widths_of(rules, args.var_width)
     for row in rows:
-        findings += check_row(row, rules, glossary, font_chars, tag_widths)
+        findings += check_row(row, rules, glossary, font_chars, tag_widths,
+                              args.line_width)
     lineno_of = {row.get("id", "?"): row.get("_lineno") for row in rows}
     findings += check_consistency(rows, lambda rid: lineno_of.get(rid))
     findings.sort(key=lambda f: f.sort_key())
@@ -435,6 +442,27 @@ def main() -> int:
     if font_chars is not None:
         used.append(f"文字表 {os.path.relpath(args.font_chars, REPO)} {len(font_chars)} 字")
     print("\n使った設定: " + " / ".join(used))
+    # **原文そのものを物差しにする** (#180)。`line_max_width` は「開発元から渡される
+    # 仕様」の欄だが、僕の夏休み 2 についてはその仕様が無く、既定の 18 は練習用の
+    # 作品の数字がそのまま入っている。**原文が一度も使っていない幅を上限にしても、
+    # この検査は何も捕まえない。** 公開ソースに残る実物の日本語を測ると、
+    # いちばん長い行でも 13.5 文字分しかなかった (diaries / sumo_script / bug_info)。
+    # そこで、いま見ている原文の実測を出して、上限と見比べられるようにする
+    max_width = (args.line_width if args.line_width is not None
+                 else float(rules.get("line_max_width", 0) or 0))
+    widths = [scrp.display_width(line, tag_widths)
+              for r in rows for page in pages_of(r.get("original", "")) for line in page
+              if scrp.strip_tags(line)]
+    if widths and max_width:
+        top = max(widths)
+        print(f"原文の 1 行の幅: 最大 {top:g} / 上限は {max_width:g} "
+              f"(この {len(widths)} 行で測りました)")
+        if top < max_width:
+            print(f"  **上限 {max_width:g} は、原文が一度も使っていない幅です。**"
+                  f"この上限のままだと、原文より {max_width - top:g} 文字分まで"
+                  "長い訳文が素通りします。")
+            print(f"    --line-width {top:g} のように、原文の実測に寄せて試すこともできます"
+                  " (実物の枠の幅が分かったら、その数字に直してください)")
     defaults = [name for name, value, default in
                 (("用語集", args.glossary, DEFAULT_GLOSSARY),
                  ("文字表", args.font_chars, DEFAULT_FONT_CHARS))
