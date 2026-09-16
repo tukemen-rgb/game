@@ -471,6 +471,37 @@ def main() -> int:
     print(f"{len(rows)} 行をチェック: "
           f"ERROR {counts['ERROR']} 件 / WARN {counts['WARN']} 件 / "
           f"問題なし {len(rows) - len({f.row_id for f in findings})} 行")
+
+    # **文字表を付けずに取り出した TSV は、原文が [21][79] のような番号のまま** (#188)。
+    # `boku2.py text` に `-f font.txt` を付け忘れると、そのまま TSV になる。
+    # 取り出す側は「文字表なし: 番号のまま」と言うが、**その 1 行はすぐ流れる**。
+    # 校正にかけた側は今まで何も気づかず、`[21]` の角括弧と数字を見て
+    # **全行に halfwidth の ERROR** を出していた。本当の原因は埋もれる。
+    # 一部だけ番号なら、原因は別 —— **文字表がその番号まで届いていない**
+    # (この作品の文字表は 1656 字あり、画像 1 枚では 1058 字分しか入らない。#167)
+    numbered = [r for r in rows if re.search(r"\[\d+\]", r.get("original", ""))]
+    if numbered:
+        codes = sorted({int(n) for r in rows
+                        for n in re.findall(r"\[(\d+)\]", r.get("original", ""))})
+        share = len(numbered) / len(rows)
+        print()
+        if share >= 0.5:
+            print(f"注意: {len(rows)} 行のうち {len(numbered)} 行の原文が、"
+                  f"`[21]` のような**文字番号のまま**です "
+                  f"({len(codes)} 種)。**この TSV は文字表なしで取り出したものです。**")
+            print("  このままでは、どの検査も日本語として見ていません "
+                  "(角括弧と数字に半角の ERROR が出るだけです)。"
+                  "文字表を付けて取り出し直してください:")
+            print("    python3 tools/boku2.py text OUT -f font.txt -o all.tsv")
+        else:
+            print(f"注意: {len(numbered)} 行の原文に、"
+                  f"**文字表が届いていない番号**が残っています "
+                  f"({len(codes)} 種: {' '.join(f'[{c}]' for c in codes[:8])}"
+                  f"{' …' if len(codes) > 8 else ''})。")
+            print("  文字表がその番号まで作れていません。"
+                  "この作品の文字表は 1 枚の画像では足りない (docs/09 の「次の一手」3) ので、"
+                  "続きの画像から作った分も足してください。")
+
     # **練習用の文字表のまま実物にかけると、正しい原文が大量に ERROR になる** (#182)。
     # 練習用は 347 字、僕の夏休み 2 は 1656 字。実物の会話を 20 行かけただけで
     # 「フォントに無い文字」が 14 件出た —— **全部まちがい**。社長はこれを見て

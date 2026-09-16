@@ -2719,6 +2719,56 @@ class TestProofread(unittest.TestCase):
             self.assertFalse("文字表のせい" in out,
                              f"この作品の文字表を渡したのに文字表のせいにしている:\n{out[-400:]}")
 
+    def test_text_that_is_still_glyph_numbers_is_named_as_such(self):
+        """**文字表を付けずに取り出した TSV を、そうと名指しすること** (#188).
+
+        `boku2.py text` に `-f font.txt` を付け忘れると、原文が
+        `[21][79][14]` のような番号のまま出ます。取り出す側は
+        「文字表なし: 番号のまま」と 1 行言いますが、**それはすぐ流れます**。
+        校正にかけると、`[` と数字が半角なので **全行に halfwidth の ERROR**
+        が出て、本当の原因 (文字表を渡していない) は埋もれていました。
+
+        一部だけ番号なら原因は別で、**文字表がその番号まで届いていない**
+        (この作品の文字表は 1656 字あり、画像 1 枚では 1058 字分しか入らない。#167)。
+        言うことが変わるので、2 つを見分けます。
+        """
+        import subprocess
+        import tempfile
+
+        def run(rows):
+            with tempfile.TemporaryDirectory() as tmp:
+                tsv = os.path.join(tmp, "a.tsv")
+                with open(tsv, "w", encoding="utf-8") as fh:
+                    fh.write("id\toriginal\ttranslation\n")
+                    for i, text in enumerate(rows):
+                        fh.write(f"{i}\t{text}\t{text}\n")
+                res = subprocess.run(
+                    [sys.executable, os.path.join(REPO, "tools", "proofread.py"),
+                     tsv, "--no-font-check"], capture_output=True, text=True)
+                return res.stdout + res.stderr
+
+        # 1. ほとんどが番号 → **取り出し直し**を言う
+        out = run([f"[{n}][{n + 1}][{n + 2}]" for n in range(10)])
+        self.assertTrue("文字表なしで取り出したもの" in out,
+                        f"番号だらけの TSV をそうと言っていない:\n{out[-600:]}")
+        self.assertTrue("-f font.txt" in out,
+                        f"取り出し直し方を言っていない:\n{out[-600:]}")
+
+        # 2. 一部だけ番号 → **文字表が届いていない**と言う (取り出し直しではない)
+        out = run(["ボクの夏休み"] * 9 + ["ボクの[900]休み"])
+        notice = next((ln for ln in out.splitlines() if "届いていない番号" in ln), "")
+        self.assertTrue(notice, f"残った番号を指摘していない:\n{out[-600:]}")
+        # **その行の中に**番号があること。出力全体で探すと、指摘の
+        # 「原文: ボクの[900]休み」で通ってしまう (「全文から語句を探さない」5 度目)
+        self.assertTrue("[900]" in notice, f"どの番号かを言っていない: {notice}")
+        self.assertFalse("文字表なしで取り出したもの" in out,
+                         f"一部なのに取り出し直しを勧めている:\n{out[-600:]}")
+
+        # 3. ちゃんと読めている TSV では、どちらも言わない (黙る)
+        out = run(["ボクの夏休み", "きょうはいい天気だ"])
+        self.assertFalse("文字番号のまま" in out, f"読めている TSV に注意を出した:\n{out[-600:]}")
+        self.assertFalse("届いていない番号" in out, f"読めている TSV に注意を出した:\n{out[-600:]}")
+
     def test_every_file_option_refuses_a_path_that_is_not_there(self):
         """**ファイルを指す指定は、どれも「渡したのに無い」を断ること** (#187).
 
