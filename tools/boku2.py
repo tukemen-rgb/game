@@ -916,7 +916,13 @@ def pick_fonts(img, entries: list[dict]) -> tuple[list[dict], bool]:
     return found, True
 
 
-def pick_by_shape(img, entries: list[dict], test, limit: int = 50) -> list[dict]:
+#: 形で探すとき、**いくつ見つけた所で打ち切るか** (#197)。
+#: 診断は標本で足りるので全部は集めない。ただし打ち切ったら**そう言う**こと ——
+#: 「.msg: 50 件」と出したら、社長は 50 件しか無いと読む
+SHAPE_PICK_LIMIT = 50
+
+
+def pick_by_shape(img, entries: list[dict], test, limit: int = SHAPE_PICK_LIMIT) -> list[dict]:
     """名前ではなく**中身**で選ぶ (#173).
 
     `pick_fonts` (#172) と同じ考え方を、本文と入れ物にも広げる。索引は 1951 個
@@ -1154,9 +1160,15 @@ def check(folder: str, out=sys.stdout) -> int:
         if not msgs:
             msg_by_shape = True
             msgs = pick_by_shape(img, entries, lambda b: bool(pick_msg(b, {})))
-        say(f".msg: {len(msgs)} 件"
+        # **打ち切った数を、あった数のように出さない** (#197)
+        msg_capped = msg_by_shape and len(msgs) >= SHAPE_PICK_LIMIT
+        say(f".msg: {len(msgs)}{' 件以上' if msg_capped else ' 件'}"
             + (f" (例: {', '.join(os.path.basename(e['path']) for e in msgs[:4])})" if msgs else "")
-            + ("。名前で拾えなかったので**中身の形**で探しました" if msg_by_shape and msgs else ""))
+            + ("。名前で拾えなかったので**中身の形**で探しました" if msg_by_shape and msgs else "")
+            + (f" ({SHAPE_PICK_LIMIT} 件見つけた所で打ち切りました)" if msg_capped else ""))
+        if msg_capped:
+            skipped.append(f"本文の残り (形で {SHAPE_PICK_LIMIT} 件見つけた所で打ち切り。"
+                           "実際はもっとあります)")
         shaped_containers: list[dict] = []
         if not found:
             container_by_shape = True
@@ -1194,7 +1206,15 @@ def check(folder: str, out=sys.stdout) -> int:
                 first_bad = (e, b[:16])
         if msgs:
             looked = min(MSG_CHECK_FILES, len(msgs))
-            say(f"  先頭 {looked} 件のうち読めた形: {ok_msg} 件")
+            if msg_by_shape:
+                # **形で拾ったときは、この数に意味が無い** (#197)。選び方そのものが
+                # 「読めたか」なので、答えは必ず「全部読めた」になる。
+                # それを数で出すと、**確かめた結果のように読める**
+                say(f"  この {looked} 件は**読めたから選んだ**ものです "
+                    "(名前が読めないので中身の形で拾いました)。"
+                    "読めた件数は、確かめた結果ではありません")
+            else:
+                say(f"  先頭 {looked} 件のうち読めた形: {ok_msg} 件")
             if len(msgs) > looked:
                 # **診ていないものは、診ていないと言う** (#175 と同じ理由、#195)。
                 # 上限が 50 だったころ、実物の 651 件のうち 601 件は**触れてもいない**のに

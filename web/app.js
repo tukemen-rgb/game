@@ -3618,6 +3618,10 @@ const FONT_OWN_CAP = 4 * 1024 * 1024;
  * (実物は 1951 件)。全件の先頭を読んでも 32 MB / 0.03 秒だった。 */
 const SHAPE_HUNT_FILES = 4000;
 
+/** 形で探すとき、いくつ見つけた所で打ち切るか。**一括処理と同じ数字**にしておくこと。
+ * 打ち切ったら「N 件以上」と言う —— 「50 件」と出すと 50 件しか無いと読まれる (#197)。 */
+const SHAPE_PICK_LIMIT = 50;
+
 /** `check` が中身まで開く `.msg` の数。**一括処理 (boku2.py) と同じ数字**にしておくこと。
  *
  * 長らく 50 だった。練習データの `.msg` は 4 件なので全部入るが、実物は 651 件あり、
@@ -3763,7 +3767,7 @@ async function buildIdxReport() {
   /* 名前で 1 つも拾えなければ**中身の形**で探す (#173)。名前が付かない索引でも、
      本文と入れ物の診断が黙って飛ばないように (#172 をフォントから広げた)。
      一括処理 (boku2.py の pick_by_shape) と同じ順・同じ言葉 */
-  const pickByShape = async (test, limit = 50) => {
+  const pickByShape = async (test, limit = SHAPE_PICK_LIMIT) => {
     const out = [];
     for (const it of items.slice(0, SHAPE_HUNT_FILES)) {
       if (it.len < 16) continue;
@@ -3780,9 +3784,16 @@ async function buildIdxReport() {
     msgByShape = true;
     msgs = await pickByShape((b) => !!detectBokuMsg(b));
   }
-  lines.push(`.msg: ${msgs.length} 件`
+  /* **打ち切った数を、あった数のように出さない** (#197) */
+  const msgCapped = msgByShape && msgs.length >= SHAPE_PICK_LIMIT;
+  lines.push(`.msg: ${msgs.length}${msgCapped ? " 件以上" : " 件"}`
     + (msgs.length ? ` (例: ${msgs.slice(0, 4).map((it) => it.base || it.name).join(", ")})` : "")
-    + (msgByShape && msgs.length ? "。名前で拾えなかったので**中身の形**で探しました" : ""));
+    + (msgByShape && msgs.length ? "。名前で拾えなかったので**中身の形**で探しました" : "")
+    + (msgCapped ? ` (${SHAPE_PICK_LIMIT} 件見つけた所で打ち切りました)` : ""));
+  if (msgCapped) {
+    skipped.push(`本文の残り (形で ${SHAPE_PICK_LIMIT} 件見つけた所で打ち切り。`
+      + "実際はもっとあります)");
+  }
   /* 文言の入れ物 (公開ソースの一覧): 日記・保存画面・出来事・釣り */
   const CONTAINERS = TEXT_CONTAINERS;
   const bases = new Set(items.map((it) => (it.base || it.name).toLowerCase()));
@@ -3822,7 +3833,15 @@ async function buildIdxReport() {
   }
   if (msgs.length) {
     const looked = Math.min(MSG_CHECK_FILES, msgs.length);
-    lines.push(`  先頭 ${looked} 件のうち読めた形: ${okMsg} 件`);
+    if (msgByShape) {
+      /* **形で拾ったときは、この数に意味が無い** (#197)。選び方そのものが
+         「読めたか」なので、答えは必ず「全部読めた」になる */
+      lines.push(`  この ${looked} 件は**読めたから選んだ**ものです `
+        + "(名前が読めないので中身の形で拾いました)。"
+        + "読めた件数は、確かめた結果ではありません");
+    } else {
+      lines.push(`  先頭 ${looked} 件のうち読めた形: ${okMsg} 件`);
+    }
     if (msgs.length > looked) {
       /* **診ていないものは、診ていないと言う** (#175 と同じ理由、#195) */
       skipped.push(`本文 ${msgs.length - looked} 件 `

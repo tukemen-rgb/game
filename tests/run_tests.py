@@ -942,6 +942,79 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         self.assertEqual(bad, [],
                          "段がまるごと 0 件なのに、そのまま通している:\n  " + "\n  ".join(bad))
 
+    def test_a_number_that_can_only_be_one_value_is_not_reported_as_evidence(self):
+        """**形で拾ったときの「読めた形 N 件」は、必ず全部になる** (#197).
+
+        名前が読めない吸い出しでは、`.msg` を**中身の形**で選びます。選ぶ条件が
+        「読めるか」なので、そのあとで「読めた形は何件か」を数えると、
+        答えは**必ず全部**になります。ところがそれが
+
+            先頭 50 件のうち読めた形: 50 件
+
+        と出ていました。**確かめた結果のように読めますが、確かめていません。**
+        しかも `.msg: 50 件` の 50 は**打ち切った数**で、実際はもっとあります
+        (実物なら 651 件)。社長は「本文は 50 件」と読みます。
+
+        「0 件で緑」の裏返しで、**取りうる値が 1 つしかない数**。
+        """
+        import io
+        import boku2
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            os.makedirs(folder)
+            # **打ち切りを必ず越える**数の本文を、名前が読めない索引に入れる
+            total = boku2.SHAPE_PICK_LIMIT * 2 + 20
+            codes = [1, 2, 3, 0x8000]
+            good = (struct.pack("<I", 1) + struct.pack("<I", 12) + b"\0" * 4
+                    + struct.pack(f"<{len(codes)}H", *codes))
+            data, recs = bytearray(), []
+            for i in range(total):
+                b = good if i % 2 == 0 else bytes(2048)
+                while len(data) % 2048:
+                    data += b"\0"
+                recs.append((len(data) // 2048, len(b)))
+                data += b
+            idx = bytearray(b"DFI\0" + struct.pack("<III", total, 0, 0))
+            for sector, ln in recs:
+                idx += struct.pack("<HHIII", 0, 0, 0, sector, ln)
+            for i in range(total):
+                idx += f"\xff\xff{i:04d}".encode("latin-1") + b"\0"
+            with open(os.path.join(folder, "BOKU2.IDX"), "wb") as fh:
+                fh.write(bytes(idx))
+            with open(os.path.join(folder, "BOKU2.IMG"), "wb") as fh:
+                fh.write(bytes(data))
+
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            said = out.getvalue()
+
+            # 1. **打ち切ったなら「以上」と言う。** 数だけ出さない
+            head = next((ln for ln in said.splitlines() if ln.startswith(".msg:")), "")
+            self.assertTrue(head, f".msg の行が無い:\n{said[:400]}")
+            self.assertTrue("件以上" in head and "打ち切り" in head,
+                            f"打ち切った数をあった数のように出している: {head}")
+
+            # 2. **必ず全部になる数を、確かめた結果として出さない**
+            tautology = [ln for ln in said.splitlines() if "のうち読めた形" in ln]
+            self.assertFalse(tautology,
+                             f"形で拾ったのに「読めた形 N 件」を出している: {tautology}")
+            self.assertTrue("読めたから選んだ" in said,
+                            f"選び方そのものが答えだと言っていない:\n{said[:600]}")
+
+            # 3. 残りは「診ていない段」に数える
+            line = next((ln for ln in said.splitlines() if ln.startswith("診ていない段:")), "")
+            self.assertTrue("本文の残り" in line, f"打ち切った残りを数えていない: {line}")
+
+            # 4. **名前が読めるときは、今までどおり数で出す** (数えた意味がある)
+            import make_boku2_sample
+            normal = os.path.join(tmp, "N")
+            make_boku2_sample.build_sample(normal)
+            out = io.StringIO()
+            boku2.check(normal, out=out)
+            self.assertTrue(any("のうち読めた形" in ln for ln in out.getvalue().splitlines()),
+                            "名前が読めるのに件数を出していない")
+
     def test_the_shape_search_reaches_past_the_first_few_hundred(self):
         """**名前が読めないとき、401 件目から先も探すこと** (#196).
 
