@@ -942,6 +942,61 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         self.assertEqual(bad, [],
                          "段がまるごと 0 件なのに、そのまま通している:\n  " + "\n  ".join(bad))
 
+    def test_only_a_handful_of_msg_files_is_not_a_clean_bill(self):
+        """**開いていない `.msg` を、診ていない段に数えること** (#195).
+
+        `check` が中身まで開く `.msg` は、長らく **先頭 50 件**でした。練習データの
+        `.msg` は 4 件なので全部入り、何も困りません。ところが実物は **651 件**あり、
+        **601 件は触れてもいないのに**、出るのは「先頭 50 件のうち読めた形: 50 件」の
+        1 行と、締めの「問題なし」だけでした。#193・#194 と同じ
+        「**小さいときだけ正しい**」型です。
+
+        651 件を全部開いても 0.04 秒しか変わらなかったので上限を上げました。
+        それでも上限は残す (壊れた吸い出しで何万件になっても止まらないように)。
+        **上限に当たったら数える**ので、黙って減ることはありません。
+        """
+        import io
+        import boku2
+
+        self.assertGreaterEqual(boku2.MSG_CHECK_FILES, 651,
+                                "実物の .msg (651 件) を診ない上限になっています")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            os.makedirs(folder)
+            n = boku2.MSG_CHECK_FILES + 30       # **上限を必ず越える**件数にする
+            data, recs = bytearray(), []
+            for i in range(n):
+                recs.append(len(data) // 2048)
+                data += bytes(2048)
+            idx = bytearray(b"DFI\0" + struct.pack("<III", n, 0, 0))
+            for sector in recs:
+                idx += struct.pack("<HHIII", 0, 0, 0, sector, 2048)
+            for i in range(n):
+                idx += f"f{i:05d}.msg".encode() + b"\0"
+            with open(os.path.join(folder, "BOKU2.IDX"), "wb") as fh:
+                fh.write(bytes(idx))
+            with open(os.path.join(folder, "BOKU2.IMG"), "wb") as fh:
+                fh.write(bytes(data))
+
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            got = out.getvalue()
+            line = next((ln for ln in got.splitlines() if ln.startswith("診ていない段:")), "")
+            self.assertTrue(line, f"診ていない段の行が無い:\n{got[-400:]}")
+            # **その行の中に**本文の件数があること (全文から探すと別の行で通る)
+            self.assertTrue("本文" in line and str(n - boku2.MSG_CHECK_FILES) in line,
+                            f"開いていない .msg を数えていない: {line}")
+            # 上限に当たっていないときは、余計なことを言わない
+            out = io.StringIO()
+            import make_boku2_sample
+            small = os.path.join(tmp, "small")
+            make_boku2_sample.build_sample(small)
+            boku2.check(small, out=out)
+            line = next((ln for ln in out.getvalue().splitlines()
+                         if ln.startswith("診ていない段:")), "")
+            self.assertFalse("本文" in line, f"全部診たのに数えている: {line}")
+
     def test_what_was_not_checked_is_counted(self):
         """**診ていない段**を数えて、報告に必ず出すこと (#175).
 

@@ -3614,6 +3614,12 @@ const FONT_HUNT_HEAD = 64 * 1024;          /* ほかのファイル */
 const FONT_OWN_CAP = 4 * 1024 * 1024;
 const FONT_HUNT_FILES = 400;
 
+/** `check` が中身まで開く `.msg` の数。**一括処理 (boku2.py) と同じ数字**にしておくこと。
+ *
+ * 長らく 50 だった。練習データの `.msg` は 4 件なので全部入るが、実物は 651 件あり、
+ * **601 件は触れてもいないのに締めは「問題なし」**になっていた (#195)。 */
+const MSG_CHECK_FILES = 2000;
+
 /** 1 行 23 字の幅で割り切れる画像か (文字表の続きが入っていそうか、#168) */
 const looksLikeAFontPage = (p) => Math.floor(p.width / FONT_CELL) === FONT_COLS
   && fontPageCells(p) > 0;
@@ -3799,7 +3805,7 @@ async function buildIdxReport() {
   let okMsg = 0, badMsg = null, lenOk = 0, lenNg = 0;
   const usedHere = new Set();                                   /* 読めた .msg で使われている文字番号 (文字表の出来具合を診る) */
   const sjisDecode = DECODERS.sjis ? (x) => DECODERS.sjis.decode(x) : null;
-  for (const it of msgs.slice(0, 50)) {
+  for (const it of msgs.slice(0, MSG_CHECK_FILES)) {
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, it.len);
     const r = detectBokuMsg(bytes) || parseBokuMsgTables(bytes) || parseBokuMsgRaw(bytes) || parseSjisList(bytes, sjisDecode);
     if (r) {
@@ -3811,7 +3817,13 @@ async function buildIdxReport() {
     } else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16) };
   }
   if (msgs.length) {
-    lines.push(`  先頭 ${Math.min(50, msgs.length)} 件のうち読めた形: ${okMsg} 件`);
+    const looked = Math.min(MSG_CHECK_FILES, msgs.length);
+    lines.push(`  先頭 ${looked} 件のうち読めた形: ${okMsg} 件`);
+    if (msgs.length > looked) {
+      /* **診ていないものは、診ていないと言う** (#175 と同じ理由、#195) */
+      skipped.push(`本文 ${msgs.length - looked} 件 `
+        + `(.msg が ${msgs.length} 件あり、先頭 ${looked} 件だけ診ました)`);
+    }
     if (lenOk || lenNg) {
       /* 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が実物でも本当に長さかを見る行 */
       lines.push(`  位置表の長さの欄: 合う ${lenOk} 件 / 合わない ${lenNg} 件`);

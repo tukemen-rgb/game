@@ -867,6 +867,16 @@ FONT_OWN_CAP = 4 * 1024 * 1024
 #: 探す相手の上限 (索引が大きいので、見当のつくものから順に打ち切る)
 FONT_HUNT_FILES = 400
 
+#: `check` が中身まで開く `.msg` の数 (#195)。
+#:
+#: ここは長らく **50** だった。練習データの `.msg` は 4 件なので全部入り、
+#: 「先頭 50 件のうち読めた形: 4 件」で何も困らない。ところが実物は
+#: **651 件**あり、**601 件は触れてもいないのに締めは「問題なし」**になる。
+#: 数えたら 651 件を全部開いても 0.04 秒しか変わらなかったので、上限を上げた。
+#: それでも上限は残す (壊れた吸い出しで何万件になっても止まらないように)。
+#: **上限に当たったら「診ていない段」に数える** ので、黙って減ることはない
+MSG_CHECK_FILES = 2000
+
 
 def pick_fonts(img, entries: list[dict]) -> tuple[list[dict], bool]:
     """フォント画像らしいファイルを選ぶ。名前で拾えなければ**形で拾う** (#172).
@@ -1160,7 +1170,7 @@ def check(folder: str, out=sys.stdout) -> int:
                 "この行ごと報告してください")
         ok_msg, first_bad = 0, None
         len_ok, len_ng = 0, 0            # 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が合うか
-        for e in msgs[:50]:
+        for e in msgs[:MSG_CHECK_FILES]:
             img.seek(e["at"])
             b = img.read(e["len"])
             info: dict = {}
@@ -1176,7 +1186,14 @@ def check(folder: str, out=sys.stdout) -> int:
             elif first_bad is None:
                 first_bad = (e, b[:16])
         if msgs:
-            say(f"  先頭 {min(50, len(msgs))} 件のうち読めた形: {ok_msg} 件")
+            looked = min(MSG_CHECK_FILES, len(msgs))
+            say(f"  先頭 {looked} 件のうち読めた形: {ok_msg} 件")
+            if len(msgs) > looked:
+                # **診ていないものは、診ていないと言う** (#175 と同じ理由、#195)。
+                # 上限が 50 だったころ、実物の 651 件のうち 601 件は**触れてもいない**のに
+                # 「先頭 50 件のうち読めた形: 50 件」としか出ず、締めは「問題なし」だった
+                skipped.append(f"本文 {len(msgs) - looked} 件 "
+                               f"(.msg が {len(msgs)} 件あり、先頭 {looked} 件だけ診ました)")
             if len_ok or len_ng:
                 say(f"  位置表の長さの欄: 合う {len_ok} 件 / 合わない {len_ng} 件")
                 if len_ng and msg_by_shape:
