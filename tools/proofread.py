@@ -449,8 +449,14 @@ def main() -> int:
               f"({len(bad_chars)} 種: {''.join(sorted(bad_chars))[:20]}) 出ています。"
               f"**使っている文字表は練習用の作品のもの ({len(font_chars or ())} 字) です。**")
         print("  この作品の文字表を渡していないなら、これらの ERROR は"
-              "**訳文ではなく文字表のせい**です。docs/10 の手順 6 で作った文字表を渡してください:")
-        print("    --font-chars font.txt")
+              "**訳文ではなく文字表のせい**です。docs/10 の手順どおり、作った文字表から"
+              "使える字の一覧を作って渡してください:")
+        # **docs/10 の「3. 校正にかける」と同じ 2 行**。#183 で、ここだけ
+        # `--font-chars font.txt` と書いていたのを直した。`font.txt` は番号順の
+        # 対応表、`font_chars.txt` は使える字の一覧で、**別のファイル**。
+        # 道具と手順書で違う道を案内すると、社長はどちらが正しいか分からない
+        print("    python3 tools/boku2.py fontlist font.txt -o font_chars.txt")
+        print("    python3 tools/proofread.py all.tsv --font-chars font_chars.txt")
     orig_chars = sum(len(scrp.strip_tags(r.get("original", ""))) for r in rows)
     new_chars = sum(len(scrp.strip_tags(scrp.final_text(r))) for r in rows)
     print(f"表示文字数: 原文 {orig_chars:,} → 訳文 {new_chars:,} ({new_chars - orig_chars:+,})")

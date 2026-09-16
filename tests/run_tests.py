@@ -2253,6 +2253,48 @@ class TestMissingPracticeData(unittest.TestCase):
                     self.assertTrue(os.path.exists(os.path.join(REPO, token)),
                                     f"{name} の案内が指す {token} がありません")
 
+    def test_suggested_commands_are_documented(self):
+        """**道具が案内するコマンドは、手順書にある形と同じであること** (#183).
+
+        #182 で「この作品の文字表を渡してください」と案内を足したとき、
+        `--font-chars font.txt` と書きました。ところが docs/10 の「3. 校正にかける」は
+
+            python3 tools/boku2.py fontlist font.txt -o font_chars.txt
+            python3 tools/proofread.py all.tsv --font-chars font_chars.txt
+
+        の 2 行です。`font.txt` は**番号順の対応表**、`font_chars.txt` は
+        **使える字の一覧**で、別のファイル。どちらを渡しても動いてしまうので
+        気づかず、**道具と手順書が違う道を案内する**ところでした。社長はどちらが
+        正しいか分かりません。
+
+        そこで、道具が印字するコマンドを集めて、docs/10 にその形があるかを見ます。
+        """
+        import re
+
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        found, missing = [], []
+        for tool in ("boku2.py", "proofread.py"):
+            with open(os.path.join(REPO, "tools", tool), encoding="utf-8") as fh:
+                src = fh.read()
+            # `print(...)` / `say(...)` が出す文字列だけを見る。説明文 (docstring) の
+            # 中の例まで拾うと、手順書に無くて当たり前のものが混ざる
+            for m in re.finditer(r'(?:print|say)\(\s*f?"((?:[^"\\]|\\.)*)"', src):
+                for cmd in re.findall(r"python3 tools/[^\s{]+(?: [^\s{]+)*", m.group(1)):
+                    cmd = cmd.strip().rstrip("。")
+                    # 日本語が混ざっていたら、コマンドではなく文章の一部
+                    if re.search(r"[ぁ-んァ-ヶ一-龥]", cmd):
+                        continue
+                    found.append((tool, cmd))
+                    if cmd not in doc:
+                        missing.append(f"{tool}: {cmd}")
+        # 拾えていること自体を確かめる (0 件なら必ず一致する)
+        self.assertGreaterEqual(len(found), 3,
+                                f"案内するコマンドを {len(found)} 件しか拾えない: {found}")
+        self.assertEqual(missing, [],
+                         "道具が案内するコマンドが docs/10 に無い "
+                         "(道具と手順書で違う道を教えている):\n  " + "\n  ".join(missing))
+
     def test_the_practice_docs_say_to_make_the_data_first(self):
         """docs/01〜03 の頭に、練習データの作り方への導線があること."""
         for name in ("01-文字テーブル.md", "02-相対検索.md", "03-ポインタテーブル.md"):
@@ -2662,19 +2704,19 @@ class TestProofread(unittest.TestCase):
             out, n_default = run()
             self.assertGreater(n_default, 5,
                                f"練習用の文字表で {n_default} 件しか落ちない (前提が崩れた)")
-            self.assertIn("文字表のせい", out,
-                          f"原因が文字表だと言っていない:\n{out[-600:]}")
+            self.assertTrue("文字表のせい" in out,
+                            f"原因が文字表だと言っていない:\n{out[-600:]}")
             # **下にもとからある案内にも `--font-chars` は出る**ので、
             # 「含むか」では見ない。docs/10 で作る名前まで言っていること
-            self.assertIn("--font-chars font.txt", out,
-                          f"この作品の文字表の渡し方を具体的に言っていない:\n{out[-500:]}")
+            self.assertTrue("--font-chars font_chars.txt" in out,
+                            f"この作品の文字表の渡し方を具体的に言っていない:\n{out[-500:]}")
 
             # 2. **この作品の文字表を渡せば、ぐっと減る** (減らなければ読みが崩れている)
             out, n_real = run("--font-chars", table)
             self.assertLess(n_real, n_default / 2,
                             f"実物の文字表でも {n_real} 件 (練習用は {n_default} 件)。"
                             "文字表のせいだという読みが崩れた")
-            self.assertNotIn("文字表のせい", out,
+            self.assertFalse("文字表のせい" in out,
                              f"この作品の文字表を渡したのに文字表のせいにしている:\n{out[-400:]}")
 
     def test_a_changed_number_is_caught(self):
