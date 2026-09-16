@@ -351,6 +351,16 @@ function collectStrings(minChars) {
   return out.sort((a, b) => a.off - b.off);
 }
 
+/** 1 回の走査で見る長さの上限 (#193)。
+ *
+ * **効いているのは下の「繰り返しを飛ばす」ほうで、これは念のための蓋。**
+ * 実測では、これを外しても 0.5 秒 → 2.0 秒になるだけで固まらない。それでも
+ * 残しているのは、繰り返しでない読めるバイトが延々と続く材料が来たときに、
+ * 1 回あたりの手間を切っておくため。
+ *
+ * 長い並びは 4 KB ずつに分かれて出る (捨てるのではなく切る) ので、本文は落ちない。 */
+const STRING_RUN_MAX = 4096;
+
 /** Shift-JIS / ASCII として読める並びを探す */
 function scanStrings(b, minChars) {
   const out = [];
@@ -358,13 +368,28 @@ function scanStrings(b, minChars) {
   let i = 0;
   while (i < n) {
     let j = i, chars = 0, jp = 0, asciiCount = 0;
-    while (j < n) {
+    const cap = Math.min(n, i + STRING_RUN_MAX);
+    while (j < cap) {
       const c = b[j];
       if (j + 1 < n && SJIS_LEAD(c) && SJIS_TRAIL(b[j + 1])) { j += 2; chars++; jp++; continue; }
       if ((c >= 0x20 && c < 0x7F) || c === 0x0A || c === 0x0D) { j++; chars++; asciiCount++; continue; }
       if (c >= 0xA1 && c <= 0xDF) { j++; chars++; continue; }   // 半角カナ (証拠にはしない)
       break;
     }
+    /* ここが取れなかったときに、**1 バイトずらして端まで数え直さない** (#193)。
+       先頭が同じバイトの繰り返し (詰め物) なら、その繰り返しの中から始めても
+       数は増えないので、**繰り返しの終わりまで飛ばす**。最後の 1 バイトは、
+       次の並びと対になるかもしれないので残す。
+       これで、詰め物にはさまれた本文はちゃんと拾えたまま、長さの 2 乗が消える。 */
+    let runEnd = i + 1;
+    while (runEnd < j && b[runEnd] === b[i]) runEnd++;
+    const skipRun = runEnd - i > 8 ? runEnd - 1 : 0;
+    /* **同じバイトが延々と続く所で、1 バイトずつ数え直さない** (#193)。
+       詰め物 (0xCD の並び、真っ白な絵の 0x00 以外の値…) は実物にいくらでもある。
+       そこを 1 つずらすたびに端まで数え直すと、長さの 2 乗の手間になり、
+       120 KB の材料でブラウザが 5 秒止まった。**全部同じバイトなら、
+       1 つずらしても数は増えない**ので、途中の開始位置は試さなくてよい
+       (最後の 1 バイトだけは、次の並びと対になるかもしれないので残す)。 */
     const enough = chars >= minChars && (jp >= 3 || asciiCount >= minChars);
     if (enough) {
       const slice = b.subarray(i, j);
@@ -379,7 +404,7 @@ function scanStrings(b, minChars) {
         const noKana = q.wide >= 4 && q.kana < 0.25;
         const tooLatin = q.latin >= 6 && q.latin > q.wide * 1.5;
         if (text.includes("\uFFFD") || q.plaus < 0.6 || noKana || tooLatin) {
-          i++;
+          i = Math.max(i + 1, skipRun);
           continue;
         }
       }
@@ -390,7 +415,7 @@ function scanStrings(b, minChars) {
       });
       i = j;
     } else {
-      i++;
+      i = Math.max(i + 1, skipRun);
     }
   }
   return out;
@@ -403,7 +428,8 @@ function scanUtf8(b, minChars) {
   let i = 0;
   while (i < n) {
     let j = i, chars = 0, wide = 0;
-    while (j < n) {
+    const cap = Math.min(n, i + STRING_RUN_MAX);
+    while (j < cap) {
       const c = b[j];
       if (c >= 0x20 && c < 0x7F) { j++; chars++; continue; }
       let len = 0;
@@ -424,7 +450,10 @@ function scanUtf8(b, minChars) {
       });
       i = j;
     } else {
-      i++;
+      /* scanStrings と同じ理由 (#193)。先頭の繰り返しの中は数え直さない */
+      let runEnd = i + 1;
+      while (runEnd < j && b[runEnd] === b[i]) runEnd++;
+      i = runEnd - i > 8 ? Math.max(i + 1, runEnd - 1) : i + 1;
     }
   }
   return out;
