@@ -266,6 +266,36 @@ def numbers_in(text: str) -> list[str]:
     return re.findall(r"\d+", visible)
 
 
+def rows_shifted_by_one(rows: list[dict]) -> tuple[int, int, str]:
+    """訳文が**1 行ずれている**疑いを数える (#224).
+
+    取り出したばかりの TSV は `translation` が `original` の写しです。
+    表計算で行を 1 つ挿入・削除したまま訳し始めると、以降の訳文が全部
+    **隣の行のもの**になります。1 行ずつ見るかぎり、どの行も普通に見えます ——
+    原文と訳文が食い違うのは当たり前 (訳したのだから) なので、
+    `placeholder` も `number` も鳴りません。**気づくのは実機に入れてから**です。
+
+    見るのは「訳文が、すぐ上 (または下) の行の原文と同じ」。写しから始まる形なので、
+    ずれていれば**大量に**当たります。戻り値は (上にずれ, 下にずれ, 最初の例の id)。
+    """
+    up = down = 0
+    first = ""
+    orig = [(r.get("original") or "").strip() for r in rows]
+    for i, row in enumerate(rows):
+        text = (row.get("translation") or "").strip()
+        if not text or text == orig[i]:
+            continue                          # 空欄と「写しのまま」は数えない
+        for delta, hit in ((-1, "up"), (1, "down")):
+            j = i + delta
+            if 0 <= j < len(rows) and orig[j] and text == orig[j]:
+                if hit == "up":
+                    up += 1
+                else:
+                    down += 1
+                first = first or row.get("id", "?")
+    return up, down, first
+
+
 def check_consistency(rows: list[dict], lineno_of) -> list[Finding]:
     """同じ原文が違う訳になっていないかを見る (行をまたぐ検査) (#86).
 
@@ -755,6 +785,18 @@ def main() -> int:
     elif len(translated) < len(rows):
         print(f"\n注意: {len(rows) - len(translated)} 行は訳文の欄が原文のままです "
               "(その行では、原文と見比べる検査は働きません)")
+
+    # **訳文が 1 行ずれていないか** (#224)。1 行ずつ見るかぎり全部普通に見えるので、
+    # ここで数えないと実機に入れるまで誰も気づかない
+    up, down, first = rows_shifted_by_one(rows)
+    worst = max(up, down)
+    if worst >= 3 and worst >= len(rows) * 0.2:
+        where = "すぐ上" if up >= down else "すぐ下"
+        print(f"\n注意: **訳文が 1 行ずれている疑い**があります。{worst} 行で、"
+              f"訳文が**{where}の行の原文**と同じです (最初の例: {first})。"
+              "表計算で行を挿入・削除したまま訳し始めると、この形になります。"
+              "**1 行ずつ見ても分かりません** —— id の欄を頼りに、"
+              "取り出した TSV と並べて確かめてください")
 
     if args.report:
         with open(args.report, "w", encoding="utf-8", newline="\n") as fh:

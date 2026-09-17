@@ -923,7 +923,10 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
             # **注釈と説明文は落とす。** そこに例を書いても「出している」ことにはならない
             src = re.sub(r"^\s*#.*$", "", src, flags=re.M)
             src = re.sub(r'"""(?:.|\n)*?"""', "", src)
-            for m in re.finditer(r'(?:print|say)\(\s*(?=f?"注意: )', src):
+            # **行頭の改行を書いた注意も拾う** (#224)。`f"\\n注意: …"` の形が
+            # 5 本あって、この見張りは**一度も見ていなかった**。#207 で足した
+            # ばかりの検査に、足した本人が気づかない穴が空いていた
+            for m in re.finditer(r'(?:print|say)\(\s*(?=f?"(?:\\n)*注意: )', src):
                 pos, parts = m.end(), []
                 while True:
                     got = one.match(src, pos)
@@ -931,7 +934,8 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                         break
                     parts.append(got.group(1))
                     pos = got.end()
-                notices.append((name, "".join(parts).replace("注意: ", "")))
+                text = "".join(parts)
+                notices.append((name, text.split("注意: ", 1)[-1]))
 
         self.assertGreaterEqual(len(notices), 5,
                                 f"注意を {len(notices)} 件しか拾えない (0 件なら必ず一致する)")
@@ -2706,6 +2710,72 @@ class TestTheDocMatchesTheButtons(unittest.TestCase):
         self.assertGreaterEqual(len(self.BUTTONS), 8)
         for label in self.BUTTONS:
             self.assertGreaterEqual(len(label), 4, f"{label!r} は短すぎて偶然一致する")
+
+
+class TestTheRowsCanSlipByOne(unittest.TestCase):
+    """訳文が**1 行ずれている**のを見つけること (#224).
+
+    取り出した TSV は `translation` が `original` の写しなので、表計算で行を
+    1 つ挿入・削除したまま訳し始めると、以降の訳文が全部**隣の行のもの**になります。
+
+    **1 行ずつ見るかぎり、どの行も普通に見えます。** 原文と訳文が違うのは
+    訳したのだから当たり前で、`placeholder` も `number` も鳴りません。
+    気づくのは実機に入れてから —— しかも直すには全行を突き合わせ直すことになる、
+    いちばん高くつく事故です。
+    """
+
+    def run_on(self, rows: list, header=("id", "original", "translation")) -> str:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.tsv")
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\t".join(header) + "\n")
+                for r in rows:
+                    fh.write("\t".join(r) + "\n")
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "proofread.py"), path,
+                 "--no-font-check"], capture_output=True, text=True, cwd=REPO)
+            return res.stdout + res.stderr
+
+    @staticmethod
+    def lines(n: int) -> list:
+        return [f"せりふ{i}ばんめです。" for i in range(n)]
+
+    def test_a_one_row_slip_is_reported(self):
+        text = self.lines(12)
+        rows = [[f"r{i}", text[i], text[i - 1] if i else text[0]] for i in range(len(text))]
+        out = self.run_on(rows)
+        self.assertIn("1 行ずれている疑い", out, out[-700:])
+        self.assertIn("すぐ上の行の原文", out, out[-700:])
+        self.assertIn("r1", out, f"最初の例を言っていない:\n{out[-700:]}")
+
+    def test_a_slip_the_other_way_is_named_as_such(self):
+        text = self.lines(12)
+        rows = [[f"r{i}", text[i], text[i + 1] if i + 1 < len(text) else text[i]]
+                for i in range(len(text))]
+        out = self.run_on(rows)
+        self.assertIn("1 行ずれている疑い", out, out[-700:])
+        self.assertIn("すぐ下の行の原文", out, f"ずれの向きが違う:\n{out[-700:]}")
+
+    def test_a_healthy_file_is_not_accused(self):
+        """**普通に訳した TSV で鳴らないこと。** ここが鳴ると誰も読まなくなる."""
+        text = self.lines(12)
+        rows = [[f"r{i}", text[i], f"やくぶん{i}"] for i in range(len(text))]
+        self.assertNotIn("1 行ずれている", self.run_on(rows), "普通の訳文で鳴っている")
+        copy = [[f"r{i}", text[i], text[i]] for i in range(len(text))]
+        self.assertNotIn("1 行ずれている", self.run_on(copy), "写しのままで鳴っている")
+
+    def test_a_few_repeated_lines_do_not_trigger_it(self):
+        """「はい」「いいえ」の繰り返しで**偶然当たる**のを、事故と呼ばないこと.
+
+        短い定型文は同じ原文があちこちに出てくるので、隣と同じになることがある。
+        少数なら黙る (数と割合の両方で見る)。
+        """
+        rows = [["r0", "はい", "はい"], ["r1", "いいえ", "はい"], ["r2", "はい", "いいえ"]]
+        rows += [[f"r{i}", f"ふつうのせりふ{i}", f"やくぶん{i}"] for i in range(3, 30)]
+        self.assertNotIn("1 行ずれている", self.run_on(rows),
+                         "繰り返しの定型文を 1 行ずれと呼んでいる")
 
 
 class TestTheTranslationHasToFitTheHole(unittest.TestCase):
@@ -8403,7 +8473,20 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             fh.write("id\tsize\toriginal\ttranslation\n")
             fh.write("a\t12\tはじめから\tゲームをさいしょからはじめる\n")
             fh.write("b\t7\tはじめから\tはじめから\n")
+        # 行をまたぐ知らせの道 (#224): 1 行ずれと、行数オーバーが大半を占める形
+        with open(at("slip.tsv"), "w", encoding="utf-8") as fh:
+            fh.write("id\toriginal\ttranslation\n")
+            lines = [f"せりふ{i}ばんめです。" for i in range(12)]
+            for i, one in enumerate(lines):
+                fh.write(f"r{i}\t{one}\t{lines[i - 1] if i else one}\n")
+        with open(at("tall.tsv"), "w", encoding="utf-8") as fh:
+            fh.write("id\toriginal\ttranslation\n")
+            tall = "あ<BR>い<BR>う<BR>え<BR>お"
+            for i in range(8):
+                fh.write(f"r{i}\t{tall}\tやくぶん{i}<BR>にぎょうめ<BR>さんぎょうめ<BR>よんぎょうめ\n")
         out += [
+            run(tool("proofread.py"), at("slip.tsv"), "--no-font-check"),
+            run(tool("proofread.py"), at("tall.tsv"), "--no-font-check"),
             run(tool("proofread.py"), at("room.tsv"), "--no-font-check"),
             run(tool("proofread.py"), at("ansi.tsv"), "--no-font-check"),
             run(tool("proofread.py"), at("hurt.tsv"), "--no-font-check"),
