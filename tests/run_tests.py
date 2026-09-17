@@ -7463,6 +7463,79 @@ class TestAgainstThePublicSource(unittest.TestCase):
         idx += b"".join(n.encode() + b"\0" for _, n, _ in tree)
         return idx, blob
 
+    def test_the_known_name_area_start_matches_our_record_reading(self):
+        """実物の**名前の置き場 0x8140** が、こちらの読み方と噛み合うこと (#222).
+
+        英語化パッチの公開ソースは `FILENAMES_START = 0x8140` と決め打ちしています。
+        こちらは「見出し 16 バイト + 16 バイト刻みのレコード」と読んでいるので、
+        (0x8140 - 16) / 16 = **2067 件**。社長の吸い出しで出た **1951 ファイル**
+        (#1・#3) との差 116 がフォルダの数にあたります。
+
+        **割り切れること自体が裏付け**です。見出しの大きさや刻みが 1 でも違えば、
+        0x8140 は半端な件数になります。
+        """
+        import re
+
+        unpack_py = os.path.join(PUBLIC_SRC, "UNPACK.py")
+        if not os.path.isfile(unpack_py):
+            self.skipTest("公開ソースに UNPACK.py が無い")
+        with open(unpack_py, encoding="utf-8", errors="replace") as fh:
+            m = re.search(r"FILENAMES_START\s*=\s*(0x[0-9A-Fa-f]+|\d+)", fh.read())
+        self.assertTrue(m, "FILENAMES_START を読み取れない (向こうの作りが変わった)")
+        theirs = int(m.group(1), 0)
+        self.assertEqual(theirs, boku2.KNOWN_NAMES_AT,
+                         f"公開ソースの値が 0x{theirs:X} に変わっています "
+                         f"(boku2.py は 0x{boku2.KNOWN_NAMES_AT:X})")
+        self.assertEqual((theirs - 16) % 16, 0,
+                         "こちらの読み方 (見出し 16 + 16 バイト刻み) だと半端な件数になる")
+        self.assertEqual((theirs - 16) // 16, 2067, "レコード件数の見立てが変わった")
+
+    def test_a_real_sized_index_is_told_whether_the_names_start_where_they_should(self):
+        """実物なみの索引で、**名前の置き場が合っているか**を言うこと (#222).
+
+        実物で名前が付かなかった (#1・#3) とき、社長には比べる相手がありませんでした。
+        0x8140 という**外から来た数**があれば、その場で「レコードの読み方がずれている」
+        と分かります。練習データのような小さい索引では**言わない** ——
+        実物の値を持ち出しても雑音にしかならないので。
+        """
+        import io as _io
+
+        def build(names_at: int) -> tuple[bytes, bytes]:
+            n = (names_at - 16) // 16
+            idx = bytearray(b"DFI\0" + struct.pack("<I", 0x100) + b"\0" * 8)
+            blob = bytearray()
+            for i in range(n):
+                idx += struct.pack("<HHIII", 0, 1 if i < n - 1 else 0, 0,
+                                   len(blob) // 2048, 64)
+                blob += b"\0" * 2048
+            idx += b"".join(("f%04d.bin" % i).encode() + b"\0" for i in range(n))
+            return bytes(idx), bytes(blob)
+
+        def run(idx: bytes, blob: bytes) -> str:
+            with tempfile.TemporaryDirectory() as tmp:
+                with open(os.path.join(tmp, "BOKU2.IDX"), "wb") as fh:
+                    fh.write(idx)
+                with open(os.path.join(tmp, "BOKU2.IMG"), "wb") as fh:
+                    fh.write(blob)
+                buf = _io.StringIO()
+                boku2.check(tmp, out=buf)
+                return buf.getvalue()
+
+        ok = run(*build(boku2.KNOWN_NAMES_AT))
+        self.assertIn("公開ソースが決め打ちしている値と同じです", ok, ok[:800])
+
+        off = run(*build(boku2.KNOWN_NAMES_AT - 16))
+        self.assertIn("レコードの読み方がずれている疑い", off, off[:800])
+        self.assertIn("-1.0 件ぶん", off, f"ずれの大きさを言っていない:\n{off[:800]}")
+
+        # **練習データでは言わない** (小さい索引に実物の値を持ち出さない)
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if not problem:
+            buf = _io.StringIO()
+            boku2.check(os.path.join(REPO, "work", "BOKU2SAMPLE"), out=buf)
+            self.assertNotIn("0x8140", buf.getvalue(),
+                             "小さい索引にも実物の値を持ち出している")
+
     def test_the_two_folder_rules_disagree_on_the_real_shape(self):
         """**実物のフォルダの形では、2 通りの規則が食い違う** (#221).
 

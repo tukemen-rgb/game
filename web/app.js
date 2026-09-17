@@ -3681,6 +3681,8 @@ const FONT_OWN_CAP = 4 * 1024 * 1024;
  * **一括処理 (boku2.py) と同じ数字**にしておくこと。
  * 400 のままだと、401 件目から先にある本文もフォントも永久に見つからない
  * (実物は 1951 件)。全件の先頭を読んでも 32 MB / 0.03 秒だった。 */
+const KNOWN_NAMES_AT = 0x8140;  /* 実物の名前の置き場 (公開ソースの FILENAMES_START) */
+const REAL_INDEX_RECORDS_MIN = 1000;  /* これ以上なら「実物なみ」とみなす */
 const DEEP_HUNT_FILES = 20;     /* 奥まで読むファイルの数 (boku2.py と同じ) */
 /** 文字表の続きが入っていそうな名前か (深く読む価値があるか)。boku2.py と同じ */
 function worthADeepLook(name) {
@@ -3828,6 +3830,20 @@ async function buildIdxReport() {
   const recEnd = 16 + c.count * 16;
   lines.push(`レコード ${c.count} 件 (名前の置き場は ${hx(recEnd)} から) / ファイル ${items.length} 件 / 名前が付いた ${c.named_ok ?? "?"} 件`
     + (c.dupes ? ` / 同じ名前 ${c.dupes} 件` : ""));
+  /* **実物の索引には外から確かめられる数がある** (#222)。文言は tools/boku2.py と 1 字そろえる */
+  if (c.count >= REAL_INDEX_RECORDS_MIN) {
+    if (recEnd === KNOWN_NAMES_AT) {
+      lines.push(`   名前の置き場が ${hx(KNOWN_NAMES_AT)} —— 英語化パッチの公開ソースが`
+        + "決め打ちしている値と同じです (レコードの読み方が当たっている裏付け)");
+    } else {
+      problems++;
+      const diff = recEnd - KNOWN_NAMES_AT;
+      lines.push(`→ 名前の置き場が ${hx(recEnd)} です。英語化パッチの公開ソースは実物を `
+        + `${hx(KNOWN_NAMES_AT)} と決め打ちしているので、**レコードの読み方がずれている疑い**`
+        + `があります (差 ${diff > 0 ? "+" : ""}${diff.toLocaleString()} バイト = `
+        + `${diff > 0 ? "+" : ""}${(diff / 16).toFixed(1)} 件ぶん)。この行ごと報告してください`);
+    }
+  }
   /* **取り出せない項目があれば、その数と理由を言う** (#178)。使用率の行だけだと、
      索引の読み違いと「吸い出しが途中で切れている」が同じ見え方になる。
      一括処理 (boku2.py の dfi_dropped / dropped_note) と同じ言葉・同じ数え方 */
