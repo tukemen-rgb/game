@@ -2712,6 +2712,76 @@ class TestTheDocMatchesTheButtons(unittest.TestCase):
             self.assertGreaterEqual(len(label), 4, f"{label!r} は短すぎて偶然一致する")
 
 
+class TestTheIdColumnTellsOnItself(unittest.TestCase):
+    """`id` の欄の事故を、**最初にかける道具**が言うこと (#225).
+
+    取り出したままの TSV では `id` は全部違います (ファイル名 + 番号で作るため)。
+    同じ id が 2 つあるのは、表計算で行を複製したときだけ。そのまま入れ直すと
+    **どちらか片方が黙って消えます**。`compare_tsv.py` は前から断っていましたが
+    (id で突き合わせるので気づける)、**`proofread.py` は黙っていました** ——
+    社長が最初にかけるのはそちらなので、気づくのが一段遅れます。
+    """
+
+    def run_on(self, body: str) -> str:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.tsv")
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("id\toriginal\ttranslation\n" + body)
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "proofread.py"), path,
+                 "--no-font-check"], capture_output=True, text=True, cwd=REPO)
+            return res.stdout + res.stderr
+
+    def test_a_duplicated_id_is_named(self):
+        out = self.run_on("r0\tあ\tア\nr1\tい\tイ\nr1\tう\tウ\n")
+        self.assertIn("同じ id の行", out, out[-500:])
+        self.assertIn("r1", out, f"どの id が重なったかを言っていない:\n{out[-500:]}")
+        self.assertIn("片方が黙って消えます", out, f"何が起きるかを言っていない:\n{out[-500:]}")
+
+    def test_a_blank_id_is_named(self):
+        out = self.run_on("r0\tあ\tア\n\tい\tイ\n")
+        self.assertIn("id の欄が空の行", out, out[-500:])
+
+    def test_a_clean_file_is_not_accused(self):
+        """**普通の TSV で鳴らないこと。** ここが鳴ると誰も読まなくなる."""
+        out = self.run_on("r0\tあ\tア\nr1\tい\tイ\nr2\tう\tウ\n")
+        self.assertNotIn("同じ id の行", out, "普通の TSV で鳴っている")
+        self.assertNotIn("id の欄が空", out, "普通の TSV で鳴っている")
+
+    def test_the_other_tool_still_refuses_outright(self):
+        """`compare_tsv.py` は今までどおり**断る** (突き合わせが成り立たないので).
+
+        同じ家族の事故でも、道具によって扱いが違ってよい。**理由が違う**からで、
+        あちらは id で突き合わせる道具なので、重なっていたら仕事にならない。
+        こちらは 1 行ずつ見る道具なので、言って先へ進める。
+        """
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            a = os.path.join(tmp, "a.tsv")
+            with open(a, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("id\toriginal\ttranslation\nr0\tあ\tア\nr0\tい\tイ\n")
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "compare_tsv.py"), a, a],
+                capture_output=True, text=True, cwd=REPO)
+            out = res.stdout + res.stderr
+        self.assertNotEqual(res.returncode, 0, f"重なった id を受け取ってしまう:\n{out}")
+        self.assertIn("2 回出てきます", out, out[-300:])
+
+    def test_a_gap_in_the_numbers_is_not_called_an_error(self):
+        """**番号が飛んでいても事故ではない** (#225 で測って分かったこと).
+
+        `.msg` には中身の無い項目 (null) があり、`text` はそこを飛ばして書き出します。
+        つまり `holes:0 / holes:2 / holes:4` は**正しい取り出し**。
+        飛びを「行が消えた」と言うと、健全なファイルで鳴ります。
+        """
+        out = self.run_on("h:0\tあ\tア\nh:2\tい\tイ\nh:4\tう\tウ\n")
+        for word in ("欠番", "飛んで", "抜けて"):
+            self.assertNotIn(word, out, f"番号の飛びを事故と呼んでいる ({word})")
+
+
 class TestTheRowsCanSlipByOne(unittest.TestCase):
     """訳文が**1 行ずれている**のを見つけること (#224).
 
@@ -8473,6 +8543,11 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             fh.write("id\tsize\toriginal\ttranslation\n")
             fh.write("a\t12\tはじめから\tゲームをさいしょからはじめる\n")
             fh.write("b\t7\tはじめから\tはじめから\n")
+        # id の事故の道 (#225): 重なった id と、空欄の id
+        with open(at("ids.tsv"), "w", encoding="utf-8") as fh:
+            fh.write("id\toriginal\ttranslation\n")
+            fh.write("r0\tあさ\tあさ\nr1\tひる\tひる\nr1\tよる\tよる\n\tゆうがた\tゆうがた\n")
+        out.append(run(tool("proofread.py"), at("ids.tsv"), "--no-font-check"))
         # 行をまたぐ知らせの道 (#224): 1 行ずれと、行数オーバーが大半を占める形
         with open(at("slip.tsv"), "w", encoding="utf-8") as fh:
             fh.write("id\toriginal\ttranslation\n")

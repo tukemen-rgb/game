@@ -266,6 +266,28 @@ def numbers_in(text: str) -> list[str]:
     return re.findall(r"\d+", visible)
 
 
+def id_trouble(rows: list[dict]) -> tuple[list[str], int]:
+    """`id` の欄の事故を数える (#225).
+
+    取り出したままの TSV では `id` は**必ず全部違います** (ファイル名と番号で
+    作るので)。同じ id が 2 つあるのは、表計算で行を複製したときだけ。
+    そのまま進むと、入れ直す段で**どちらか片方が黙って消えます**。
+    `compare_tsv.py` は前から断っていましたが (id で突き合わせるので)、
+    **最初にかける `proofread.py` が黙っていた**ので、気づくのが遅れます。
+
+    空欄の id も同じ家族 (欄を消した / 行を足した)。戻り値は (重なった id, 空欄の数)。
+    """
+    seen: dict[str, int] = {}
+    blank = 0
+    for row in rows:
+        rid = (row.get("id") or "").strip()
+        if not rid:
+            blank += 1
+            continue
+        seen[rid] = seen.get(rid, 0) + 1
+    return sorted(k for k, n in seen.items() if n > 1), blank
+
+
 def rows_shifted_by_one(rows: list[dict]) -> tuple[int, int, str]:
     """訳文が**1 行ずれている**疑いを数える (#224).
 
@@ -785,6 +807,19 @@ def main() -> int:
     elif len(translated) < len(rows):
         print(f"\n注意: {len(rows) - len(translated)} 行は訳文の欄が原文のままです "
               "(その行では、原文と見比べる検査は働きません)")
+
+    # **id の欄の事故** (#225)。取り出したままなら id は全部違う。
+    # 重なっていれば入れ直す段で片方が消えるので、最初にかけるここで言う
+    dup_ids, blank_ids = id_trouble(rows)
+    if dup_ids:
+        shown = ", ".join(dup_ids[:3]) + (" …" if len(dup_ids) > 3 else "")
+        print(f"\n注意: 同じ id の行が {len(dup_ids)} 種あります ({shown})。"
+              "取り出したままの TSV では id は全部違うので、**表計算で行を複製した**"
+              "疑いがあります。このまま入れ直すと、どちらか片方が黙って消えます")
+    if blank_ids:
+        print(f"\n注意: id の欄が空の行が {blank_ids} 行あります。"
+              "**どのセリフか分からない行**なので、入れ直す先が決まりません。"
+              "取り出した TSV と並べて id を戻してください")
 
     # **訳文が 1 行ずれていないか** (#224)。1 行ずつ見るかぎり全部普通に見えるので、
     # ここで数えないと実機に入れるまで誰も気づかない
