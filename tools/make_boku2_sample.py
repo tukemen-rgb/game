@@ -225,28 +225,41 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
     photo = [make_tim2.build_tim2(8, 8, 5, [(i + k) % 4 for i in range(64)],
                                   [(0, 0, 0, 255), (255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)] + [(0, 0, 0, 0)] * 252,
                                   clut_type=3) for k in range(8)]
+    # **道筋は実物に合わせる** (#220)。公開ソースの UNPACK.py / MSG.py に、
+    # 実物の中の道が書いてある: `diary.bin` は根、`system\\saveload.bin`、
+    # `data\\map\\evt\\on_mem_event.bin`、`fish\\img\\fish_on_mem.bin`、
+    # `system\\submenu\\item\\item_info.msg`。ここを平らにしていたので、
+    # **いちばん確かめたいフォルダの入れ子を、実物より浅い形でしか試していなかった**。
+    #
+    # 閉じ方は、こちらの stack 規則と公開ソースの flag 規則の両方で同じ道筋に
+    # なる形にしてある (#56): 1 つのファイルで閉じるのは最大 2 段
+    # (続く 0 のフォルダ + その親)、残りは段ごとに閉じる
     tree = [
         (True, 1, "/", None),
         (False, 1, "diary.bin", diary),
-        (False, 1, "fish_on_mem.bin", fish_on_mem),
-        (False, 1, "saveload.bin", saveload),
-        (False, 1, "on_mem_event.bin", on_mem_event),
         (True, 1, "00diary", None),
     ] + [(False, 0 if i == 7 else 1, f"nik{i:03d}.tm2", photo[i]) for i in range(8)] + [
+        (True, 1, "data", None),
+        (True, 1, "map", None),
+        (True, 0, "evt", None),                     # map の最後の項目
+        (False, 0, "on_mem_event.bin", on_mem_event),   # evt と map を閉じて data に戻る
+        (False, 0, "data_end.bin", b"\0" * 32),     # data を閉じて根に戻る
+        (True, 1, "fish", None),
+        (True, 0, "img", None),                     # fish の最後の項目
+        (False, 0, "fish_on_mem.bin", fish_on_mem),     # img と fish を閉じて根に戻る
         (True, 1, "system", None),
         (False, 1, "bk_font.tms", tms),
+        (False, 1, "saveload.bin", saveload),
         (False, 1, "system.msg", menu),
-        (False, 1, "item_info.msg", item_info),
         (True, 1, "namemsg", None),
         (False, 0, "namemsg.msg", names),
-        # 4 段目 system/submenu/msg/config/config.msg。閉じ方は、こちらの stack 規則と
-        # 公開ソースの flag 規則の両方で同じ道筋になる形にしてある (#56): 1 つのファイルで
-        # 閉じるのは最大 2 段 (続く 0 のフォルダ + その親)、残りは段ごとに閉じる
+        # 4 段目 system/submenu/msg/config/config.msg
         (True, 1, "submenu", None),
         (True, 1, "msg", None),
         (True, 0, "config", None),                  # msg の最後の項目
         (False, 0, "config.msg", config),           # config と msg を閉じて submenu に戻る
-        (False, 0, "sub_readme.bin", b"\0" * 32),   # submenu を閉じて system に戻る
+        (True, 0, "item", None),                    # submenu の最後の項目
+        (False, 0, "item_info.msg", item_info),     # item と submenu を閉じて system に戻る
         (False, 0, "sys_end.bin", b"\0" * 32),      # system を閉じて根に戻る
         (False, 0, "readme.bin", b"\0" * 64),
     ]

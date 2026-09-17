@@ -5779,8 +5779,8 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertNotIn("見つからない", res.stdout)
             # フォルダ付きの名前が出ること。docs/10 が 20 分の所で見ろと言っている
             # のはこれで、以前は生の名前を並べていてフォルダが付かなかった (#104)
-            self.assertIn("最初の名前: diary.bin / fish_on_mem.bin / saveload.bin"
-                          " / on_mem_event.bin / 00diary/nik000.tm2",
+            self.assertIn("最初の名前: diary.bin / 00diary/nik000.tm2"
+                          " / 00diary/nik001.tm2",
                           res.stdout)
             self.assertIn("1 番が会話だった 2 件", res.stdout)
             self.assertNotIn("はじめから", res.stdout)          # 本文は出さない
@@ -7376,7 +7376,7 @@ class TestAgainstThePublicSource(unittest.TestCase):
 
     def test_the_alt_break_menu_reads_the_same(self):
         """0x8002 を引数の無いページ送りとして読むファイル (ALT_BREAK_FILES)."""
-        n = self.compare(os.path.join(self.unpacked, "system", "item_info.msg"), 0, 8, alt=True)
+        n = self.compare(os.path.join(self.unpacked, "system", "submenu", "item", "item_info.msg"), 0, 8, alt=True)
         self.assertGreaterEqual(n, 2, f"比べた項目が {n} 件しかない")
 
     def test_the_copied_file_name_lists_still_match_the_public_source(self):
@@ -7431,6 +7431,59 @@ class TestAgainstThePublicSource(unittest.TestCase):
         self.assertEqual(re.findall(r'"([^"]+)"', m.group(1)),
                          list(boku2.TEXT_CONTAINERS),
                          "画面と CLI で入れ物の一覧の並びが違います (#104)")
+
+    def test_the_practice_tree_uses_the_real_paths(self):
+        """練習データの道筋が、**実物の道筋**と同じであること (#220).
+
+        公開ソースの `UNPACK.py` と `MSG.py` には、実物の中の道がそのまま
+        書いてあります (`system\\saveload.bin`、`data\\map\\evt\\on_mem_event.bin`、
+        `fish\\img\\fish_on_mem.bin`、`system\\submenu\\item\\item_info.msg`)。
+
+        こちらの練習データはそこを**平らに**置いていました。いちばん確かめたいのは
+        フォルダの入れ子の復元 (stack / flag) なのに、**実物より浅い形でしか
+        試していなかった**ことになります。道筋を実物に合わせたので、
+        ここで「向こうの一覧に同じ道がある」ことを見張ります。
+        """
+        import re
+
+        want = {}
+        for name in ("UNPACK.py", "MSG.py"):
+            path = os.path.join(PUBLIC_SRC, name)
+            if not os.path.isfile(path):
+                self.skipTest(f"公開ソースに {name} が無い")
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for raw in re.findall(r'"([A-Za-z0-9_\\~]+\.\w+)"', fh.read()):
+                    if "~" in raw:               # 向こうが展開した先のフォルダ
+                        continue
+                    # 同じ名前が**道つき**と**名前だけ**の両方で出てくる
+                    # (`MENU_FONT_FILES` は名前だけ)。道の深いほうを採る
+                    path = re.sub(r"/+", "/", raw.replace("\\", "/")).lower()
+                    key = os.path.basename(path)
+                    if path.count("/") >= want.get(key, "").count("/"):
+                        want[key] = path
+
+        base = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        with open(os.path.join(base, "BOKU2.IDX"), "rb") as fh:
+            idx = fh.read()
+        ours = [e["path"].lower()
+                for e in boku2.read_dfi(idx, os.path.getsize(os.path.join(base, "BOKU2.IMG")))]
+
+        checked, bad = 0, []
+        for path in ours:
+            real = want.get(os.path.basename(path))
+            if real is None:                     # 向こうの一覧に無い名前は見ない
+                continue
+            checked += 1
+            # 向こうの一覧には作業フォルダの頭 (`img_rip_edits/…`) が付くものがある。
+            # **こちらの道が向こうの道の末尾になっている**ことを見る
+            if not ("/" + real).endswith("/" + path):
+                bad.append(f"{path} (実物は {real})")
+        self.assertGreaterEqual(checked, 5,
+                                f"突き合わせた道が {checked} 本しかない (拾い方が壊れた)")
+        self.assertEqual(bad, [], "練習データの道筋が実物と違います:\n  " + "\n  ".join(bad))
 
     def test_the_map_conversation_tables_read_the_same(self):
         """マップの会話は「表の一覧 + 4 バイト刻み」。こちらの 12 バイト項目の読みを外から確かめる."""
@@ -7500,8 +7553,10 @@ class TestAgainstThePublicSource(unittest.TestCase):
         unpack_map = self.their_unpack_map()
         targets = [os.path.join(self.sample, "MAP", n)
                    for n in sorted(os.listdir(os.path.join(self.sample, "MAP")))]
-        targets += [os.path.join(self.unpacked, n) for n in
-                    ("diary.bin", "saveload.bin", "on_mem_event.bin", "fish_on_mem.bin")]
+        # **道筋は実物に合わせてある** (#220)。公開ソースの UNPACK.py に出てくる道
+        targets += [os.path.join(self.unpacked, *n.split("/")) for n in
+                    ("diary.bin", "system/saveload.bin",
+                     "data/map/evt/on_mem_event.bin", "fish/img/fish_on_mem.bin")]
         compared = 0
         for path in targets:
             if not os.path.isfile(path):
@@ -9759,7 +9814,7 @@ class TestTheStrideIsChosenByContent(unittest.TestCase):
                                 os.path.join(sample, "BOKU2.IMG"), tmp],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            path = os.path.join(tmp, "system", "item_info.msg")
+            path = os.path.join(tmp, "system", "submenu", "item", "item_info.msg")
             self.assertTrue(os.path.exists(path), "item_info.msg が出てこない")
             with open(path, "rb") as fh:
                 b = fh.read()
@@ -10486,6 +10541,8 @@ class TestTextSaysWhatItDidNotTake(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = self.unpacked(tmp)
             listed = sorted(glob.glob(os.path.join(out, "system", "*.msg")))
+            # 深い所の 1 つも混ぜる (#220 で道筋を実物に合わせたので、`system/*.msg` は 1 個だけ)
+            listed += sorted(glob.glob(os.path.join(out, "system", "submenu", "item", "*.msg")))
             listed += sorted(glob.glob(os.path.join(out, "maps", "*", "1.bin")))
             self.assertGreater(len(listed), 3, "並べる材料が足りない (題材が変わった)")
             res = self.run_text(listed, tmp)
@@ -10927,9 +10984,11 @@ class TestTheKindGuessIsCountedOnKnownFiles(unittest.TestCase):
     """
 
     #: `make_boku2_sample.py` が `build_map` で組み立てたもの (= 入れ物)
-    CONTAINERS = {"diary.bin", "fish_on_mem.bin", "saveload.bin", "on_mem_event.bin"}
+    #: 道筋は実物に合わせてある (#220。公開ソースの UNPACK.py に出てくる道)
+    CONTAINERS = {"diary.bin", "fish/img/fish_on_mem.bin",
+                  "system/saveload.bin", "data/map/evt/on_mem_event.bin"}
     #: 中身がまるごとゼロのもの (名前は .bin だが「ゼロ埋め」が正しい)
-    ALL_ZERO = {"readme.bin", "system/sys_end.bin", "system/submenu/sub_readme.bin"}
+    ALL_ZERO = {"readme.bin", "system/sys_end.bin", "data/data_end.bin"}
 
     @classmethod
     def setUpClass(cls):
