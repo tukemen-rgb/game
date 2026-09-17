@@ -753,6 +753,65 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_every_notice_is_in_the_troubleshooting_table(self):
+        """**道具が出す「注意:」が、docs/10 で引けること** (#207).
+
+        `→` の行は #184 で表に揃えました。ところが `注意:` で始まる行は
+        別枠で、**どこにも一覧がありません**。docs/10 の「困ったとき」は
+        `→` が付かない出方を引くための表なのに、数えたら **6 つのうち 6 つとも
+        載っていませんでした** —— しかも 4 つは #188・#200・#202 で
+        **自分が足したもの**。矢印のほうだけ表に足して、注意のほうを忘れていた。
+
+        「困ったとき」の表は、素人が**画面に出た言葉をそのまま探す**所です。
+        載っていなければ、その注意は読み捨てられます。
+        """
+        import glob
+        import re
+
+        def norm(s):
+            return re.sub(r"\s+", " ", s.replace("`", "").replace("*", "")).strip()
+
+        def key_of(text):
+            """その注意を文書から探すときの鍵 (最初のまとまった固定部分)."""
+            for frag in re.split(r"\{[^}]*\}", text):
+                frag = norm(frag).strip(" 　(（)）、。:：")
+                if len(frag) >= 8:
+                    return frag[:12]
+            return ""
+
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = norm(fh.read())
+        one = re.compile(r'\s*f?"((?:[^"\\]|\\.)*)"')
+        notices = []
+        # 実物で使う 3 本だけを見る (練習用の道具や、共通の入出力の失敗は別)
+        for name in ("boku2.py", "proofread.py", "compare_tsv.py"):
+            with open(os.path.join(REPO, "tools", name), encoding="utf-8") as fh:
+                src = fh.read()
+            # **注釈と説明文は落とす。** そこに例を書いても「出している」ことにはならない
+            src = re.sub(r"^\s*#.*$", "", src, flags=re.M)
+            src = re.sub(r'"""(?:.|\n)*?"""', "", src)
+            for m in re.finditer(r'(?:print|say)\(\s*(?=f?"注意: )', src):
+                pos, parts = m.end(), []
+                while True:
+                    got = one.match(src, pos)
+                    if not got:
+                        break
+                    parts.append(got.group(1))
+                    pos = got.end()
+                notices.append((name, "".join(parts).replace("注意: ", "")))
+
+        self.assertGreaterEqual(len(notices), 5,
+                                f"注意を {len(notices)} 件しか拾えない (0 件なら必ず一致する)")
+        missing = []
+        for name, text in notices:
+            key = key_of(text)
+            self.assertTrue(key, f"{name}: 注意から鍵を作れない: {text[:40]}")
+            if key not in doc:
+                missing.append(f"{name}: {text[:46]} (鍵: {key})")
+        self.assertFalse(missing,
+                         "docs/10 で引けない「注意:」があります (困ったときの表に足す):\n  "
+                         + "\n  ".join(missing))
+
     def test_the_first_hour_table_really_walks(self):
         """**docs/10 の「最初の 1 時間」を、書いてあるとおりに歩けること** (#206).
 
@@ -7303,7 +7362,10 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
     """
 
     #: 「N 個中 M 個」のような引用は数を当てはめて探す
-    PLACEHOLDER = ((r"N", r"\d[\d,]*"), (r"…", r".{0,60}"))
+    #: **`N` は 1 文字で立っているときだけ**置き換える (#207)。どこでも置き換えると
+    #: `ANSI` のような語の中の N まで数に変わり、**永久に当たらない引用**になる
+    #: (実際に「この TSV は ANSI (cp932) で保存されています」がそれで落ちた)
+    PLACEHOLDER = ((r"(?<![A-Za-z])N(?![A-Za-z])", r"\d[\d,]*"), (r"…", r".{0,60}"))
 
     @classmethod
     def setUpClass(cls):
@@ -7396,6 +7458,47 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             run(tool("insert_text.py"), at("a.tsv"), "-o", at("z.bin"),
                 "--original", os.path.join(REPO, "work", "SCRIPT.BIN")),
         ]
+        # **「注意:」の道も走らせる** (#207)。この 4 つは異常系の中でも特殊な材料が
+        # 要るので、上の流れでは一度も出ていなかった。出ない文言を docs/10 が
+        # 引用した瞬間に「道具も画面も言わない」で落ちる
+        with open(at("ansi.tsv"), "wb") as fh:                 # ANSI で保存した TSV
+            fh.write("id\toriginal\ttranslation\nr0\tかわで?をとる\tかわで?をとる\n".encode("cp932"))
+        with open(at("hurt.tsv"), "w", encoding="utf-8") as fh:  # 訳文だけ ? に潰れた
+            fh.write("id\toriginal\ttranslation\nr0\tぼくの\u2661なつやすみ\tぼくの?なつやすみ\n")
+        with open(at("nums.tsv"), "w", encoding="utf-8") as fh:  # 文字表なしで取り出した形
+            fh.write("id\toriginal\ttranslation\n")
+            for i in range(10):
+                fh.write(f"r{i}\t[{i}][{i + 1}][{i + 2}]\t[{i}][{i + 1}][{i + 2}]\n")
+        with open(at("few.tsv"), "w", encoding="utf-8") as fh:   # 一部だけ番号が残った形
+            fh.write("id\toriginal\ttranslation\n")
+            for i in range(9):
+                fh.write("r%d\tぼくのなつやすみ\tぼくのなつやすみ\n" % i)
+            fh.write("r9\tぼくの[900]やすみ\tぼくの[900]やすみ\n")
+        # 名前に使えない字がある索引 (unpack が `_` に変える) と、同じ名前が出る索引
+        odd = at("odd")
+        os.makedirs(odd, exist_ok=True)
+        # 4 つ目は 1 つ目と**同じ名前**。`~2` を付けて区別した、の道はここでしか出ない
+        names = ["a:b.msg", "c?d.bin", "e*f.tm2", "a:b.msg"]
+        blob, recs = bytearray(), []
+        for i, _n in enumerate(names):
+            recs.append((len(blob) // 2048, 64))
+            blob += bytes([i + 1]) * 64 + bytes(2048 - 64)
+        head = bytearray(b"DFI\0" + struct.pack("<III", len(names), 0, 0))
+        for sector, ln in recs:
+            head += struct.pack("<HHIII", 0, 0, 0, sector, ln)
+        for n in names:
+            head += n.encode() + b"\0"
+        with open(at("odd.IDX"), "wb") as fh:
+            fh.write(bytes(head))
+        with open(at("odd.IMG"), "wb") as fh:
+            fh.write(bytes(blob))
+        out += [
+            run(tool("proofread.py"), at("ansi.tsv"), "--no-font-check"),
+            run(tool("proofread.py"), at("hurt.tsv"), "--no-font-check"),
+            run(tool("proofread.py"), at("nums.tsv"), "--no-font-check"),
+            run(tool("proofread.py"), at("few.tsv"), "--no-font-check"),
+            run(tool("boku2.py"), "unpack", at("odd.IDX"), at("odd.IMG"), at("oddout")),
+        ]
         if os.path.isfile(enc):                      # 課題 1・3 の道具 (docs/10 が名指しする)
             tbl = os.path.join(REPO, "answers", "custom.tbl")
             with open(at("part.tbl"), "w", encoding="utf-8") as fh:
@@ -7431,7 +7534,7 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
 
         pattern = re.escape(phrase)
         for mark, sub in self.PLACEHOLDER:
-            pattern = pattern.replace(mark, sub)
+            pattern = re.sub(mark, sub.replace("\\", "\\\\"), pattern)
         if re.search(pattern, self.corpus):
             return "CLI"
         return "画面" if re.search(pattern, self.app) else None

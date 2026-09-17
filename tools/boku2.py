@@ -479,7 +479,7 @@ def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
     entries = read_dfi(idx, size)
     dupes = sum(1 for e in entries if "~" in os.path.basename(e["path"]))
     if dupes:
-        print(f"注意: 同じ名前が {dupes} 件あり ~2 を付けて区別しました。"
+        print(f"注意: 同じ名前が {dupes} 件あり `~2` を付けて区別しました。"
               "フォルダの入れ子の規則が実物と違うかもしれません", file=sys.stderr)
     # **名前を変えたら、変えたと言う** (#202)。`:` `?` `*` や空白は Windows の
     # ファイル名に使えないので `_` にしているが、黙って変えると、索引に出ている
