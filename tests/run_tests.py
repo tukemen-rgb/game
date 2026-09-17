@@ -710,6 +710,75 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                       f"実物の大きさだと 2 枚目に届いていない:\n{joined}")
         self.assertIn(f"{26 * boku2.FONT_COLS} マス", joined, "2 枚目のマス数が違う")
 
+    def test_a_continuation_buried_deep_in_another_file_is_still_found(self):
+        """続きが**ファイルの奥**にあっても見つけること (#219).
+
+        ほかのファイルは先頭 64KB しか読んでいませんでした。ところが英語化パッチの
+        公開ソースに残っている書き出しの名前を見ると、実物には
+        `title.tms_0x150100` `title.tms_0x164580` `title.tms_0x18b780`、
+        `saveload.bin_0x22100` `bumper2.tm2_0x20300` があります。
+        **TIM2 を 1.5 MB 先に持つファイルが実在する。** 文字表の続きがその形の
+        ファイルに入っていたら、64KB しか読まないこちらは必ず見落とし、
+        「この吸い出しの中には続きが見つかりませんでした」と言ってしまう。
+
+        #171 で**同じファイル**の 2 枚目については直しました (4MB まで読む)。
+        ほかのファイルだけが 64KB のまま残っていた形です。
+        """
+        import io as _io
+        import struct
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+            import make_tim2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+
+        cell = boku2.FONT_CELL
+        page1, _ = make_tim2.font_sheet(rows=46, cols=boku2.FONT_COLS, cell=cell)
+        page2, _ = make_tim2.font_sheet(rows=26, cols=boku2.FONT_COLS, cell=cell)
+        want_w = boku2.tim2_pages(page1)[0]["width"]
+        deep_at = 0x150100                      # 公開ソースの title.tms と同じ深さ
+        self.assertGreater(deep_at, boku2.FONT_HUNT_HEAD,
+                           "材料が弱い: 64KB の窓より浅い所に置いている")
+
+        blob = bytearray()
+        entries = []
+
+        def put(path, data):
+            entries.append({"path": path, "at": len(blob), "len": len(data)})
+            blob.extend(data)
+
+        put("system/bk_font.tms", b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + page1)
+        put("system/title.tms", b"TMS\0" + b"\0" * (deep_at - 4) + page2)
+
+        lines = boku2.font_page_hunt(_io.BytesIO(bytes(blob)), entries, entries[0],
+                                     46 * boku2.FONT_COLS, {0x80}, wide=want_w)
+        joined = "\n".join(lines)
+        self.assertIn("title.tms", joined, f"奥に置いた続きが見つからない:\n{joined}")
+        self.assertIn(f"0x{deep_at:X}", joined, f"見つけた位置が違う:\n{joined}")
+
+    def test_the_hunt_says_how_deep_it_looked(self):
+        """見つからなかったときは、**どこまで見たか**を言うこと (#219).
+
+        「見つかりませんでした」だけだと、社長は 1951 個を手で開く側に回る。
+        見た深さが書いてあれば、「奥にあるかもしれない」と分かる。
+        """
+        import io as _io
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+
+        entry = {"path": "system/bk_font.tms", "at": 0, "len": 32}
+        lines = boku2.font_page_hunt(_io.BytesIO(b"\0" * 32), [entry], entry, 100, set())
+        joined = "\n".join(lines)
+        self.assertIn("見つかりませんでした", joined, joined)
+        self.assertIn("KB まで", joined, f"どこまで見たかを言っていない:\n{joined}")
+        self.assertIn("MB まで", joined, f"深く見た分を言っていない:\n{joined}")
+
     def test_the_same_width_candidate_is_named_first(self):
         """続きの候補は、**1 枚目と同じ幅**のものを先に挙げること (#211).
 

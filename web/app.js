@@ -3681,6 +3681,12 @@ const FONT_OWN_CAP = 4 * 1024 * 1024;
  * **一括処理 (boku2.py) と同じ数字**にしておくこと。
  * 400 のままだと、401 件目から先にある本文もフォントも永久に見つからない
  * (実物は 1951 件)。全件の先頭を読んでも 32 MB / 0.03 秒だった。 */
+const DEEP_HUNT_FILES = 20;     /* 奥まで読むファイルの数 (boku2.py と同じ) */
+/** 文字表の続きが入っていそうな名前か (深く読む価値があるか)。boku2.py と同じ */
+function worthADeepLook(name) {
+  const low = (name || "").split("/").pop().toLowerCase();
+  return low.includes("font") || low.endsWith(".tms");
+}
 const BODY_SAMPLE_FILES = 30;   /* 本体が空かを覗く数 (boku2.py と同じ) */
 const SHAPE_HUNT_FILES = 4000;
 
@@ -3757,10 +3763,15 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0) 
      文字表はどの頁も同じ升目なので、続きなら幅は 1 枚目と同じはず。
      5 件見つけたら打ち切る作りだと、幅の違うものが先に並んだだけで本命が載らない */
   const same = [], otherW = [];
+  let deep = 0;
   for (const other of items.slice(0, SHAPE_HUNT_FILES)) {
     if (other === fontItem || other.len < 1024) continue;
+    /* **名前で深さを変える** (#219)。実物の title.tms は TIM2 を 0x18b780 に持つので、
+       64KB しか読まないと届かない。font らしい名前と .tms だけ深く読む */
+    let cap = FONT_HUNT_HEAD;
+    if (worthADeepLook(other.name) && deep < DEEP_HUNT_FILES) { cap = FONT_OWN_CAP; deep++; }
     const bytes = await readRange(dataEntry.file, dataEntry.offset + other.at,
-                                  Math.min(other.len, FONT_HUNT_HEAD));
+                                  Math.min(other.len, cap));
     for (const p of tim2Pages(bytes, 2, true)) {
       const pic = p.t.pictures[0];
       if (!looksLikeAFontPage(pic) || fontPageCells(pic) < want) continue;
@@ -3785,7 +3796,9 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0) 
   }
   return [`  この吸い出しの中には続きが見つかりませんでした `
     + `(1 行 ${FONT_COLS} 字の幅で ${want} 字ぶん入るものを `
-    + `${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探した)。この行ごと報告してください`];
+    + `${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探した。`
+    + `名前に font が付くものと .tms は先頭 ${FONT_OWN_CAP / 1024 / 1024} MB まで、`
+    + `ほかは先頭 ${FONT_HUNT_HEAD / 1024} KB までを見た)。この行ごと報告してください`];
 }
 
 async function buildIdxReport() {

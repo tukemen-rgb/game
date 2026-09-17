@@ -1259,9 +1259,20 @@ def looks_like_a_font_page(info: dict) -> bool:
     return (info.get("width") or 0) // FONT_CELL == FONT_COLS and font_page_cells(info) > 0
 
 
-#: **ほかの**ファイルから読む上限。実物の索引は 1951 個あるので、全部を丸ごと読むと
-#: 遅い。続きが独立したファイルなら見出しは前のほうに来るので、この長さで足りる
+#: **ほかの**ファイルから読む上限。実物の索引は 1951 個あるので、全部を丸ごと読むと遅い
 FONT_HUNT_HEAD = 64 * 1024
+#: ただし **64KB では足りないファイルが実在する** (#219)。英語化パッチの公開ソースに
+#: 残っている書き出しの名前を見ると、`title.tms` は TIM2 を **0x150100 / 0x164580 /
+#: 0x18b780** に、`saveload.bin` は 0x22100 / 0x28e80 に持っている。文字表の続きが
+#: この形のファイルに入っていたら、64KB しか読まないこちらは**必ず見落とす**。
+#: そこで「いかにも font らしい名前」と `.tms` だけは深く読む。数を絞れば安い
+DEEP_HUNT_FILES = 20
+
+
+def worth_a_deep_look(path: str) -> bool:
+    """文字表の続きが入っていそうな**名前**か (深く読む価値があるか)."""
+    low = os.path.basename(path).lower()
+    return "font" in low or low.endswith(".tms")
 #: **フォント自身**のファイルから読む上限 (#171)。ここを 64KB にしていたのが誤りだった。
 #: 実物の頁 1 枚は 512×1024 ドットの 8bit 索引で **51 万バイト**あり、2 枚目は 0x7D508
 #: あたりに来る。64KB しか読まなければ、同じファイルの 2 枚目は**必ず見落とす** ——
@@ -1385,11 +1396,19 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
     # 英語化パッチの公開ソースに残っている 2 枚の画像も 512×1024 と 512×640 で、
     # 幅は揃っていた (大きさを見ただけで、中身は使っていない)
     same, other_w = [], []
+    deep = 0
     for other in entries[:SHAPE_HUNT_FILES]:
         if other is font_entry or other["len"] < 1024:
             continue
+        # **名前で深さを変える** (#219)。全部を深く読むと 1951 個ぶんで重くなるが、
+        # font らしい名前と `.tms` だけなら安い。実物の `title.tms` は 0x18b780 に
+        # 画像を持っているので、64KB しか読まないと届かない
+        cap = FONT_HUNT_HEAD
+        if worth_a_deep_look(other["path"]) and deep < DEEP_HUNT_FILES:
+            cap = FONT_OWN_CAP
+            deep += 1
         img.seek(other["at"])
-        for p in tim2_pages(img.read(min(other["len"], FONT_HUNT_HEAD)), limit=2):
+        for p in tim2_pages(img.read(min(other["len"], cap)), limit=2):
             if not (looks_like_a_font_page(p) and font_page_cells(p) >= want):
                 continue
             (same if wide and p["width"] == wide else other_w).append((other["path"], p))
@@ -1415,7 +1434,9 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
         return [head] + out
     return [f"  この吸い出しの中には続きが見つかりませんでした "
             f"(1 行 {FONT_COLS} 字の幅で {want} 字ぶん入るものを "
-            f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探した)。"
+            f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探した。"
+            f"名前に font が付くものと .tms は先頭 {FONT_OWN_CAP // 1024 // 1024} MB まで、"
+            f"ほかは先頭 {FONT_HUNT_HEAD // 1024} KB までを見た)。"
             "この行ごと報告してください"]
 
 
