@@ -3926,6 +3926,10 @@ async function buildIdxReport() {
     if (mism.length) {
       problems++;
       lines.push(`→ フォルダの規則が 2 通りで食い違うファイル ${mism.length} 件 (例: ${mism[0][0]} / ${mism[0][1]})。この行ごと報告してください`);
+      /* **どちらが正しいかは名前で決まる** (#221)。文言は tools/boku2.py と 1 字そろえる */
+      lines.push("   決め方: 英語化パッチの公開ソースは system\\namemsg\\namemsg.msg のような"
+        + "**フォルダ付きの道**でこの作品のファイルを開いています。"
+        + "上の 2 つのうち、その形になっている側が正しい読み方です (docs/09 の「実物で確かめたこと」)");
     } else {
       const tested = dfiRuleTested(b, dataEntry.size);
       lines.push(tested

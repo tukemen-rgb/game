@@ -1596,6 +1596,13 @@ def check(folder: str, out=sys.stdout) -> int:
         problems += 1
         say(f"→ フォルダの規則が 2 通りで食い違うファイル {len(mism)} 件 (例: {mism[0][0]} / {mism[0][1]})。"
             "この行ごと報告してください")
+        # **どちらが正しいかは、名前で決まる** (#221)。英語化パッチの公開ソースは
+        # `system\namemsg\namemsg.msg` のような道でファイルを開いている。
+        # 上の 2 つのうち、その形になっている側が当たり。docs/09 の未解決その 2 は
+        # 実物のこの行で決着する ——「報告してください」だけで終わらせない
+        say("   決め方: 英語化パッチの公開ソースは system\\namemsg\\namemsg.msg のような"
+            "**フォルダ付きの道**でこの作品のファイルを開いています。"
+            "上の 2 つのうち、その形になっている側が正しい読み方です (docs/09 の「実物で確かめたこと」)")
     elif dfi_rule_tested(idx, img_size):
         say(f"フォルダの規則: 2 通り (stack / flag) で一致 "
             f"(フォルダの中のファイル {dfi_rule_tested(idx, img_size)} 件で突き合わせた)")

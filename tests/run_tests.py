@@ -7432,6 +7432,105 @@ class TestAgainstThePublicSource(unittest.TestCase):
                          list(boku2.TEXT_CONTAINERS),
                          "画面と CLI で入れ物の一覧の並びが違います (#104)")
 
+    @staticmethod
+    def index_from_paths(paths: list) -> tuple[bytes, bytes]:
+        """道の一覧から DFI の索引を組む (各フォルダの最後の項目だけ「続く」を 0 にする)."""
+        tree, root = [(True, "/", 1)], {}
+        for p in paths:
+            cur = root
+            for d in p.split("/")[:-1]:
+                cur = cur.setdefault(d, {})
+            cur[p.split("/")[-1]] = None
+
+        def walk(items):
+            keys = list(items)
+            for i, k in enumerate(keys):
+                tree.append((items[k] is not None, k, 0 if i == len(keys) - 1 else 1))
+                if items[k] is not None:
+                    walk(items[k])
+
+        walk(root)
+        recs, blob = [], b""
+        for is_dir, _name, more in tree:
+            if is_dir:
+                recs.append((1, more, 0, 0))
+            else:
+                recs.append((0, more, len(blob) // 2048, 64))
+                blob += b"\0" * 2048
+        idx = b"DFI\0" + struct.pack("<I", 0x100) + b"\0" * 8
+        for kind, more, lba, size in recs:
+            idx += struct.pack("<HHIII", kind, more, 0, lba, size)
+        idx += b"".join(n.encode() + b"\0" for _, n, _ in tree)
+        return idx, blob
+
+    def test_the_two_folder_rules_disagree_on_the_real_shape(self):
+        """**実物のフォルダの形では、2 通りの規則が食い違う** (#221).
+
+        docs/09 の未解決その 2 (フォルダの閉じ方) は「3 段以上まとめて閉じるときだけ
+        答えが変わる」ので、いつまでも机上の話に見えていました。ところが公開ソースに
+        書いてある**実物の .msg 24 本の道**でその形を組むと、**21 本で食い違います**
+        (`system/namemsg/namemsg.msg` と `namemsg/namemsg.msg`)。
+
+        つまり `check` の「フォルダの規則」の行は、実物では**必ず意味を持つ**。
+        ここが一致したまま通ることは期待できないので、食い違ったときの
+        **決め方**まで道具が言う必要がある (それも下で見る)。
+        """
+        import re
+
+        msg_py = os.path.join(PUBLIC_SRC, "MSG.py")
+        if not os.path.isfile(msg_py):
+            self.skipTest("公開ソースに MSG.py が無い")
+        with open(msg_py, encoding="utf-8", errors="replace") as fh:
+            m = re.search(r"IMG_MSG_FILES\s*=\s*\[(.*?)\]", fh.read(), re.S)
+        self.assertTrue(m, "IMG_MSG_FILES を読み取れない (向こうの作りが変わった)")
+        paths = [re.sub(r"/+", "/", p.replace("\\", "/"))
+                 for p in re.findall(r'"([^"]+)"', m.group(1))]
+        self.assertGreaterEqual(len(paths), 20, f"道を {len(paths)} 本しか拾えない")
+        self.assertTrue(any(p.count("/") >= 3 for p in paths),
+                        "材料が弱い: 3 段以上の道が 1 本も無い")
+
+        idx, blob = self.index_from_paths(paths)
+        by_rule = {r: [e["path"] for e in boku2.read_dfi(idx, len(blob), rule=r)]
+                   for r in ("stack", "flag")}
+        differ = [(a, b) for a, b in zip(by_rule["stack"], by_rule["flag"]) if a != b]
+        # **落ちたときに 24 本を 2 回並べない** (読めない失敗文は直せない失敗文)
+        self.assertTrue(differ,
+                        f"実物の形 ({len(paths)} 本) で 2 通りが一致した "
+                        "(もしそうなら朗報。この検査ごと書き直すこと)")
+        # **この組み方では stack がそのまま道を再現する**。組み方そのものが
+        # stack 寄りなので、これは「stack が正しい」の証明ではない (#221)
+        wrong = [f"{a} (組んだのは {b})" for a, b in zip(by_rule["stack"], paths) if a != b]
+        self.assertEqual(wrong, [], "組んだ道を stack でも再現できない:\n  " + "\n  ".join(wrong[:3]))
+
+    def test_the_tool_says_how_to_decide_which_folder_rule_is_right(self):
+        """食い違ったときに、**決め方**まで言うこと (#221).
+
+        「この行ごと報告してください」だけだと、社長は報告して待つしかない。
+        実物の道は公開ソースに書いてあるので、**その場で決められる**。
+        """
+        import io as _io
+        import re
+
+        msg_py = os.path.join(PUBLIC_SRC, "MSG.py")
+        if not os.path.isfile(msg_py):
+            self.skipTest("公開ソースに MSG.py が無い")
+        with open(msg_py, encoding="utf-8", errors="replace") as fh:
+            m = re.search(r"IMG_MSG_FILES\s*=\s*\[(.*?)\]", fh.read(), re.S)
+        paths = [re.sub(r"/+", "/", p.replace("\\", "/"))
+                 for p in re.findall(r'"([^"]+)"', m.group(1))]
+        idx, blob = self.index_from_paths(paths)
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "BOKU2.IDX"), "wb") as fh:
+                fh.write(idx)
+            with open(os.path.join(tmp, "BOKU2.IMG"), "wb") as fh:
+                fh.write(blob)
+            buf = _io.StringIO()
+            boku2.check(tmp, out=buf)        # `out` を渡す (既定は取り込み時の stdout)
+            out = buf.getvalue()
+        self.assertIn("フォルダの規則が 2 通りで食い違う", out, out[-600:])
+        self.assertIn("決め方:", out, f"決め方を言っていない:\n{out[-600:]}")
+        self.assertIn("フォルダ付きの道", out, f"何を見れば決まるかを言っていない:\n{out[-600:]}")
+
     def test_the_practice_tree_uses_the_real_paths(self):
         """練習データの道筋が、**実物の道筋**と同じであること (#220).
 
