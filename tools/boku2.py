@@ -598,7 +598,7 @@ def parse_map_rec(b: bytes) -> tuple[int, list[dict]] | None:
     if len(b) < 16:
         return None
     declared = struct.unpack_from("<I", b, 0)[0]
-    tries = [(rec, declared) for rec in (8, 12) if 1 <= declared <= 64]
+    tries = [(rec, declared) for rec in (MAP_ENTRY, MAP_ENTRY_ALT) if 1 <= declared <= 64]
     best = _best_map_rec(b, tries)
     if best is not None:
         # **落ちている部品が無いか見る** (#217)。先頭の数を項目数として読むのは
@@ -610,7 +610,7 @@ def parse_map_rec(b: bytes) -> tuple[int, list[dict]] | None:
                 best = longer
     if best is None:
         # こちらの数え方では読めなかった。公開ソースの数え方で読み直す
-        tries = [(rec, c) for rec in (8, 12)
+        tries = [(rec, c) for rec in (MAP_ENTRY, MAP_ENTRY_ALT)
                  if (c := map_rec_derived_count(b, rec)) is not None]
         best = _best_map_rec(b, tries)
     return (best[1], best[2]) if best else None
@@ -741,7 +741,7 @@ def pick_msg(b: bytes, info: dict | None = None) -> list[dict] | None:
     片方しか読めないときは今までどおり (ほとんどのファイルはこちら)。
     """
     got = []
-    for stride in (8, 4):
+    for stride in (MSG_STRIDE, MAP_MSG_STRIDE):
         sub: dict = {}
         items = parse_msg(b, stride, sub)
         if items:
@@ -778,7 +778,7 @@ def parse_tables(b: bytes) -> list[dict] | None:
         if off < head or off + size > len(b) or off < prev:
             return None
         prev = off
-        msg = parse_msg(b[off:off + size], 4) if size >= 8 else None
+        msg = parse_msg(b[off:off + size], MAP_MSG_STRIDE) if size >= 8 else None
         tables.append({"i": i, "off": off, "size": size, "id": ident, "msg": msg})
     if not any(x["msg"] for x in tables):
         return None
@@ -932,6 +932,19 @@ def msg_bytes(text: str) -> int:
         return 8
     return (msg_codes(text) + 1) * 2
 
+
+#: 公開ソースから借りてきた**形の数**。向こうの `MSG.py` / `UNPACK.py` の
+#: どこを読めばいいかも一緒に書いておく (検査 `TestTheBorrowedNumbers` が
+#: 実際にそこを読んで突き合わせる。#223)。
+#:
+#:   .msg の位置表の刻み … `readMSG` が `MSG_MODE` で `x*0x8`、
+#:                          `MAP_MODE` / `OFFSET_ONLY_MODE` で `x*0x4`
+#:   入れ物の項目の刻み  … `unpackMap` が `type == 0` で `entry_size = 0xC`、
+#:                          それ以外で `8`
+MSG_STRIDE = 8            # BOKU2.IMG の中の .msg (位置 + 長さ)
+MAP_MSG_STRIDE = 4        # マップの中の会話 (位置だけ)
+MAP_ENTRY = 8             # 入れ物の項目 (位置 + 長さ)
+MAP_ENTRY_ALT = 12        # 日記・保存画面などの入れ物 (12 バイト刻み)
 
 #: 実物の索引で、名前の置き場が始まる位置。英語化パッチの公開ソースが
 #: `FILENAMES_START = 0x8140` と決め打ちしている値 (#222)。

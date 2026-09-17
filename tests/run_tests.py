@@ -7803,6 +7803,69 @@ class TestAgainstThePublicSource(unittest.TestCase):
                          f"部品を落としている (こちら {len(ours)} 個 / 向こう {len(theirs)} 個)")
 
 
+class TestTheBorrowedNumbers(unittest.TestCase):
+    """公開ソースから**借りてきた数**が、向こうの今の値と合っていること (#223).
+
+    この一式の形の読み方には、向こうのソースから取った数がいくつも入っています
+    (位置表の刻み 8 / 4、入れ物の項目の刻み 8 / 12、名前の置き場 0x8140、
+    1 行 23 字、刻み 22 ドット)。**数が合っていることは、誰も見ていませんでした** ——
+    #222 で 0x8140 を突き合わせたのが最初で、残りは「同じ値を書いてある」だけ。
+
+    借りた数は**どこから借りたか**まで書いて、ここで実際にその場所を読みます。
+    向こうが値を直したら (あるいはこちらが写し間違えたら) 落ちます。
+    """
+
+    #: (こちらの名前, 読み取る先, 読み取り方, 何の数か)
+    BORROWED = (
+        ("MSG_STRIDE", "MSG.py", r"MSG_MODE:\s*\n\s*f\.seek\(offset \+ 4 \+ x\*(0x[0-9A-Fa-f]+)",
+         ".msg の位置表の刻み"),
+        ("MAP_MSG_STRIDE", "MSG.py",
+         r"MAP_MODE or mode == OFFSET_ONLY_MODE:\s*\n\s*f\.seek\(offset \+ 4 \+ x\*(0x[0-9A-Fa-f]+)",
+         "マップの中の会話の刻み"),
+        ("MAP_ENTRY_ALT", "UNPACK.py", r"if type == 0:\s*\n\s*entry_size = (0x[0-9A-Fa-f]+)",
+         "入れ物の項目の刻み (12 バイト側)"),
+        ("MAP_ENTRY", "UNPACK.py", r"else:\s*\n\s*entry_size = (\d+)\s*\n",
+         "入れ物の項目の刻み (8 バイト側)"),
+        ("KNOWN_NAMES_AT", "UNPACK.py", r"FILENAMES_START\s*=\s*(0x[0-9A-Fa-f]+)",
+         "名前の置き場"),
+        ("FONT_COLS", "reprint.py", r"N_COLUMNS\s*=\s*(\d+)", "1 行の字数"),
+        ("FONT_CELL", "reprint.py", r"CELL_WIDTH\s*=\s*(\d+)", "文字の刻み (ドット)"),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.isdir(PUBLIC_SRC):
+            raise unittest.SkipTest(f"公開ソースが無い ({PUBLIC_SRC})")
+
+    def test_every_borrowed_number_still_matches_the_public_source(self):
+        import re
+
+        for name, where, how, what in self.BORROWED:
+            with self.subTest(name):
+                path = os.path.join(PUBLIC_SRC, where)
+                self.assertTrue(os.path.isfile(path), f"公開ソースに {where} が無い")
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    m = re.search(how, fh.read())
+                self.assertTrue(m, f"{where} から {what} を読み取れない (向こうの作りが変わった)")
+                theirs = int(m.group(1), 0)
+                self.assertEqual(getattr(boku2, name), theirs,
+                                 f"{what}: こちらは {getattr(boku2, name)}、"
+                                 f"公開ソース ({where}) は {theirs}")
+
+    def test_the_list_is_not_empty_or_trivially_passing(self):
+        """借りた数が**本当にその値でないと困る**こと (素通し防止).
+
+        値を取り違えても誰も落ちないなら、この検査は飾り。1 つずつ変えてみて、
+        **少なくともどこかの検査が落ちる**ことを見る…のは重いので、
+        ここでは「借りた数が全部違う値である」ことだけ見る
+        (同じ値ばかりなら、突き合わせても当たり前になる)。
+        """
+        self.assertGreaterEqual(len(self.BORROWED), 5)
+        values = [getattr(boku2, n) for n, _w, _h, _t in self.BORROWED]
+        self.assertGreaterEqual(len(set(values)), 4,
+                                f"借りた数が {sorted(set(values))} しかない (突き合わせが緩い)")
+
+
 class TestTheCitationsPointAtSomethingReal(unittest.TestCase):
     """文書が挙げる**出典そのもの**を、公開ソースと突き合わせる (#165).
 
