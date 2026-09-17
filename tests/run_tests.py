@@ -3426,6 +3426,34 @@ class TestMissingPracticeData(unittest.TestCase):
                          "道具が案内するコマンドが docs/10 に無い "
                          "(道具と手順書で違う道を教えている):\n  " + "\n  ".join(missing))
 
+    def test_the_control_codes_in_lesson_one_are_what_the_tool_decodes(self):
+        """docs/01 が載せた実物の制御コードの表が、道具の読み方と合っていること (#213).
+
+        docs/01 は「制御コードは、その文字コードが使っていないバイト範囲に置く」
+        という原則を、**実物 (僕の夏休み 2) の 0x8000 番台**で説明している。
+        表の値と意味が道具の読み方とずれたら、教材が嘘をつく。**表を読んで、
+        その値を実際に道具に食わせて**確かめる (書き写した値を並べても意味がない)。
+        """
+        import re
+
+        import boku2
+
+        with open(os.path.join(REPO, "docs", "01-文字テーブル.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        rows = re.findall(r"^\| `0x([0-9A-F]{4})`([^|]*)\| `?([^|`]+)`? \|", doc, re.M)
+        self.assertGreaterEqual(len(rows), 3, f"表を {len(rows)} 行しか拾えていない")
+        for code, arg, tag in rows:
+            value = int(code, 16)
+            tag = tag.strip()
+            with self.subTest(code):
+                if value == 0xCDCD:                  # 詰め物は「出てこない」のが正しい
+                    self.assertEqual(boku2.decode([0x10, value, 0x8000], ["あ"] * 20), "あ")
+                    continue
+                codes = [value, 0x05] if arg.strip() else [value]
+                got = boku2.decode(codes + [0x8000], ["あ"] * 20, tags=("<" in tag))
+                self.assertTrue(got.startswith(tag.split("xx")[0]),
+                                f"0x{code} を道具は {got!r} と読む (docs/01 は {tag!r})")
+
     def test_the_practice_docs_say_to_make_the_data_first(self):
         """docs/01〜03 の頭に、練習データの作り方への導線があること."""
         for name in ("01-文字テーブル.md", "02-相対検索.md", "03-ポインタテーブル.md"):
