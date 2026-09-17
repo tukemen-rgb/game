@@ -2779,6 +2779,106 @@ class TestTheTranslationHasToFitTheHole(unittest.TestCase):
         self.assertIn("cp932 で書けない字", out, out[-600:])
 
 
+class TestPracticeSettingsAreAlwaysDeclared(unittest.TestCase):
+    """**練習用の作品の物差しを黙って別の作品に当てる道具が無いこと** (#215).
+
+    この一式の既定の用語集・文字表・仕様は、全部**練習用の作品**
+    (リィンフォルト戦記) のものです。別の作品の文章にそのまま当てると、
+    出てくる判定は嘘になります。`proofread.py` は #89 から、
+    `make_viewer.py` は #214 からそう断っています。
+
+    #214 の最後に「ほかの道具はたぶん埋まっている」と書きました。
+    **「たぶん」を機械で潰すのがこの検査です。** 物差しを既定で持っている道具を
+    ソースから数え上げ、その全部が「練習用の作品」と口に出すことを見ます。
+    新しく物差しを既定で持つ道具を足したら、断りを書くまで落ちます。
+    """
+
+    #: 「判定の物差し」の既定。これを持っている = 別の作品に当てると嘘になる道具
+    YARDSTICKS = ("font_chars", "glossary.tsv", "rules.json")
+
+    #: 数え上げた道具の走らせ方。**一覧に無い道具が見つかったら落とす** ので、
+    #: 道具を足した人はここに書き足すことになる (書き方が分からないまま緑にしない)
+    HOW = {
+        "proofread.py": lambda tsv, out: [tsv],
+        "make_viewer.py": lambda tsv, out: ["--tsv", tsv, "-o", out],
+    }
+
+    #: 物差しの名前は出てくるが、**判定はしない**道具。
+    #: **理由の書けるものだけ**をここに置く (書けないなら断りの抜けなので直すこと)
+    NOT_A_JUDGE = {
+        "make_sample.py": "練習用の物差しそのものを**作る**道具。判定はしない",
+        "font_view.py": "渡されたフォントを覗くだけ。物差しを既定で持たない "
+                        "(`--chars` に既定は無い)",
+    }
+
+    def judges(self) -> list:
+        """既定で物差しを持っている道具を、ソースから数え上げる.
+
+        **広めに拾う。** 物差しの名前が出てくれば候補にして、判定しない道具は
+        `NOT_A_JUDGE` に理由を書いて外す。狭く拾うと、断りの要る道具が
+        **黙って漏れる** —— 漏れる側に倒すと、この検査そのものが意味を失う。
+        """
+        import glob
+
+        found = []
+        for path in sorted(glob.glob(os.path.join(REPO, "tools", "*.py"))):
+            with open(path, encoding="utf-8") as fh:
+                src = TestDocs.code_only(fh.read())
+            if any(f'"{mark}' in src or f"/{mark}" in src or mark in src
+                   for mark in self.YARDSTICKS) and "add_argument" in src:
+                found.append(os.path.basename(path))
+        return found
+
+    def test_the_excuses_are_still_true(self):
+        """**除いた道具が、本当に物差しを既定で持っていないこと** (#215).
+
+        理由を書いて除くのは、書いた時点では正しくても**古くなる**。
+        `--font-chars` のような旗に既定を足した瞬間に、その道具は判定する側に
+        変わるので、除外の理由ごと落とす。
+        """
+        import re
+
+        for tool in self.NOT_A_JUDGE:
+            with open(os.path.join(REPO, "tools", tool), encoding="utf-8") as fh:
+                src = fh.read()
+            for line in re.findall(r"add_argument\([^\n]*", src):
+                if "default=" in line:
+                    self.assertFalse(any(y in line for y in self.YARDSTICKS),
+                                     f"{tool} は物差しを既定で持つようになった "
+                                     f"(除外の理由が古い): {line.strip()[:90]}")
+
+    def test_the_list_is_not_empty(self):
+        """前提: 数え上げが効いていること (0 件なら下が全部素通しになる)."""
+        got = self.judges()
+        self.assertIn("proofread.py", got, f"数え上げが壊れている: {got}")
+        self.assertIn("make_viewer.py", got, f"数え上げが壊れている: {got}")
+
+    def test_every_tool_with_practice_settings_says_so(self):
+        import subprocess
+
+        missing_recipe = [t for t in self.judges()
+                          if t not in self.HOW and t not in self.NOT_A_JUDGE]
+        self.assertEqual(missing_recipe, [],
+                         "練習用の物差しを既定で持っているのに、この検査が走らせ方を"
+                         f"知らない道具: {missing_recipe} (HOW に足すこと)")
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = os.path.join(tmp, "other.tsv")
+            with open(tsv, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                fh.write("r0\t夏休みの虫取り\t夏休みの虫取り\n")
+            for tool in self.judges():
+                if tool in self.NOT_A_JUDGE:
+                    continue
+                with self.subTest(tool):
+                    argv = self.HOW[tool](tsv, os.path.join(tmp, tool + ".html"))
+                    res = subprocess.run(
+                        [sys.executable, os.path.join(REPO, "tools", tool), *argv],
+                        capture_output=True, text=True, cwd=REPO)
+                    out = res.stdout + res.stderr
+                    self.assertIn("練習用の作品", out,
+                                  f"{tool} が練習用の物差しで測ったことを言っていない:\n{out[-700:]}")
+
+
 class TestTheRuleSetMatchesTheGame(unittest.TestCase):
     """校正の設定が、見ている作品のものであること (#89).
 
