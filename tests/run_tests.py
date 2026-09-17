@@ -2779,6 +2779,65 @@ class TestTheTranslationHasToFitTheHole(unittest.TestCase):
         self.assertIn("cp932 で書けない字", out, out[-600:])
 
 
+class TestTheFrameKnobsAreRealAndInOnePlace(unittest.TestCase):
+    """実物の枠の仕様が分かったときに**直す所**が、本当にそこにあること (#216).
+
+    `line_width` / `line_count` の上限は、いまは練習用の作品の数字
+    (1 行 18 文字 / 1 ページ 3 行) です。実物の枠は分かっていないので、
+    docs/10 に「分かったらここを直す」を 1 か所だけ書きました。
+
+    **書いただけの直し方は、書いた瞬間から古くなる。** 節が挙げている名前が
+    本当に `data/rules.json` の鍵で、本当に旗としてあることを見ます。
+    道具の側で名前を変えたら、この節ごと落ちます。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        head = "### 実物の枠の仕様が分かったら"
+        if head not in doc:
+            raise unittest.SkipTest("docs/10 にその節が無い")
+        cls.section = doc.split(head, 1)[1].split("\n## ", 1)[0]
+        with open(os.path.join(REPO, "data", "rules.json"), encoding="utf-8") as fh:
+            cls.rules = json.load(fh)
+
+    def test_every_setting_the_section_names_is_a_real_key(self):
+        import re
+
+        names = set(re.findall(r"`(line_max_width|lines_max|var_width)`", self.section))
+        self.assertGreaterEqual(len(names), 3, f"節から設定の名前を {names} しか拾えない")
+        for name in sorted(names):
+            self.assertIn(name, self.rules["ja"],
+                          f"data/rules.json の ja に {name} が無い (節の直し方が古い)")
+
+    def test_every_flag_the_section_names_really_exists(self):
+        """節が挙げている旗が、本当に打てること (打てない旗を書かない)."""
+        import re
+        import subprocess
+
+        flags = set(re.findall(r"`?(--line-width|--lines-max|--var-width)`?", self.section))
+        self.assertGreaterEqual(len(flags), 2, f"節から旗を {flags} しか拾えない")
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "proofread.py"), "--help"],
+                             capture_output=True, text=True, cwd=REPO)
+        for flag in sorted(flags):
+            self.assertIn(flag, res.stdout, f"proofread.py に {flag} が無い")
+
+    def test_the_two_tools_read_the_same_file(self):
+        """**直す所が 1 か所であること。** 画面と一括処理が別の設定を見ていたら嘘になる."""
+        for tool in ("proofread.py", "make_viewer.py"):
+            with open(os.path.join(REPO, "tools", tool), encoding="utf-8") as fh:
+                src = fh.read()
+            # **ファイル丸ごとを haystack にしない** (落ちたときに全文が出る)。
+            # 見つかったかどうかだけを渡す
+            self.assertTrue("rules.json" in src, f"{tool} が rules.json を見ていない")
+        with open(os.path.join(REPO, "tools", "make_viewer.py"), encoding="utf-8") as fh:
+            viewer = fh.read()
+        for key in ("line_max_width", "lines_max"):
+            self.assertTrue(key in viewer,
+                            f"検査台が {key} を見ていない (rules.json を直しても画面が動かない)")
+
+
 class TestPracticeSettingsAreAlwaysDeclared(unittest.TestCase):
     """**練習用の作品の物差しを黙って別の作品に当てる道具が無いこと** (#215).
 
@@ -7477,9 +7536,19 @@ class TestTheCitationsPointAtSomethingReal(unittest.TestCase):
                     for m in re.finditer(self.CITE, line):
                         fname, name = m.group(1), m.group(2)
                         found.append(f"{rel}:{i} {fname} の {name}")
+                        # **こちらの道具の名前なら、こちらのファイルを見る** (#216)。
+                        # 「`proofread.py` の `line_width`」まで公開ソースを探しに行くと、
+                        # 自分の道具の話を書いた瞬間に落ちる。相手を取り違えた検査は、
+                        # 直し方も間違って教える
+                        ours = os.path.join(REPO, "tools", fname)
+                        if os.path.isfile(ours):
+                            with open(ours, encoding="utf-8") as fh2:
+                                if not re.search(rf"\b{re.escape(name)}\b", fh2.read()):
+                                    bad.append(f"{rel}:{i} tools/{fname} に {name} という名前が無い")
+                            continue
                         src = os.path.join(PUBLIC_SRC, fname)
                         if not os.path.isfile(src):
-                            bad.append(f"{rel}:{i} 公開ソースに {fname} が無い")
+                            bad.append(f"{rel}:{i} 公開ソースにも tools/ にも {fname} が無い")
                         elif not re.search(rf"\b{re.escape(name)}\b", self.public(fname)):
                             bad.append(f"{rel}:{i} {fname} に {name} という名前が無い")
         # 出典を 1 つも拾えないまま緑になるのを防ぐ
