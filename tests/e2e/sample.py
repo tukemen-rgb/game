@@ -2,7 +2,7 @@
 import asyncio, os, shutil, sys
 from playwright.async_api import async_playwright
 
-from common import REPO, WORK, launch, select_file
+from common import REPO, WORK, doc_shape, launch, select_file
 S = os.path.join(REPO, "work", "BOKU2SAMPLE")
 HOWTO = os.path.join(REPO, "docs", "10-僕夏2の手順.md")
 
@@ -38,8 +38,10 @@ def screen_quote_missing(shown: str, after: str, where: str) -> list:
         return [f"docs/10 の「{after}」の手順から「…と出れば」の引用を拾えない (拾い方が壊れた)"]
     out = []
     for q in quotes:
-        # 文書は数を N / K と書く。「候補 1 件」のように実数で書いてある所も数として当てる
-        rx = re.escape(q).replace(r"1\ 件", r"\d+ 件").replace("N", r"\d+").replace("K", r"\d+")
+        # 文書は数を N / K と書く。「候補 1 件」のように実数で書いてある所も数として当てる。
+        # 置き換えは共通の doc_shape に任せる (1 文字で立っている N / M / K だけ。
+        # ここで素朴に replace("N", …) していたのが #207 と同じ穴だった)
+        rx = doc_shape(q).replace(r"1\ 件", r"\d[\d,]* 件")
         if not re.search(rx, shown or ""):
             out.append(f"{where} に docs/10 の「{q}」が出ていない (実際: {(shown or '')[:120]!r})")
     return out

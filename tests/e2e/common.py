@@ -10,11 +10,28 @@ Chromium を別の場所に置いているなら、環境変数 E2E_CHROMIUM に
 from __future__ import annotations
 
 import os
+import re
 import shutil
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WORK = os.path.join(REPO, "work")
 os.makedirs(WORK, exist_ok=True)
+
+
+def doc_shape(quote: str) -> str:
+    """docs の引用を、実際の出力に当てはめて探すための正規表現にする (#208).
+
+    文書は数の代わりに `N` / `M` / `K` と書き、途中の省略を `…` と書く。
+    **1 文字で立っているときだけ**数に変えること。どこでも変えると
+    `ANSI` の `N` まで数になり、**何を書いても当たらない**引用ができあがる。
+    それを緑のまま見逃した実例が #207 (tests/run_tests.py 側で見つけて直した)。
+    ここに置いてあるのは、同じ間違いを 2 か所で繰り返さないため。
+    """
+    rx = re.escape(quote)
+    rx = re.sub(r"(?<![0-9A-Za-z])[NMK](?![0-9A-Za-z])", r"\\d[\\d,]*", rx)
+    #: `…` の前後の空白は**読みやすさのために置いた空白**で、出力には無いことがある
+    #: (「/ … 文字表に無い K 種」の実物は「/ 上の …のうち文字表に無い 0 種」)
+    return re.sub(r"(?:\\?\s)*…(?:\\?\s)*", ".{0,60}", rx)
 
 
 def chromium_path() -> str | None:

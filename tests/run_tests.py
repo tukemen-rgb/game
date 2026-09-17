@@ -20,6 +20,11 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "tools"))
 sys.path.insert(0, os.path.join(REPO, "answers"))
+sys.path.insert(0, os.path.join(REPO, "tests", "e2e"))
+
+#: 文書の引用を実際の出力に当てはめる書き方。**e2e と同じものを使う** (#208)。
+#: playwright が無くても読める所に置いてあるので、ここからも借りられる
+from common import doc_shape  # noqa: E402
 
 import scrp
 import make_sample
@@ -7338,6 +7343,45 @@ class TestTheDelaySlotIsMarkedOnBothSides(unittest.TestCase):
                          "遅延スロットの印が画面と CLI で食い違う")
 
 
+class TestTheWayQuotesAreMatched(unittest.TestCase):
+    """引用を実際の出力に当てはめる書き方そのものを確かめる (#208).
+
+    `doc_shape` は今、**3 か所**の見張り (docs/10 の引用・e2e の画面の引用・
+    「報告するとき」の引用) が使っている。ここが緩むと 3 つとも同時に緩み、
+    しかも**緑のまま**になる。#207 で見つけた「`ANSI` の N まで数にしてしまう」
+    穴は、まさにそれが 1 年近く緑だった例なので、当て方自体に検査を付ける。
+    """
+
+    def test_a_number_written_as_a_letter_matches_a_number(self):
+        for quote, text in (("名前が付いた N 件", "名前が付いた 20 件"),
+                            ("合う N 件 / 合わない M 件", "合う 4 件 / 合わない 0 件"),
+                            ("文字表に無い K 種", "文字表に無い 12 種"),
+                            ("索引は N 個", "索引は 1,951 個")):
+            with self.subTest(quote):
+                self.assertRegex(text, doc_shape(quote))
+
+    def test_a_letter_inside_a_word_is_left_alone(self):
+        """`ANSI` の N を数に変えない。変えると**何を書いても当たらない**引用になる."""
+        for quote, text in (("この TSV は ANSI で保存されています",
+                             "注意: この TSV は ANSI で保存されています"),
+                            ("[MAP] 1 番が会話だった N 件", "[MAP] 1 番が会話だった 2 件")):
+            with self.subTest(quote):
+                self.assertRegex(text, doc_shape(quote))
+
+    def test_the_spaces_around_an_ellipsis_are_not_required(self):
+        """`…` の前後の空白は読みやすさのためのもので、出力には無いことがある."""
+        self.assertRegex("font.txt: 187 字 / 上の .msg で使われている番号 34 種のうち文字表に無い 0 種",
+                         doc_shape("font.txt: N 字 / … 文字表に無い K 種"))
+
+    def test_it_does_not_match_just_anything(self):
+        """**緩すぎないこと。** ここが素通しだと、上の 3 つが全部無意味になる."""
+        for quote, text in (("名前が付いた N 件", "名前が付いた ぜんぶ"),
+                            ("[フォント] … N×M ドット", "[フォント] 幅×高さ ドット"),
+                            ("合う N 件 / 合わない M 件", "合う 4 件 / 合わない")):
+            with self.subTest(quote):
+                self.assertNotRegex(text, doc_shape(quote))
+
+
 class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
     """docs/10 が「道具がこう言う」と引用した文言を、**全部まとめて**確かめる (#130).
 
@@ -7361,11 +7405,10 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
     ここで見るのは、そこに載らない CLI 側とベタ書きの文言。
     """
 
-    #: 「N 個中 M 個」のような引用は数を当てはめて探す
-    #: **`N` は 1 文字で立っているときだけ**置き換える (#207)。どこでも置き換えると
-    #: `ANSI` のような語の中の N まで数に変わり、**永久に当たらない引用**になる
-    #: (実際に「この TSV は ANSI (cp932) で保存されています」がそれで落ちた)
-    PLACEHOLDER = ((r"(?<![A-Za-z])N(?![A-Za-z])", r"\d[\d,]*"), (r"…", r".{0,60}"))
+    #: 「N 個中 M 個」のような引用は数を当てはめて探す。当て方は
+    #: `tests/e2e/common.py` の `doc_shape` **1 か所**に置いてある (#208)。
+    #: ここと e2e の 2 か所に同じ当て方を書いていたせいで、#207 で直したはずの
+    #: 「`N` をどこでも数にしてしまう」穴が、e2e 側にそのまま残っていた
 
     @classmethod
     def setUpClass(cls):
@@ -7532,9 +7575,7 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
     def where(self, phrase: str) -> str | None:
         import re
 
-        pattern = re.escape(phrase)
-        for mark, sub in self.PLACEHOLDER:
-            pattern = re.sub(mark, sub.replace("\\", "\\\\"), pattern)
+        pattern = doc_shape(phrase)
         if re.search(pattern, self.corpus):
             return "CLI"
         return "画面" if re.search(pattern, self.app) else None
