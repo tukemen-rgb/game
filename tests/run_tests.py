@@ -2579,6 +2579,146 @@ class TestTheDocMatchesTheButtons(unittest.TestCase):
             self.assertGreaterEqual(len(label), 4, f"{label!r} は短すぎて偶然一致する")
 
 
+class TestTheTranslationHasToFitTheHole(unittest.TestCase):
+    """訳文が**原文の入れ物に入るか**を見る検査 (#210).
+
+    取り出した TSV の `size` は、その文がディスク上で占めていたバイト数。
+    #209 まで、この欄は書き出すだけで**どの道具も読んでいなかった**。
+    幅や行数は読みやすさの話だが、入るかどうかは物理の話で、外すと実機に
+    入れる段まで分からない。先行事例が文字列を詰める道具を別に書いている
+    くらい、この作品では効いてくる制約。
+
+    数え方は 2 通りある (本文の 2 バイト符号 / 保存画面の Shift-JIS)。
+    **原文と `size` を突き合わせれば、どちらかに決まる**というのが土台なので、
+    そこを実際の取り出しで確かめる。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+        import boku2
+
+        cls.tmp = tempfile.TemporaryDirectory()
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        out = os.path.join(cls.tmp.name, "OUT")
+        boku2.main(["unpack", os.path.join(sample, "BOKU2.IDX"),
+                    os.path.join(sample, "BOKU2.IMG"), out])
+        boku2.main(["maps", os.path.join(sample, "MAP"), "-o", os.path.join(out, "maps")])
+        cls.tsv = os.path.join(cls.tmp.name, "all.tsv")
+        boku2.main(["text", out, "-f", os.path.join(sample, "font.txt"), "-o", cls.tsv])
+        cls.rows = scrp.read_tsv(cls.tsv)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_every_extracted_row_can_be_measured(self):
+        """取り出した行は、全部どちらかの数え方で `size` と合うこと.
+
+        ここが崩れたら、入るかどうかは**判らない**のが正しい。だから
+        「数えられなかった行」は黙って素通りではなく、下の検査で数えて出す。
+        """
+        self.assertGreaterEqual(len(self.rows), 20, "材料が少なすぎる")
+        bad = [r["id"] for r in self.rows if proofread.room_of(r) is None]
+        self.assertEqual(bad, [], f"size と数え方が合わない行: {bad[:5]}")
+
+    def test_the_two_ways_of_counting_never_both_fit(self):
+        """**両方に当てはまる大きさが無いこと。** ここが土台 (#210).
+
+        両方当てはまる行があると、どちらで測るかを勝手に決めることになり、
+        Shift-JIS の枠を 2 バイト符号で測って**入らないものを入ると言う**。
+        """
+        both = []
+        for r in self.rows:
+            size = int(r["size"], 0)
+            glyph = 0 <= size - boku2.msg_bytes(r["original"]) < 4
+            try:
+                sjis = size == len(r["original"].encode("cp932"))
+            except UnicodeEncodeError:
+                sjis = False
+            if glyph and sjis:
+                both.append(r["id"])
+        self.assertEqual(both, [], f"2 通りとも当てはまる行がある: {both[:5]}")
+        # **0 件で緑にしない。** 両方の数え方が実際に使われていること
+        kinds = {proofread.room_of(r)[0] for r in self.rows if proofread.room_of(r)}
+        self.assertEqual(kinds, {"glyph", "sjis"},
+                         f"材料に片方の数え方しか入っていない: {kinds}")
+
+    def run_proofread(self, rows, header=None):
+        import subprocess
+
+        path = os.path.join(self.tmp.name, "case.tsv")
+        head = header or ["id", "size", "original", "translation"]
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\t".join(head) + "\n")
+            for r in rows:
+                fh.write("\t".join(str(r.get(k, "")) for k in head) + "\n")
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "proofread.py"),
+                              path, "--no-font-check"], capture_output=True, text=True)
+        return res.stdout + res.stderr
+
+    def test_a_voice_row_is_measured_too(self):
+        """音声番号の行も測れること (`--keep-voice` で取り出したとき).
+
+        あの行は符号 4 個がそのまま 1 件で、**終わりの印が付かない**。
+        本文と同じ数え方をすると 2 バイトずれて「数えられない」に落ちる。
+        落ちても嘘は言わないが、`--keep-voice` を使うと全部の音声行が
+        そこに積み上がって、注意の数だけが膨らむ。
+        """
+        import boku2
+
+        out = os.path.join(self.tmp.name, "OUT")
+        tsv = os.path.join(self.tmp.name, "voice.tsv")
+        sample = os.path.join(REPO, "work", "BOKU2SAMPLE")
+        boku2.main(["text", out, "-f", os.path.join(sample, "font.txt"),
+                    "--keep-voice", "-o", tsv])
+        rows = scrp.read_tsv(tsv)
+        voices = [r for r in rows if r["original"].startswith("<VOICE:")]
+        self.assertTrue(voices, "材料に音声番号の行が無い")
+        bad = [r["id"] for r in voices if proofread.room_of(r) is None]
+        self.assertEqual(bad, [], f"音声番号の行が測れない: {bad}")
+
+    def test_a_translation_that_does_not_fit_is_reported(self):
+        out = self.run_proofread([
+            {"id": "a", "size": 12, "original": "はじめから", "translation": "ゲームをさいしょからはじめる"},
+        ])
+        self.assertIn("room", out, out[-600:])
+        self.assertIn("12 バイト", out, out[-600:])
+
+    def test_a_translation_that_fits_is_not_reported(self):
+        """**入る訳文では鳴らないこと。** 鳴りっぱなしの検査は読まれなくなる."""
+        out = self.run_proofread([
+            {"id": "a", "size": 12, "original": "はじめから", "translation": "はじめる"},
+            {"id": "b", "size": 12, "original": "はじめから", "translation": "つづきから"},
+        ])
+        self.assertNotIn("room", out, out[-600:])
+
+    def test_a_tsv_without_the_size_column_says_the_check_is_off(self):
+        """`size` の欄が無い TSV で「入るかどうかも見た」と読ませないこと (#186 と同じ形)."""
+        out = self.run_proofread(
+            [{"id": "a", "original": "はじめから", "translation": "ゲームをさいしょからはじめる"}],
+            header=["id", "original", "translation"])
+        self.assertIn("入るかどうかの検査は動いていません", out, out[-600:])
+        self.assertNotIn("/ room", out, "止まっている検査を効いている側に混ぜている")
+
+    def test_rows_that_cannot_be_measured_are_counted(self):
+        """数え方が合わない行は、**何行あるか**を言うこと (黙って飛ばさない)."""
+        out = self.run_proofread([
+            {"id": "a", "size": 12, "original": "はじめから", "translation": "はじめから"},
+            {"id": "b", "size": 7, "original": "はじめから", "translation": "はじめから"},
+        ])
+        self.assertIn("1 行は入れ物の大きさが数えられませんでした", out, out[-600:])
+
+    def test_the_shift_jis_frame_refuses_a_character_it_cannot_hold(self):
+        """Shift-JIS の枠に cp932 で書けない字を入れたら ERROR (入れようがない)."""
+        out = self.run_proofread([
+            {"id": "a", "size": 4, "original": "はい", "translation": "\u2661い"},
+        ])
+        self.assertIn("cp932 で書けない字", out, out[-600:])
+
+
 class TestTheRuleSetMatchesTheGame(unittest.TestCase):
     """校正の設定が、見ている作品のものであること (#89).
 
@@ -7572,7 +7712,14 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             fh.write(bytes(head))
         with open(at("odd.IMG"), "wb") as fh:
             fh.write(bytes(blob))
+        # 入れ物の大きさ (#210): 数え方が合う行と合わない行を 1 つずつ入れて、
+        # 「N 行は数えられませんでした」の道も通す
+        with open(at("room.tsv"), "w", encoding="utf-8") as fh:
+            fh.write("id\tsize\toriginal\ttranslation\n")
+            fh.write("a\t12\tはじめから\tゲームをさいしょからはじめる\n")
+            fh.write("b\t7\tはじめから\tはじめから\n")
         out += [
+            run(tool("proofread.py"), at("room.tsv"), "--no-font-check"),
             run(tool("proofread.py"), at("ansi.tsv"), "--no-font-check"),
             run(tool("proofread.py"), at("hurt.tsv"), "--no-font-check"),
             run(tool("proofread.py"), at("nums.tsv"), "--no-font-check"),
@@ -8272,7 +8419,7 @@ class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
         return summary, detail
 
     def test_the_two_tables_list_the_same_rules_with_the_same_weight(self):
-        """要約の表と一覧の表が、同じ 13 個を同じ重さで挙げていること (#141).
+        """要約の表と一覧の表が、同じ 14 個を同じ重さで挙げていること (#141).
 
         同じ検査が 2 つの表に出てくるので、片方だけ直すと食い違う。
         実際 `control` は一覧だけ `<BR>` を見ると書いてあり (#140)、
@@ -8283,7 +8430,7 @@ class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
                          f"2 つの表で挙げている検査が違う "
                          f"(要約だけ: {sorted(set(summary) - set(detail))} / "
                          f"一覧だけ: {sorted(set(detail) - set(summary))})")
-        self.assertEqual(len(detail), 13, f"一覧が {len(detail)} 個 (書き方が変わった)")
+        self.assertEqual(len(detail), 14, f"一覧が {len(detail)} 個 (書き方が変わった)")
         for name in sorted(detail):
             s, d = summary[name][1], detail[name][1]
             self.assertEqual(s.split(" (")[0].strip(), d.split(" (")[0].strip(),
@@ -8312,7 +8459,7 @@ class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
             self.assertIn("半角カナ", cells[2], f"{label}の表が半角カナに触れていない: {cells[2]}")
 
     def test_every_rule_in_the_table_can_actually_fire(self):
-        """一覧に載っている 13 個が、どれも出せること (出ない検査を載せない).
+        """一覧に載っている 14 個が、どれも出せること (出ない検査を載せない).
 
         `untranslated` は題材では一度も出ないので、表にあって実際は
         死んでいる、ということが起こりうる。1 つずつ出させて確かめる。
@@ -8321,7 +8468,7 @@ class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
 
         table = self.doc.split("| `rule` | 重さ |")[1].split("\n\n")[0]
         listed = re.findall(r"^\| `([a-z_]+)` \|", table, re.M)
-        self.assertEqual(len(listed), 13, f"一覧が {len(listed)} 個 (書き方が変わった)")
+        self.assertEqual(len(listed), 14, f"一覧が {len(listed)} 個 (書き方が変わった)")
         rows = scrp.read_tsv(os.path.join(REPO, "exercises", "qa_target.tsv"))
         gloss = self.pf.load_glossary(os.path.join(REPO, "data", "glossary.tsv"))
         chars = self.pf.load_font_chars(os.path.join(REPO, "data", "font_chars.txt"))
@@ -8332,6 +8479,11 @@ class TestEveryRuleInTheTableDoesWhatItSays(unittest.TestCase):
         seen |= {f.rule for f in self.pf.check_consistency(rows, lambda rid: None)}
         # 題材で出ないものは、その場で条件を作って出させる
         seen |= self.fired("こんにちは。", "")                      # untranslated
+        # room は `size` の欄がある行でしか働かない (題材の TSV には無い)
+        seen |= {f.rule for f in self.pf.check_row(
+            {"id": "0", "size": "12", "original": "はじめから",
+             "translation": "ゲームをさいしょからはじめる"},
+            self.rules, [], None, self.pf.tag_widths_of(self.rules, 0.0))}
         missing = [r for r in listed if r not in seen]
         self.assertEqual(missing, [], f"一覧にあるのに出せない検査: {missing}")
 

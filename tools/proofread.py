@@ -37,6 +37,7 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import scrp
+import boku2                 # 僕の夏休み 2 の符号の数え方 (入れ物の大きさの検査に使う)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEVERITIES = {"ERROR": 0, "WARN": 1, "INFO": 2}
@@ -72,7 +73,51 @@ def fits_cp932(ch: str) -> bool:
 
 #: 訳文だけを見て分かる検査。取り出したばかりのテキストでも効く
 ABSOLUTE_RULES = ("line_width", "line_count", "kinsoku", "font", "halfwidth",
-                  "notation", "glossary", "consistency")
+                  "notation", "glossary", "consistency", "room")
+
+
+def room_of(row: dict) -> tuple[str, int] | None:
+    """その行の**入れ物の大きさ**と、中身の数え方を返す (#210).
+
+    取り出した TSV の `size` は、その文がディスク上で占めていたバイト数です。
+    訳文がそれより大きくなると、元の場所には入りません。英語化パッチを出した
+    先行事例が、そのために文字列を詰める道具 (`textCompaction.py`) を
+    別に書いているくらい、この作品では効いてくる制約です。
+
+    ただし**数え方が 2 通りあります**。本文は 1 字 2 バイトの文字番号で、
+    終わりに `0x8000` が付き、4 バイト境界まで `0xCDCD` で詰めてあります。
+    保存画面の一部だけは Shift-JIS で、終わりの印も詰め物もありません。
+    どちらかは**原文と `size` を突き合わせれば決まります** (両方に当てはまる
+    大きさは無い)。決まらない行は「数えられない」として、何も言いません。
+    """
+    raw = (row.get("size") or "").strip()
+    if not raw:
+        return None
+    try:
+        size = int(raw, 0)
+    except ValueError:
+        return None
+    original = row.get("original", "")
+    if size <= 0 or not original:
+        return None
+    if 0 <= size - boku2.msg_bytes(original) < 4:
+        return ("glyph", size)
+    try:
+        if size == len(original.encode("cp932")):
+            return ("sjis", size)
+    except UnicodeEncodeError:
+        pass
+    return None
+
+
+def room_needed(how: str, text: str) -> int:
+    """その数え方で、この文を入れるのに要るバイト数."""
+    if how == "sjis":
+        try:
+            return len(text.encode("cp932"))
+        except UnicodeEncodeError:
+            return -1          # cp932 に無い字は、この枠には**そもそも入らない**
+    return boku2.msg_bytes(text)
 
 #: 既定の設定ファイル (この練習用の作品のもの)。別の作品に当てると嘘になる
 DEFAULT_GLOSSARY = os.path.join(REPO, "data", "glossary.tsv")
@@ -273,6 +318,23 @@ def check_row(row: dict, rules: dict, glossary: list[dict],
             add("ERROR", "empty", "訳文にタグしか残っていません (本文が消えています)", translation)
             return out
     text = scrp.final_text(row)
+
+    # --- 入れ物に入るか ---------------------------------------------------
+    # **この作品だけの物差し** (#210)。幅や行数は「読みやすさ」の話だが、これは
+    # 物理的に入るかどうか。入らない訳文は、実機に入れる段になって初めて分かる
+    room = room_of(row)
+    if room:
+        how, size = room
+        need = room_needed(how, text)
+        if need < 0:
+            add("ERROR", "room",
+                f"この枠は Shift-JIS で書かれていて、訳文に cp932 で書けない字があります "
+                f"(入れ物 {size} バイト)", text[:40])
+        elif need > size:
+            add("WARN", "room",
+                f"訳文が {need} バイトで、原文の入れ物 {size} バイトに "
+                f"{need - size} バイト入りません",
+                f"原文 {scrp.strip_tags(original)[:20]} → 訳文 {scrp.strip_tags(text)[:20]}")
 
     # --- タグの照合 -------------------------------------------------------
     before = Counter(f"<{t}{':' + a if a else ''}>" for t, a in scrp.iter_tags(original))
@@ -620,7 +682,19 @@ def main() -> int:
         # **黙って省かない** (#186)。文字表の欄が消えるだけだと、読んだ人は
         # 「書いていないだけ」と思う。フォント検査が止まっていることを言う
         used.append("文字表なし → **フォント検査 (実機で □ になる字) は動いていません**")
+    # **入れ物の大きさ**が数えられた行と、数えられなかった行 (#210)。
+    # 「size の欄が無い TSV」も「数え方が合わない TSV」も、黙ると
+    # 「入るかどうかは見た」と読まれる。font / glossary と同じ扱いにする
+    measured = [r for r in rows if room_of(r)]
+    if not measured:
+        used.append("入れ物の大きさなし → **入るかどうかの検査は動いていません**")
+    else:
+        used.append(f"入れ物の大きさ {len(measured)} 行ぶん")
     print("\n使った設定: " + " / ".join(used))
+    if measured and len(measured) < len(rows):
+        print(f"注意: {len(rows) - len(measured)} 行は入れ物の大きさが数えられませんでした "
+              "(`size` の欄が空か、この作品の数え方と合わない)。"
+              "その行では**入るかどうかを見ていません**")
     # **原文そのものを物差しにする** (#180)。`line_max_width` は「開発元から渡される
     # 仕様」の欄だが、僕の夏休み 2 についてはその仕様が無く、既定の 18 は練習用の
     # 作品の数字がそのまま入っている。**原文が一度も使っていない幅を上限にしても、
@@ -672,6 +746,8 @@ def main() -> int:
         # **止まっている検査を「効いている」側に混ぜない** (#186・#187)。
         # font は文字表が、glossary は用語集が無ければ動かない
         off = ({"font"} if font_chars is None else set()) | (set() if glossary else {"glossary"})
+        if not measured:
+            off |= {"room"}
         working = [r for r in ABSOLUTE_RULES if r not in off]
         print("  いま効いているのは、訳文だけを見て分かる検査 "
               f"({' / '.join(working)}) です。")

@@ -832,6 +832,43 @@ def decode(codes: list[int], glyphs: list[str] | None, tags: bool = True, alt: b
     return "".join(out)
 
 
+#: 校正用の書き方 (`<BR>` `<WAIT:0A>` `[123]`) を、実機の 2 バイト符号に数え戻すための切り方。
+#: **decode() の裏返し**なので、向こうを直したらこちらも直すこと
+VOICE_ONLY = re.compile(r"<VOICE:[0-9]{8}>")
+MSG_TOKEN = re.compile(r"<BR>|<BREAK>|<WAIT:[0-9A-Fa-f]+>|<VOICE:[^>]*>|<[0-9A-Fa-f]{4}>|\[\d+\]|.", re.S)
+
+
+def msg_codes(text: str) -> int:
+    """その文が実機で何個の 2 バイト符号になるか (終わりの 0x8000 は数えない).
+
+    `<WAIT:0A>` だけは **引数が付くので 2 個**。`<BREAK>` は引数の無いページ送りで 1 個。
+    """
+    n = 0
+    for m in MSG_TOKEN.finditer(text):
+        tok = m.group(0)
+        if tok.startswith("<WAIT:"):
+            n += 2
+        else:
+            n += 1
+    return n
+
+
+def msg_bytes(text: str) -> int:
+    """その文を入れるのに要るバイト数 (符号 + 終わりの 0x8000).
+
+    実物の `.msg` は 4 バイト境界まで `0xCDCD` で詰めてあるので、取り出した
+    `size` は**詰め物の分だけ大きい**ことがある。詰め直すかどうかは入れる側の
+    都合なので、ここでは**詰めない大きさ**を返す (比べる側が 4 未満の差を許す)。
+
+    音声番号 (`<VOICE:00010001>`) の行だけは別扱い。あれは 4 個の符号が
+    そのまま 1 件になっていて、**終わりの印が付かない** (`--keep-voice` で
+    取り出すと `size` はちょうど 8)。
+    """
+    if VOICE_ONLY.fullmatch(text):
+        return 8
+    return (msg_codes(text) + 1) * 2
+
+
 #: 索引が本体をどれだけ使い切っていれば「読めている」とみなすか。
 #: ブラウザ側 (analyzeIndex) が候補から外す線と同じ 2 割にそろえてある
 COVERAGE_MIN = 0.2
