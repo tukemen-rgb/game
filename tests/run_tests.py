@@ -753,6 +753,67 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_the_unreadable_bytes_are_named_when_they_can_be(self):
+        """**読めなかった 16 バイトから、分かることは言うこと** (#204).
+
+        `check` は読めない `.msg` の先頭 16 バイトを見せて終わっていました。
+        画面のほうは同じバイトを見て「音声 (VAG)」まで言うのに、
+        **社長が最初に打つのは `check`** です。16 進を渡されても、素人には
+        「読めなかった」以上のことが分かりません。
+
+        言えるのは 3 通り: 別の形式の目印がある (名前と中身が違う) /
+        ゼロ埋めや同じバイトの繰り返し (詰め物か壊れている) / 制御コードばかり。
+        **分からないときは黙ります** —— 当てずっぽうを足すと、16 進だけのほうが
+        まだましになるので。
+        """
+        import re
+        import boku2
+
+        cases = [
+            (b"VAGp" + bytes(12), "音声 (VAG)", True),
+            (b"TIM2" + bytes(12), "画像 (TIM2)", True),
+            (b"\x7FELF" + bytes(12), "本体プログラム (ELF)", True),
+            (bytes(16), "ゼロ埋め", False),
+            (b"\xEE" * 16, "同じバイト (0xEE)", False),
+        ]
+        for head, want, known in cases:
+            got = boku2.guess_kind(head)
+            self.assertTrue(want in got, f"{head[:4]!r}: 「{want}」と言わない ({got!r})")
+            note = boku2.guess_kind_note(head)
+            # **別の形式の目印が出たときだけ**「名前と中身が違う」と言う
+            self.assertEqual("中身は別のもの" in note, known,
+                             f"{head[:4]!r}: 名前と中身の話を出す/出さないが逆: {note}")
+
+        # **分からないものには何も言わない**
+        self.assertEqual(boku2.guess_kind(bytes(range(16))), "",
+                         "分からないのに当てずっぽうを言っている")
+        self.assertEqual(boku2.guess_kind_note(bytes(range(16))), "")
+
+        # 診断にその言葉が出ること (関数にあっても出さなければ意味が無い)
+        import io
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            make_boku2_sample.damage(folder, "msg")
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            line = next((ln for ln in out.getvalue().splitlines()
+                         if "読めない .msg の例" in ln), "")
+            self.assertTrue(line, "読めない .msg の行が出ていない")
+            self.assertTrue("同じバイト" in line,
+                            f"16 進を見せるだけで、分かることを言っていない: {line}")
+
+        # **画面と同じ一覧を持っていること** (#189 と同じ、片側だけ増えるのを防ぐ)
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        start = app.index("const MAGICS = [")
+        block = app[start:app.index("\n];", start)]
+        ui = set(re.findall(r'label: "([^"]+)"', block))
+        cli = {label for _magic, label in boku2.MAGICS}
+        self.assertGreaterEqual(len(ui), 8, f"画面の一覧を {len(ui)} 件しか拾えない")
+        self.assertEqual(cli, ui, "先頭 4 バイトで分かる形式の一覧が、画面と CLI で違います")
+
     def test_where_the_dump_runs_out_is_said_not_just_how_many(self):
         """**取り出せない項目の「どこ」まで言うこと** (#203).
 

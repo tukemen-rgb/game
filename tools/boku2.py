@@ -218,6 +218,62 @@ def dfi_name_stop_note(stop: dict | None) -> str:
             "報告してください (名前の置き場の先頭ではなく、ここ)")
 
 
+#: 先頭の 4 バイトで分かる形式。**画面 (web/app.js の MAGICS) と同じ並び**に
+#: しておくこと。片側だけ増えると、同じファイルを見て違うことを言う (#204)
+MAGICS = (
+    (b"\x7FELF", "本体プログラム (ELF)"),
+    (b"TIM2", "画像 (TIM2)"),
+    (b"VAGp", "音声 (VAG)"),
+    (b"RXWS", "音声バンク (RXWS)"),
+    (b"SShd", "音声ヘッダ (SShd)"),
+    (b"\x00\x00\x01\xBA", "動画 (MPEG PS)"),
+    (b"DFI\x00", "索引 (DFI)"),
+    (b"RIFF", "RIFF (WAV など)"),
+    (b"\x89PNG", "画像 (PNG)"),
+)
+
+
+def guess_kind(head: bytes) -> str:
+    """読めなかったファイルの先頭から、**分かることだけ**を言う (#204).
+
+    `check` は読めない `.msg` の先頭 16 バイトを見せて終わっていた。
+    画面のほうは同じバイトを見て「音声 (VAG)」「圧縮らしい」まで言うのに、
+    **社長が最初に打つのは `check`** のほう。16 進を渡されても、素人には
+    「読めなかった」以上のことが分からない。
+
+    分からないときは**黙る** (空文字)。当てずっぽうを足すと、16 進だけの
+    ほうがまだましになる。
+    """
+    if not head:
+        return ""
+    for magic, label in MAGICS:
+        if head.startswith(magic):
+            return label
+    if all(b == 0 for b in head):
+        return "ゼロ埋め (中身がありません)"
+    if all(b == head[0] for b in head):
+        return f"同じバイト (0x{head[0]:02X}) の繰り返し (詰め物か、壊れています)"
+    # 先頭 16 バイトの散らばりだけで「圧縮らしい」とまでは言えない。
+    # 言えるのは「文字ではない」ことくらいなので、そこで止める
+    if all(b < 0x09 or (0x0E <= b < 0x20) or b == 0x7F for b in head):
+        return "制御コードばかり (文字ではありません)"
+    return ""
+
+
+def guess_kind_note(head: bytes) -> str:
+    """`guess_kind` を、報告に足せる形にする (分からなければ空文字).
+
+    **別の形式の目印が出たときだけ**「名前と中身が違う」と言う。詰め物や
+    ゼロ埋めは形式ではないので、そう言うと的外れになる。
+    """
+    kind = guess_kind(head)
+    if not kind:
+        return ""
+    known = any(head.startswith(m) for m, _label in MAGICS)
+    return (f" ({kind}。**名前は .msg ですが、中身は別のもの**です)" if known
+            else f" ({kind})")
+
+
 def safe_parts(path: str) -> list[str]:
     """索引の名前をそのままフォルダ名に使うと、'..' や '\\' で出力先の外に書いてしまう。
     索引は信用しない: 区切りを揃え、上に戻る部品と空の部品を落とし、危ない文字は _ にする."""
@@ -1393,7 +1449,8 @@ def check(folder: str, out=sys.stdout) -> int:
             if first_bad:
                 problems += 1
                 e, head = first_bad
-                say(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト {head.hex(' ').upper()}")
+                say(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト "
+                    f"{head.hex(' ').upper()}{guess_kind_note(head)}")
         # 文字表 (font.txt) がこのフォルダにあれば、その出来具合も診る (docs/10 の手順 3 の途中経過)
         font_txt = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "font.txt"), None)
         if font_txt:

@@ -1068,6 +1068,35 @@ const MAGICS = [
 /** 切り出して単体で動かせるように、この塊の中で完結させる読み取り */
 const sniffU32 = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0;
 
+/** 読めなかったファイルの先頭から、**分かることだけ**を言う (#204)。
+ * **一括処理 (boku2.py の guess_kind) と同じ判定・同じ言葉**にしておくこと。
+ * 分からないときは黙る —— 当てずっぽうを足すと、16 進だけのほうがまだまし。 */
+function guessKind(head) {
+  if (!head || !head.length) return "";
+  for (const m of MAGICS) {
+    if (head.length < m.bytes.length) continue;
+    let hit = true;
+    for (let i = 0; i < m.bytes.length; i++) if (head[i] !== m.bytes[i]) { hit = false; break; }
+    if (hit) return m.label;
+  }
+  if ([...head].every((b) => b === 0)) return "ゼロ埋め (中身がありません)";
+  if ([...head].every((b) => b === head[0])) {
+    return `同じバイト (0x${hex(head[0], 2)}) の繰り返し (詰め物か、壊れています)`;
+  }
+  if ([...head].every((b) => b < 0x09 || (b >= 0x0E && b < 0x20) || b === 0x7F)) {
+    return "制御コードばかり (文字ではありません)";
+  }
+  return "";
+}
+
+/** `guessKind` を、報告に足せる形にする (分からなければ空文字)。 */
+function guessKindNote(head) {
+  const kind = guessKind(head);
+  if (!kind) return "";
+  const known = MAGICS.some((m) => m.bytes.every((v, i) => head[i] === v));
+  return known ? ` (${kind}。**名前は .msg ですが、中身は別のもの**です)` : ` (${kind})`;
+}
+
 const SNIFF_BY_CLASS = {
   jp:    { ext: "txt",    label: "日本語テキストらしい" },
   ascii: { ext: "txt",    label: "ASCII テキストらしい" },
@@ -3919,7 +3948,13 @@ async function buildIdxReport() {
           + " (合わない分は位置だけで読んでいます)。この行ごと報告してください");
       }
     }
-    if (badMsg) { problems++; lines.push(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト ${[...badMsg.head].map((v) => hex(v, 2)).join(" ")}`); }
+    if (badMsg) {
+      problems++;
+      /* 先頭から**分かることだけ**を足す (#204)。一括処理 (boku2.py の
+         guess_kind / guess_kind_note) と同じ判定・同じ言葉 */
+      lines.push(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト `
+        + [...badMsg.head].map((v) => hex(v, 2)).join(" ") + guessKindNote(badMsg.head));
+    }
     /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
     const glyphText = $("msgglyphs").value;
     const glyphs = glyphText.trim() ? parseGlyphTable(glyphText) : null;
