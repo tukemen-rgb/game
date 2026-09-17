@@ -472,6 +472,36 @@ def dropped_note(d: dict) -> str:
             + where + tail)
 
 
+#: 本体が空かどうかを見るときに、何個のファイルを覗くか (先頭 64 バイトずつ)
+BODY_SAMPLE_FILES = 30
+
+
+def body_looks_empty(img, entries: list[dict]) -> tuple[int, int]:
+    """本体の中身がゼロ埋めばかりでないかを、散らばった位置で覗く (#218).
+
+    吸い出しが途中で切れたり、コピーが終わっていないと、**索引だけが正しくて
+    中身が全部ゼロ**になる。その状態でも「名前が付いた 1951 件」「索引が本体の
+    100% を指しています」は緑のまま出るので、素人は形式の読み違いを疑い始める。
+    原因は 1 つ上の段 (データが無い) なので、そこを先に言う。
+
+    戻り値は (覗いた数, ゼロ埋めだった数)。
+    """
+    picks = [e for e in entries if e["len"] >= 16]
+    if len(picks) > BODY_SAMPLE_FILES:                 # 端に寄らないよう等間隔で
+        step = len(picks) / BODY_SAMPLE_FILES
+        picks = [picks[int(i * step)] for i in range(BODY_SAMPLE_FILES)]
+    checked = zero = 0
+    for e in picks:
+        img.seek(e["at"])
+        head = img.read(min(64, e["len"]))
+        if not head:
+            continue
+        checked += 1
+        if not any(head):
+            zero += 1
+    return checked, zero
+
+
 def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
     with open(idx_path, "rb") as fh:
         idx = fh.read()
@@ -1515,6 +1545,17 @@ def check(folder: str, out=sys.stdout) -> int:
             "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。"
             "この行と下の先頭 64 バイトを報告してください")
         say("   " + idx[:64].hex(" ").upper())
+    # **中身が空なら、形式の話をする前にそれを言う** (#218)。索引だけ正しくて
+    # 中身がゼロの吸い出しは、この先の段 (.msg・入れ物・フォント) を全部
+    # 「読めない」に見せる。原因は 1 つ上にあるので、先に名指しする
+    with open(img_path, "rb") as probe:
+        looked, empty = body_looks_empty(probe, entries)
+    if looked >= 5 and empty >= looked * 0.9:
+        problems += 1
+        say(f"→ 本体の中身がほとんど空です (覗いた {looked} 個のうち {empty} 個がゼロ埋め)。"
+            "吸い出しが途中で切れたか、コピーが終わっていない疑いがあります。"
+            "この先の診断 (.msg・入れ物・フォント) は当てになりません。"
+            "ファイルの大きさと、コピー元の残り容量を確かめてください")
     if named < len(entries) * 0.9:
         problems += 1
         say("→ 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください")

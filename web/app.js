@@ -3681,6 +3681,7 @@ const FONT_OWN_CAP = 4 * 1024 * 1024;
  * **一括処理 (boku2.py) と同じ数字**にしておくこと。
  * 400 のままだと、401 件目から先にある本文もフォントも永久に見つからない
  * (実物は 1951 件)。全件の先頭を読んでも 32 MB / 0.03 秒だった。 */
+const BODY_SAMPLE_FILES = 30;   /* 本体が空かを覗く数 (boku2.py と同じ) */
 const SHAPE_HUNT_FILES = 4000;
 
 /** 形で探すとき、いくつ見つけた所で打ち切るか。**一括処理と同じ数字**にしておくこと。
@@ -3871,6 +3872,30 @@ async function buildIdxReport() {
     lines.push(`→ 索引が本体の ${(100 * coverage).toFixed(1)}% しか指していません。`
       + "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。この行と下の先頭 64 バイトを報告してください");
     lines.push("   " + [...b.subarray(0, 64)].map((v) => hex(v, 2)).join(" "));
+  }
+  /* **中身が空なら、形式の話をする前にそれを言う** (#218)。索引だけ正しくて
+     中身がゼロの吸い出しは、この先の段を全部「読めない」に見せる。
+     文言は tools/boku2.py の check と 1 字そろえる */
+  {
+    const picks = items.filter((it) => it.len >= 16);
+    const step = picks.length > BODY_SAMPLE_FILES ? picks.length / BODY_SAMPLE_FILES : 1;
+    const take = picks.length > BODY_SAMPLE_FILES
+      ? Array.from({ length: BODY_SAMPLE_FILES }, (_, i) => picks[Math.floor(i * step)])
+      : picks;
+    let looked = 0, empty = 0;
+    for (const it of take) {
+      const head = await readRange(dataEntry.file, dataEntry.offset + it.at, Math.min(64, it.len));
+      if (!head.length) continue;
+      looked++;
+      if (!head.some((v) => v)) empty++;
+    }
+    if (looked >= 5 && empty >= looked * 0.9) {
+      problems++;
+      lines.push(`→ 本体の中身がほとんど空です (覗いた ${looked} 個のうち ${empty} 個がゼロ埋め)。`
+        + "吸い出しが途中で切れたか、コピーが終わっていない疑いがあります。"
+        + "この先の診断 (.msg・入れ物・フォント) は当てになりません。"
+        + "ファイルの大きさと、コピー元の残り容量を確かめてください");
+    }
   }
   if ((c.named_ok || 0) < items.length * 0.9) {
     problems++;

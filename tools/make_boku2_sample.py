@@ -287,6 +287,8 @@ DAMAGE = {
     "msg":  "system.msg の先頭を壊す (.msg が読めない)",
     "font": "bk_font.tms の TIM2 の目印を壊す (フォントが TIM2 として読めない)",
     "map":  "MAP の 1 つを壊す (入れ物として読めない)",
+    # 索引はそのまま、**中身だけ**をゼロにする。吸い出しが途中で切れた形 (#218)
+    "empty": "本体の中身をゼロで埋める (索引は読めるのに中身が空)",
 }
 
 
@@ -318,6 +320,15 @@ def damage(out_dir: str, kind: str) -> str:
             fh.seek(rec_end)
             fh.write(b"\xff" * (len(idx) - rec_end))
         return f"BOKU2.IDX の名前の置き場 (0x{rec_end:X} から最後まで) を FF で埋めた"
+    if kind == "empty":
+        # **索引は正しいまま、中身だけ空**にする。実物では「吸い出しが途中で
+        # 切れた」「コピーが終わっていない」で起きる形。索引が読めるので
+        # 「名前が付いた N 件」まで緑のまま進み、その先が全部「読めない」になる
+        size = os.path.getsize(img_path)
+        with open(img_path, "r+b") as fh:
+            fh.seek(0)
+            fh.write(b"\0" * size)
+        return f"BOKU2.IMG の中身 {size:,} バイトを全部 0 にした (索引はそのまま)"
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import boku2
     entries = boku2.read_dfi(idx, os.path.getsize(img_path))

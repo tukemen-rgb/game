@@ -6300,6 +6300,9 @@ class TestDamageDrill(unittest.TestCase):
         "msg": "読めない .msg の例: system/system.msg",
         "font": "TIM2 として読めません",
         "map": "入れ物として読めないファイルの例",
+        # 索引だけ正しくて中身が空の吸い出し (#218)。形式の話をする前に、
+        # **中身が無いこと**を言えているか
+        "empty": "本体の中身がほとんど空です",
     }
 
     def test_each_damage_kind_is_diagnosed(self):
