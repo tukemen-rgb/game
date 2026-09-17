@@ -1285,7 +1285,7 @@ def pick_by_shape(img, entries: list[dict], test, limit: int = SHAPE_PICK_LIMIT)
 
 
 def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
-                   known: set | None = None) -> list[str]:
+                   known: set | None = None, wide: int = 0) -> list[str]:
     """文字表の続きが入っていそうな画像を、**同じ吸い出しの中から**挙げる (#168).
 
     #167 で「1 枚では足りない」と言えるようになったが、**どこを見ればいいかは
@@ -1315,24 +1315,40 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
         out.append(f"  ・同じファイルの位置 0x{p['at']:X} にもう 1 枚 "
                    f"({p['width']}×{p['height']} ドット / {font_page_cells(p)} マス)")
 
-    others = []
+    # **1 枚目と同じ幅のものを先に挙げる** (#211)。幅 506〜527 ドットの画像は
+    # 背景や UI にいくらでもあるので、「23 字で割り切れる」だけでは候補が多すぎる。
+    # 文字表はどの頁も同じ升目なので、**続きなら幅は 1 枚目と同じ**はず。
+    # 英語化パッチの公開ソースに残っている 2 枚の画像も 512×1024 と 512×640 で、
+    # 幅は揃っていた (大きさを見ただけで、中身は使っていない)
+    same, other_w = [], []
     for other in entries[:SHAPE_HUNT_FILES]:
         if other is font_entry or other["len"] < 1024:
             continue
         img.seek(other["at"])
         for p in tim2_pages(img.read(min(other["len"], FONT_HUNT_HEAD)), limit=2):
-            if looks_like_a_font_page(p) and font_page_cells(p) >= want:
-                others.append((other["path"], p))
-                break
-        if len(others) >= 5:
+            if not (looks_like_a_font_page(p) and font_page_cells(p) >= want):
+                continue
+            (same if wide and p["width"] == wide else other_w).append((other["path"], p))
             break
-    for path, p in others:
+        # **同じ幅を 5 件見つけるまでは探し続ける。** 幅の違うものが先に 5 件
+        # 見つかっただけで打ち切ると、本命が一覧に載らない
+        if len(same) >= 5:
+            break
+    for path, p in same:
+        out.append(f"  ・{path} (位置 0x{p['at']:X} / {p['width']}×{p['height']} ドット / "
+                   f"{font_page_cells(p)} マス) ← 1 枚目と同じ幅")
+    for path, p in other_w[:3]:
         out.append(f"  ・{path} (位置 0x{p['at']:X} / {p['width']}×{p['height']} ドット / "
                    f"{font_page_cells(p)} マス)")
 
     if out:
-        return [f"  続きが入っていそうな画像 {len(out)} 件 "
-                f"(1 行 {FONT_COLS} 字の幅で、残り {want} 字が入る大きさ):"] + out
+        head = (f"  続きが入っていそうな画像 {len(out)} 件 "
+                f"(1 行 {FONT_COLS} 字の幅で、残り {want} 字が入る大きさ):")
+        if wide and same:
+            head = (f"  続きが入っていそうな画像 {len(out)} 件 "
+                    f"(1 行 {FONT_COLS} 字の幅で、残り {want} 字が入る大きさ。"
+                    f"**1 枚目と同じ幅 {wide} ドット**のものから先に挙げます):")
+        return [head] + out
     return [f"  この吸い出しの中には続きが見つかりませんでした "
             f"(1 行 {FONT_COLS} 字の幅で {want} 字ぶん入るものを "
             f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探した)。"
@@ -1674,7 +1690,8 @@ def check(folder: str, out=sys.stdout) -> int:
                         # 足りないと言うだけで終わらず、**この吸い出しの中から探す** (#168)。
                         # 上で数えた頁は候補に入れない (数えた分をもう一度挙げない)
                         for line in font_page_hunt(img, entries, e, cells,
-                                                   {p["at"] for p in own} | {info["at"]}):
+                                                   {p["at"] for p in own} | {info["at"]},
+                                                   wide=info.get("width") or 0):
                             say(line)
                     else:
                         say("  これで文字表はまかなえます")

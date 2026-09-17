@@ -3736,7 +3736,7 @@ const fontPageCells = (p) => Math.floor(p.width / FONT_CELL) * Math.floor(p.heig
  * 出す言葉と順番は `tools/boku2.py` の `font_page_hunt` と 1 行ずつ同じ。
  * 画面と一括処理で違うことを言うと、どちらを信じればいいか分からなくなる (#99)。
  */
-async function fontPageHunt(items, fontItem, known, cells, dataEntry) {
+async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0) {
   const want = FONT_GLYPHS - cells;
   const out = [];
 
@@ -3751,7 +3751,11 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry) {
       + `(${pic.width}×${pic.height} ドット / ${fontPageCells(pic)} マス)`);
   }
 
-  let found = 0;
+  /* **1 枚目と同じ幅のものを先に挙げる** (#211)。幅 506〜527 ドットの画像は
+     背景や UI にいくらでもあるので、「23 字で割り切れる」だけでは候補が多すぎる。
+     文字表はどの頁も同じ升目なので、続きなら幅は 1 枚目と同じはず。
+     5 件見つけたら打ち切る作りだと、幅の違うものが先に並んだだけで本命が載らない */
+  const same = [], otherW = [];
   for (const other of items.slice(0, SHAPE_HUNT_FILES)) {
     if (other === fontItem || other.len < 1024) continue;
     const bytes = await readRange(dataEntry.file, dataEntry.offset + other.at,
@@ -3759,17 +3763,24 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry) {
     for (const p of tim2Pages(bytes, 2, true)) {
       const pic = p.t.pictures[0];
       if (!looksLikeAFontPage(pic) || fontPageCells(pic) < want) continue;
-      out.push(`  ・${other.name} (位置 ${hx(p.at)} / ${pic.width}×${pic.height} ドット / `
+      (wide && pic.width === wide ? same : otherW).push(
+        `  ・${other.name} (位置 ${hx(p.at)} / ${pic.width}×${pic.height} ドット / `
         + `${fontPageCells(pic)} マス)`);
-      found++;
       break;
     }
-    if (found >= 5) break;
+    if (same.length >= 5) break;
   }
+  for (const line of same) out.push(line + " ← 1 枚目と同じ幅");
+  for (const line of otherW.slice(0, 3)) out.push(line);
 
   if (out.length) {
-    return [`  続きが入っていそうな画像 ${out.length} 件 `
-      + `(1 行 ${FONT_COLS} 字の幅で、残り ${want} 字が入る大きさ):`, ...out];
+    const head = (wide && same.length)
+      ? `  続きが入っていそうな画像 ${out.length} 件 `
+        + `(1 行 ${FONT_COLS} 字の幅で、残り ${want} 字が入る大きさ。`
+        + `**1 枚目と同じ幅 ${wide} ドット**のものから先に挙げます):`
+      : `  続きが入っていそうな画像 ${out.length} 件 `
+        + `(1 行 ${FONT_COLS} 字の幅で、残り ${want} 字が入る大きさ):`;
+    return [head, ...out];
   }
   return [`  この吸い出しの中には続きが見つかりませんでした `
     + `(1 行 ${FONT_COLS} 字の幅で ${want} 字ぶん入るものを `
@@ -4091,7 +4102,7 @@ async function buildIdxReport() {
              両方の報告が 1 行ずつ一致することは tests/e2e/broken.py が見張っている */
           const known = new Set(own.map((q) => q.at));
           known.add(at);
-          for (const line of await fontPageHunt(items, it, known, cells, dataEntry)) lines.push(line);
+          for (const line of await fontPageHunt(items, it, known, cells, dataEntry, p.width || 0)) lines.push(line);
         } else {
           lines.push("  これで文字表はまかなえます");
         }

@@ -710,6 +710,65 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                       f"実物の大きさだと 2 枚目に届いていない:\n{joined}")
         self.assertIn(f"{26 * boku2.FONT_COLS} マス", joined, "2 枚目のマス数が違う")
 
+    def test_the_same_width_candidate_is_named_first(self):
+        """続きの候補は、**1 枚目と同じ幅**のものを先に挙げること (#211).
+
+        `looks_like_a_font_page` の決め手は「1 行 23 字の幅で割り切れる」だけ。
+        幅 506〜527 ドットの画像は背景や UI にいくらでもあるので、実物では
+        **候補が多すぎて本命が埋もれます**。しかも 5 件見つけたら探索を打ち切って
+        いたので、**幅の違うものが先に 5 件出ただけで本命が一覧に載らない**。
+
+        文字表はどの頁も同じ升目なので、続きなら幅は 1 枚目と同じはず。
+        英語化パッチの公開ソースに残っている 2 枚も 512×1024 と 512×640 で、
+        幅は揃っていました (大きさを見ただけで、中身は使っていません)。
+        """
+        import io as _io
+        import struct
+
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+            import make_tim2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+
+        cell = boku2.FONT_CELL
+        page1, _ = make_tim2.font_sheet(rows=46, cols=boku2.FONT_COLS, cell=cell)
+        want_w = boku2.tim2_pages(page1)[0]["width"]
+        # おとり: 同じ「23 字で割り切れる」枠 (506〜527 ドット) には入るが、**幅が違う**。
+        # 実物でこれに当たるのは、たまたま幅が近い背景や UI の画像
+        decoy, _ = make_tim2.font_sheet(rows=60, cols=47, cell=11)
+        decoy_w = boku2.tim2_pages(decoy)[0]["width"]
+        self.assertNotEqual(decoy_w, want_w, "おとりの幅が本命と同じでは、検査にならない")
+        self.assertTrue(boku2.looks_like_a_font_page(boku2.tim2_pages(decoy)[0]),
+                        "おとりが候補として拾われない (材料が弱い)")
+        real, _ = make_tim2.font_sheet(rows=26, cols=boku2.FONT_COLS, cell=cell)
+
+        blob = bytearray()
+        entries = []
+
+        def put(path, data):
+            entries.append({"path": path, "at": len(blob), "len": len(data)})
+            blob.extend(data)
+
+        put("system/bk_font.tms", b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + page1)
+        # **本命より先に、おとりを 6 件**置く。5 件で打ち切る作りだと本命に届かない
+        for i in range(6):
+            put(f"bg/back{i}.tm2", decoy)
+        put("system/bk_font2.tms", b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + real)
+
+        lines = boku2.font_page_hunt(_io.BytesIO(bytes(blob)), entries, entries[0],
+                                     46 * boku2.FONT_COLS, {0x80}, wide=want_w)
+        joined = "\n".join(lines)
+        self.assertIn("bk_font2.tms", joined, f"本命が一覧に無い:\n{joined}")
+        named = [ln for ln in lines if "・" in ln]
+        self.assertIn("bk_font2.tms", named[0],
+                      f"同じ幅の候補が先頭に来ていない:\n{joined}")
+        self.assertIn("1 枚目と同じ幅", named[0], f"同じ幅だと言っていない:\n{joined}")
+        self.assertIn(f"同じ幅 {want_w} ドット", joined, f"見出しが幅を言っていない:\n{joined}")
+        # おとりも**捨てない** (幅の読みがこちらの思い込みかもしれない)
+        self.assertTrue(any("back" in ln for ln in named), f"幅の違う候補が消えた:\n{joined}")
+
     def test_fonts_are_found_by_shape_when_names_are_gone(self):
         """名前が付かなくても、フォントの診断が飛ばないこと (#172).
 
@@ -2249,6 +2308,7 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         "続きが見つかりませんでした",   # 続きを探して、無ければ無いと言う (#168)
         "1 画素 1 バイトのパレット番号",
         "索引が本体をどれだけ使い切っているか",
+        "1 枚目と同じ幅",             # 続きの候補の並べ方 (#211)
     )
 
     #: `check` にだけあって画面に無くてよい → と、その理由。
