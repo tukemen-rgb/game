@@ -158,6 +158,66 @@ def dfi_rule_tested(idx: bytes, data_size: int) -> int:
     return sum(1 for e in read_dfi(idx, data_size, "flag") if "/" in e["path"])
 
 
+def dfi_name_stop(idx: bytes) -> dict | None:
+    """名前の読み取りが**途中で止まった**なら、どこでなぜ止まったかを返す (#202).
+
+    索引の名前は 0 終わりで並んでいる。読み手は「使えない字が出たら、そこから先は
+    名前の置き場ではない」と見て止まる —— ごみを名前として並べないための用心で、
+    これ自体は正しい。ところが**止まったことを誰も言わなかった**。
+
+    実物で起きるのはこの形:
+
+        レコード 30 件 / ファイル 30 件 / 名前が付いた 5 件
+        → 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の
+          64 バイトを報告してください
+
+    原因は 6 個目の名前に混じった 1 バイト (空白など) なのに、案内しているのは
+    **名前の置き場の先頭**。社長は関係の無い所を見ることになる。止まった位置と
+    その 1 バイトが分かれば、そこを見ればよい。
+
+    **社長の実物は、まさに名前が付かない吸い出しだった** (docs/09 の #1・#3)。
+    この道は実際に通っている。
+
+    @returns 最後まで読めたなら None。止まったなら
+             `{"at": 止まった位置, "nth": 何個目, "byte": その 1 バイト, "head": 手前の名前}`
+    """
+    if idx[:4] != b"DFI\0":
+        return None
+    rec_end = 16
+    while rec_end + 16 <= len(idx):
+        if (idx[rec_end] | (idx[rec_end + 1] << 8)) not in (0, 1):
+            break
+        rec_end += 16
+    rec_count = (rec_end - 16) // 16
+    q, n = rec_end, 0
+    while n < rec_count and q < len(idx):
+        end = idx.find(b"\0", q)
+        if end < 0:
+            return {"at": q, "nth": n + 1, "byte": None, "head": ""}
+        s = idx[q:end]
+        bad = next((i for i, c in enumerate(s) if c < 0x21 or c > 0x7E), None)
+        if len(s) > 127 or bad is not None:
+            return {"at": q + (bad or 0), "nth": n + 1,
+                    "byte": s[bad] if bad is not None else None,
+                    "head": s[:bad].decode("ascii", "replace") if bad else ""}
+        n += 1
+        q = end + 1
+    return None
+
+
+def dfi_name_stop_note(stop: dict | None) -> str:
+    """`dfi_name_stop` を 1 行の案内にする (#202)."""
+    if not stop:
+        return ""
+    where = f"位置 0x{stop['at']:X}"
+    what = (f"使えない字 0x{stop['byte']:02X} があります" if stop["byte"] is not None
+            else "名前の終わりの 0 が見つかりません")
+    near = f" (そこまでは `{stop['head']}` と読めています)" if stop["head"] else ""
+    return (f"   名前は **{stop['nth']} 個目で止まっています**: {where} に {what}{near}。"
+            "**そこから先の名前は読んでいません。** その 1 バイトの前後 64 バイトを"
+            "報告してください (名前の置き場の先頭ではなく、ここ)")
+
+
 def safe_parts(path: str) -> list[str]:
     """索引の名前をそのままフォルダ名に使うと、'..' や '\\' で出力先の外に書いてしまう。
     索引は信用しない: 区切りを揃え、上に戻る部品と空の部品を落とし、危ない文字は _ にする."""
@@ -227,6 +287,16 @@ def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
     if dupes:
         print(f"注意: 同じ名前が {dupes} 件あり ~2 を付けて区別しました。"
               "フォルダの入れ子の規則が実物と違うかもしれません", file=sys.stderr)
+    # **名前を変えたら、変えたと言う** (#202)。`:` `?` `*` や空白は Windows の
+    # ファイル名に使えないので `_` にしているが、黙って変えると、索引に出ている
+    # 名前と手元のファイル名が食い違う。20 個のうち 3 個だけ違っていても気づけない
+    renamed = [(e["path"], "/".join(safe_parts(e["path"])))
+               for e in entries if "/".join(safe_parts(e["path"])) != e["path"]]
+    if renamed:
+        shown = ", ".join(f"{a} → {b}" for a, b in renamed[:3])
+        print(f"注意: ファイル名に使えない字があった {len(renamed)} 個を `_` にしました "
+              f"({shown}{' …' if len(renamed) > 3 else ''})。"
+              "索引に出ている名前と手元のファイル名が違います", file=sys.stderr)
     with open(img_path, "rb") as img:
         for e in entries:
             dest = os.path.join(out_dir, *safe_parts(e["path"]))
@@ -1162,6 +1232,11 @@ def check(folder: str, out=sys.stdout) -> int:
     if named < len(entries) * 0.9:
         problems += 1
         say("→ 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください")
+        # **どこで止まったかが分かるなら、そこを指す** (#202)。名前の置き場の
+        # 先頭を見ても何も無い。原因は途中の 1 バイトのことが多い
+        stop_note = dfi_name_stop_note(dfi_name_stop(idx))
+        if stop_note:
+            say(stop_note)
         say("   " + idx[rec_end:rec_end + 64].hex(" ").upper())
     if dupes:
         problems += 1
@@ -1552,6 +1627,11 @@ def run(args) -> int:
                   f"索引の名前の置き場の読み取りが外れている疑いがあります。"
                   f"python3 tools/boku2.py check 実物/ の出力ごと報告してください",
                   file=sys.stderr)
+            # **どこで止まったかが分かるなら、そこを指す** (#202)
+            with open(args.idx, "rb") as fh:
+                stop_note = dfi_name_stop_note(dfi_name_stop(fh.read()))
+            if stop_note:
+                print(stop_note, file=sys.stderr)
     elif args.cmd == "maps":
         files = expand_patterns(args.files, folder_files=True)
         total, boxes, skipped = 0, 0, []

@@ -1007,6 +1007,139 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
             return False
         return True
 
+    def test_where_the_names_stopped_is_pointed_at(self):
+        """**名前の読み取りが止まった所を指すこと** (#202).
+
+        索引の名前は 0 終わりで並んでいます。読み手は「使えない字が出たら、
+        そこから先は名前の置き場ではない」と見て止まります —— ごみを名前として
+        並べないための用心で、これ自体は正しい。問題は**止まった所を言わない**
+        ことでした。名前に空白が 1 つ混じっただけで、**そこから先の名前が全部**
+        番号 (`#6` `#7` …) になるのに、案内は
+
+            名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください
+
+        で、指しているのは**名前の置き場の先頭**。原因は途中の 1 バイトなので、
+        社長は関係の無い所を見ることになります。
+
+        **社長の実物はまさに名前が付かない吸い出しでした** (docs/09 の #1・#3)。
+        この道は実際に通っています。
+        """
+        import io
+        import boku2
+
+        n = 30
+        spoiled = 5                        # 6 個目の名前に空白を 1 つ
+        names = [f"f{i:03d}.msg" if i != spoiled else "f005 x.msg" for i in range(n)]
+        codes = [1, 2, 3, 0x8000]
+        good = (struct.pack("<I", 1) + struct.pack("<I", 12) + b"\0" * 4
+                + struct.pack(f"<{len(codes)}H", *codes))
+        data, recs = bytearray(), []
+        for _i in range(n):
+            recs.append((len(data) // 2048, len(good)))
+            data += good + bytes(2048 - len(good))
+        idx = bytearray(b"DFI\0" + struct.pack("<III", n, 0, 0))
+        for sector, ln in recs:
+            idx += struct.pack("<HHIII", 0, 0, 0, sector, ln)
+        for name in names:
+            idx += name.encode() + b"\0"
+
+        # 1. **前提**: 空白 1 つで、そこから先の名前が全部落ちる
+        entries = boku2.read_dfi(bytes(idx), len(data))
+        named = [e for e in entries if not os.path.basename(e["path"]).startswith("#")]
+        self.assertEqual(len(named), spoiled,
+                         f"名前が付いたのが {len(named)} 件 ({spoiled} 件のはず)")
+
+        # 2. **止まった所を言う**
+        stop = boku2.dfi_name_stop(bytes(idx))
+        self.assertTrue(stop, "止まったことに気づいていない")
+        self.assertEqual(stop["nth"], spoiled + 1, f"何個目かが違う: {stop}")
+        self.assertEqual(stop["byte"], 0x20, f"止めた 1 バイトが違う: {stop}")
+        note = boku2.dfi_name_stop_note(stop)
+        self.assertTrue(f"{spoiled + 1} 個目" in note, f"何個目かを言っていない: {note}")
+        self.assertTrue(f"0x{stop['at']:X}" in note, f"位置を言っていない: {note}")
+        self.assertTrue("0x20" in note, f"どの字で止まったかを言っていない: {note}")
+
+        # 3. **診断にその行が出る** (関数にあっても出さなければ意味が無い)
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "BOKU2.IDX"), "wb") as fh:
+                fh.write(bytes(idx))
+            with open(os.path.join(tmp, "BOKU2.IMG"), "wb") as fh:
+                fh.write(bytes(data))
+            out = io.StringIO()
+            boku2.check(tmp, out=out)
+            said = out.getvalue()
+            line = next((ln for ln in said.splitlines() if "個目で止まって" in ln), "")
+            self.assertTrue(line, f"診断が止まった所を言っていない:\n{said[:700]}")
+            self.assertTrue("0x20" in line, f"その行に 1 バイトが無い: {line}")
+
+            # 4. **名前が全部読めているときは、余計なことを言わない**
+            import make_boku2_sample
+            ok = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(ok)
+            with open(os.path.join(ok, "BOKU2.IDX"), "rb") as fh:
+                healthy = fh.read()
+            # 判定そのものを直に見る (診断の側は「名前が付かない」ときしか
+            # この行に来ないので、**通らない道で「言わない」を確かめない**)
+            self.assertIsNone(boku2.dfi_name_stop(healthy),
+                              "全部読めている索引を、止まったと言っている")
+            self.assertEqual(boku2.dfi_name_stop_note(None), "",
+                             "止まっていないのに案内を出している")
+            out = io.StringIO()
+            boku2.check(ok, out=out)
+            self.assertFalse("個目で止まって" in out.getvalue(),
+                             "全部読めているのに止まったと言っている")
+
+    def test_renaming_a_file_is_said_out_loud(self):
+        """**ファイル名を変えたなら、変えたと言うこと** (#202).
+
+        索引の名前に `:` `?` `*` や空白が入っていると、そのままでは Windows で
+        ファイルを作れないので `_` に変えています。変えること自体は正しい。
+        **黙って変えていた**のが問題で、索引に出ている名前と手元のファイル名が
+        食い違います。20 個のうち 3 個だけ違っていても、社長は気づけません。
+        """
+        import contextlib
+        import io
+        import boku2
+
+        names = ["a:b.msg", "c?d.bin", "e*f.tm2", "ok.msg"]
+        data, recs = bytearray(), []
+        for i, _n in enumerate(names):
+            body = bytes([i + 1]) * 64
+            recs.append((len(data) // 2048, len(body)))
+            data += body + bytes(2048 - len(body))
+        idx = bytearray(b"DFI\0" + struct.pack("<III", len(names), 0, 0))
+        for sector, ln in recs:
+            idx += struct.pack("<HHIII", 0, 0, 0, sector, ln)
+        for name in names:
+            idx += name.encode() + b"\0"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ip = os.path.join(tmp, "BOKU2.IDX")
+            gp = os.path.join(tmp, "BOKU2.IMG")
+            with open(ip, "wb") as fh:
+                fh.write(bytes(idx))
+            with open(gp, "wb") as fh:
+                fh.write(bytes(data))
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                boku2.unpack(ip, gp, os.path.join(tmp, "OUT"))
+            said = buf.getvalue()
+            self.assertTrue("3 個" in said, f"変えた数を言っていない: {said!r}")
+            # **変える前と後を両方言う** (後だけだと、索引の名前と突き合わせられない)
+            self.assertTrue("a:b.msg" in said and "a_b.msg" in said,
+                            f"変える前と後を言っていない: {said!r}")
+
+            # 変える必要が無ければ黙る
+            import make_boku2_sample
+            ok = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(ok)
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                boku2.unpack(os.path.join(ok, "BOKU2.IDX"),
+                             os.path.join(ok, "BOKU2.IMG"), os.path.join(tmp, "O2"))
+            self.assertFalse("`_` にしました" in buf.getvalue(),
+                             f"変えていないのに言っている: {buf.getvalue()!r}")
+
     def test_a_tab_in_the_game_text_does_not_break_the_tsv(self):
         """**本文のタブや改行で、TSV の列がずれないこと** (#201).
 

@@ -3774,6 +3774,9 @@ async function buildIdxReport() {
     problems++;
     /* 文言は tools/boku2.py の check と 1 字そろえる。docs/10 の → の一覧もこの形 (#100) */
     lines.push("→ 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください");
+    /* **どこで止まったかが分かるなら、そこを指す** (#202)。CLI と 1 字そろえる */
+    const stopNote = dfiNameStopNote(dfiNameStop(b));
+    if (stopNote) lines.push(stopNote);
     lines.push("   " + [...b.subarray(recEnd, recEnd + 64)].map((v) => hex(v, 2)).join(" "));
   }
   if (c.dupes) { problems++; lines.push("→ 同じ名前があります。フォルダの入れ子の規則が実物と違うかもしれません (docs/09 #18)"); }
@@ -4113,6 +4116,50 @@ function nameAt(b, p) {
  * 名前は最後にまとめて並びます。**並び順はレコードの順とは限りません**
  * (同じ作りのファイルが続く区間では、後ろから前へ下がっていきます)。
  */
+/** 名前の読み取りが**途中で止まった**なら、どこでなぜ止まったかを返す (#202)。
+ * **一括処理 (boku2.py の dfi_name_stop) と同じ判定・同じ言葉**にしておくこと。 */
+function dfiNameStop(idx) {
+  if (idx.length < 4 || idx[0] !== 0x44 || idx[1] !== 0x46 || idx[2] !== 0x49 || idx[3] !== 0) return null;
+  let recEnd = 16;
+  while (recEnd + 16 <= idx.length) {
+    const kind = idx[recEnd] | (idx[recEnd + 1] << 8);
+    if (kind !== 0 && kind !== 1) break;
+    recEnd += 16;
+  }
+  const recCount = (recEnd - 16) / 16;
+  let q = recEnd, n = 0;
+  while (n < recCount && q < idx.length) {
+    let end = q;
+    while (end < idx.length && idx[end] !== 0) end++;
+    if (end >= idx.length) return { at: q, nth: n + 1, byte: null, head: "" };
+    let bad = -1;
+    for (let i = q; i < end; i++) {
+      if (idx[i] < 0x21 || idx[i] > 0x7E) { bad = i - q; break; }
+    }
+    if (end - q > 127 || bad >= 0) {
+      return { at: q + (bad > 0 ? bad : 0), nth: n + 1,
+               byte: bad >= 0 ? idx[q + bad] : null,
+               head: bad > 0 ? String.fromCharCode(...idx.subarray(q, q + bad)) : "" };
+    }
+    n++;
+    q = end + 1;
+  }
+  return null;
+}
+
+/** `dfiNameStop` を 1 行の案内にする (CLI と同じ言葉)。 */
+function dfiNameStopNote(stop) {
+  if (!stop) return "";
+  const where = `位置 0x${stop.at.toString(16).toUpperCase()}`;
+  const what = stop.byte !== null
+    ? `使えない字 0x${stop.byte.toString(16).toUpperCase().padStart(2, "0")} があります`
+    : "名前の終わりの 0 が見つかりません";
+  const near = stop.head ? ` (そこまでは \`${stop.head}\` と読めています)` : "";
+  return `   名前は **${stop.nth} 個目で止まっています**: ${where} に ${what}${near}。`
+    + "**そこから先の名前は読んでいません。** その 1 バイトの前後 64 バイトを"
+    + "報告してください (名前の置き場の先頭ではなく、ここ)";
+}
+
 function readDfi(idx, dataSize, rule) {
   /* rule: "flag" (既定。公開ソース UNPACK.py の規則。「続く」0 のフォルダで旗を立て、
            次の「続く」0 のファイルで 1〜2 段閉じる) か "stack" (閉じたフォルダの
