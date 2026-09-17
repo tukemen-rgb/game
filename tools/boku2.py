@@ -499,7 +499,12 @@ def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
             with open(dest, "wb") as fo:
                 fo.write(img.read(e["len"]))
     unnamed = sum(1 for e in entries if os.path.basename(e["path"]).startswith("#"))
-    return len(entries), unnamed, dfi_dropped(idx, size)
+    # **切り分けた名前も返す** (#206)。docs/10 の 20 分の行は「`system/system.msg` の
+    # ような**フォルダ付きの名前**が並ぶか」を見ろと言っているのに、`unpack` は
+    # 「N 個に切り分けました」の 1 行しか出していなかった。名前が読めたかどうかは
+    # **索引の読み方が当たっているかの一番の手がかり**で、実物ではまさにここが
+    # 外れた (#1・#3 で `#0 #1 …` になった)。`ls` を打たせないと分からない、では困る
+    return len(entries), unnamed, dfi_dropped(idx, size), [e["path"] for e in entries]
 
 
 # ---------- マップの入れ物 ----------
@@ -1804,8 +1809,12 @@ def run(args) -> int:
         return check(args.folder)
 
     if args.cmd == "unpack":
-        n, unnamed, dropped = unpack(args.idx, args.img, args.out)
+        n, unnamed, dropped, paths = unpack(args.idx, args.img, args.out)
         print(f"{n} 個に切り分けました → {args.out}")
+        if paths:
+            # **名前を並べて見せる** (#206)。docs/10 の 20 分の行が見ろと言っている当のもの
+            print("   最初の名前: " + " / ".join(paths[:5])
+                  + (" …" if len(paths) > 5 else ""))
         # **取り出せなかった分を言う** (#178)。索引が名乗る数より少ないのに
         # 「N 個に切り分けました」とだけ言って 0 で終わっていた。#177 の
         # 「出るはずのものが出ていないときだけ赤にする」を unpack にも広げる

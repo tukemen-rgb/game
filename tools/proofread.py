@@ -49,6 +49,18 @@ COMPARING_RULES = ("placeholder", "control", "number", "empty", "untranslated")
 SHOW_ROWS_MAX = 20
 
 
+def shown_path(path: str) -> str:
+    """設定ファイルの道を、人が読める形にする (#206).
+
+    `os.path.relpath` をそのまま使っていたので、リポジトリの外を渡すと
+    `../../../tmp/S/font.txt` のようになった。docs/10 の 60 分の行は
+    **「使った設定」の文字表が実物のものになっているか**を見ろと言っている当の行で、
+    そこが読みにくいと確かめられない。外なら渡された形のまま出す。
+    """
+    rel = os.path.relpath(path, REPO)
+    return path if rel.startswith("..") else rel
+
+
 def fits_cp932(ch: str) -> bool:
     """その字を cp932 (メモ帳の「ANSI」) で保存できるか (#200)."""
     try:
@@ -595,15 +607,15 @@ def main() -> int:
     # どの仕様・用語集・文字表で判定したかを出す。既定はこの練習用の作品
     # (リィンフォルト戦記) のものなので、**別の作品にそのまま当てると嘘になる**。
     # 文字表が違えば「フォントに無い文字」が総崩れになる (#89)
-    used = [f"仕様 {os.path.relpath(args.rules, REPO)} ({args.lang})"]
+    used = [f"仕様 {shown_path(args.rules)} ({args.lang})"]
     if glossary:
-        used.append(f"用語集 {os.path.relpath(args.glossary, REPO)} {len(glossary)} 語")
+        used.append(f"用語集 {shown_path(args.glossary)} {len(glossary)} 語")
     else:
         # 文字表と同じ理由で**黙って省かない** (#187)。用語集が空のままだと
         # glossary の検査は 1 件も出さないのに、「いま効いている検査」には載る
         used.append("用語集なし → **用語の検査は動いていません**")
     if font_chars is not None:
-        used.append(f"文字表 {os.path.relpath(args.font_chars, REPO)} {len(font_chars)} 字")
+        used.append(f"文字表 {shown_path(args.font_chars)} {len(font_chars)} 字")
     else:
         # **黙って省かない** (#186)。文字表の欄が消えるだけだと、読んだ人は
         # 「書いていないだけ」と思う。フォント検査が止まっていることを言う

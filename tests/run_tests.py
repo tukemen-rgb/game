@@ -753,6 +753,94 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_the_first_hour_table_really_walks(self):
+        """**docs/10 の「最初の 1 時間」を、書いてあるとおりに歩けること** (#206).
+
+        あの表は社長がいちばん大事な 1 時間に見るもので、こう書いてあります:
+
+            表の「見る 1 点」は、**道具が実際にその言葉で出力する**ものだけに
+            してあります (練習データで 1 つずつ確かめました)。
+
+        **その確かめに、検査が付いていませんでした。** 実際に歩いたら、
+        20 分の行が外れていた —— 「続けて `system/system.msg` のような
+        **フォルダ付きの名前**が並ぶか」と書いてあるのに、`unpack` は
+        「20 個に切り分けました」の 1 行しか出しません。名前が読めたかは
+        **索引の読み方が当たっているかの一番の手がかり**で、実物ではまさに
+        そこが外れました (#1・#3)。`ls` を打たないと分からない、では困ります。
+
+        ここでは表の行を読み取って、**書いてある言葉が本当に出るか**を見ます。
+        画面でやる行 (文字表を作る) は走らせようが無いので、
+        **飛ばした数を数えて**出します (黙って飛ばさない)。
+        """
+        import re
+        import subprocess
+        import make_boku2_sample
+
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            doc = fh.read()
+        table = doc.split("## 実物が届いた日の最初の 1 時間", 1)[1].split("\n\n表の", 1)[0]
+        rows = [ln for ln in table.splitlines()
+                if ln.startswith("| 〜")]
+        self.assertGreaterEqual(len(rows), 6, f"表から {len(rows)} 行しか読めない")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            out_dir = os.path.join(tmp, "OUT")
+            tsv = os.path.join(tmp, "all.tsv")
+            font = os.path.join(sample, "font.txt")
+
+            def run(*argv):
+                res = subprocess.run([sys.executable, *argv],
+                                     capture_output=True, text=True, cwd=REPO)
+                return res.stdout + res.stderr
+
+            boku2py = os.path.join(REPO, "tools", "boku2.py")
+            checked = run(boku2py, "check", sample)
+            unpacked = run(boku2py, "unpack", os.path.join(sample, "BOKU2.IDX"),
+                           os.path.join(sample, "BOKU2.IMG"), out_dir)
+            mapped = run(boku2py, "maps", os.path.join(sample, "MAP"),
+                         "-o", os.path.join(out_dir, "maps"))
+            texted = run(boku2py, "text", out_dir, "-f", font, "-o", tsv)
+            proofed = run(os.path.join(REPO, "tools", "proofread.py"), tsv,
+                          "--font-chars", font)
+
+            #: 表の行の頭 → その行を確かめる材料と、出るはずの言葉
+            expect = {
+                "〜5 分": (checked, ["問題なし"]),
+                "〜10 分": (checked, ["[MAP]", "入れ物として読めた", "1 番が会話だった"]),
+                "〜20 分": (unpacked, ["個に切り分けました", "/"]),
+                "〜25 分": (mapped, ["個の入れ物から", "個の部品"]),
+                "〜40 分": (None, []),            # 画面でやる行。走らせようが無い
+                "〜55 分": (texted, ["文字表で全部読めました"]),
+                "〜60 分": (proofed, ["使った設定", "文字表 "]),
+            }
+            skipped = []
+            for row in rows:
+                head = row.split("|")[1].strip()
+                self.assertIn(head, expect, f"表に知らない行がある: {head}")
+                got, wants = expect[head]
+                if got is None:
+                    skipped.append(head)
+                    continue
+                for want in wants:
+                    self.assertTrue(want in got,
+                                    f"{head}: 「{want}」が出ていない\n{got[-400:]}")
+            # **飛ばした行を黙って通さない** (0 件で緑にしないのと同じ理由)
+            self.assertEqual(skipped, ["〜40 分"],
+                             f"走らせられない行が変わっています: {skipped}")
+
+            # 20 分の行が言う「フォルダ付きの名前」が、本当に名前として出ていること
+            names = [ln for ln in unpacked.splitlines() if "最初の名前" in ln]
+            self.assertTrue(names, f"名前の行が出ていない:\n{unpacked}")
+            self.assertTrue("/" in names[0],
+                            f"フォルダ付きの名前が並んでいない: {names[0]}")
+
+            # 60 分の行は「文字表が**実物のもの**か」を見る行。道が読めること
+            said = next(ln for ln in proofed.splitlines() if ln.startswith("使った設定"))
+            self.assertFalse("../.." in said,
+                             f"渡した道が読めない形で出ている: {said}")
+
     def test_the_two_sides_classify_the_same_bytes_the_same_way(self):
         """**同じバイトを見て、画面と CLI が同じ性質を言うこと** (#205).
 
@@ -4894,7 +4982,7 @@ class TestBoku2Cli(unittest.TestCase):
             out = os.path.join(tmp, "out")
             # #161 から (切り分けた数, 名前が付かなかった数)、#178 で
             # (取り出せなかった分の内訳) が加わった
-            n, unnamed, dropped = boku2.unpack(idx_path, img_path, out)
+            n, unnamed, dropped, _paths = boku2.unpack(idx_path, img_path, out)
             self.assertEqual(n, 11)
             self.assertEqual(unnamed, 0, "この題材では全部に名前が付くはず")
             self.assertEqual(dropped["outside"], 0, f"取りこぼしがある: {dropped}")
