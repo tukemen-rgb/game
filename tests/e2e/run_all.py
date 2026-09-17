@@ -22,7 +22,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 #: 見落としがそのまま全部の見落としになる
 CHECKS = ["split", "msg", "map", "tim2", "fontdraft", "sample", "build", "broken", "viewer",
           "docs07", "miss", "tabs", "strings", "handover", "folder", "fontpage", "bigindex",
-          "report", "save"]
+          "report", "save", "fonthunt"]
 
 #: 検査ではないもの (共通の道具と、この走らせ役そのもの)
 NOT_A_CHECK = {"common", "run_all"}
