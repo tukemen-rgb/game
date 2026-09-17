@@ -3742,21 +3742,47 @@ async function buildIdxReport() {
      索引の読み違いと「吸い出しが途中で切れている」が同じ見え方になる。
      一括処理 (boku2.py の dfi_dropped / dropped_note) と同じ言葉・同じ数え方 */
   {
-    let records = 0, outside = 0;
+    let records = 0, outside = 0, needs = 0, firstOut = null;
+    const flags = [];
     for (let k = 0; k < c.count; k++) {
       const p = 16 + k * 16;
       if ((b[p] | (b[p + 1] << 8)) === 1) continue;       /* フォルダの行は数えない */
       const lba = u32le(b, p + 8), length = u32le(b, p + 12);
       if (length <= 0) continue;                          /* 空き枠は「落とした」ではない */
       records++;
-      if (lba * 2048 + length > dataEntry.size) outside++;
+      const at = lba * 2048, end = at + length;
+      if (end > needs) needs = end;
+      const bad = end > dataEntry.size;
+      flags.push(bad);
+      if (bad) {
+        outside++;
+        if (firstOut === null || at < firstOut) firstOut = at;
+      }
     }
     if (outside) {
       problems++;
+      /* **どこから足りないのかまで言う** (#203)。外を指すものが索引の後ろに
+         固まっていれば吸い出しが途中で切れた形、ばらけていれば位置の単位の
+         読み違い。**位置の順に並べ替えて見ないこと** —— 遠いものは必ず後ろに
+         来るので、いつも「固まっている」になる */
+      const firstBad = flags.indexOf(true);
+      const cleanCut = firstBad >= 0 && flags.slice(firstBad).every((x) => x);
+      const short = needs - dataEntry.size;
       lines.push(`→ 索引は ${records} 個のファイルを名乗っていますが、取り出せるのは `
         + `${records - outside} 個です (本体の外を指す ${outside} 個)。`
-        + "**吸い出しが途中で切れている**か、索引の読み方 (位置の単位) が"
-        + "外れている疑いがあります。この行ごと報告してください");
+        + (firstOut !== null ? `外を指し始めるのは ${hx(firstOut)} から。` : "")
+        + (short > 0
+            ? `索引は最大 ${hx(needs)} (${needs.toLocaleString("en-US")} バイト) までを指していますが、`
+              + `本体は ${dataEntry.size.toLocaleString("en-US")} バイトしかありません `
+              + `(**${short.toLocaleString("en-US")} バイト足りない**)。`
+            : "")
+        + (cleanCut
+            ? "外を指すものが**ある位置から先に固まっています**。"
+              + "**吸い出しが途中で切れた形**です —— もう一度吸い出すか、"
+              + "上の大きさになるまで足りない分を取り込んでください"
+            : "外を指すものが**ばらけています**。切れたというより、"
+              + "**位置の単位の読み方 (バイト / セクタ) が外れている**形です。"
+              + "この行ごと報告してください"));
     }
   }
   lines.push(`最初の名前: ${items.slice(0, 5).map((it) => it.name).join(" / ")}`);

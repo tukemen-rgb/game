@@ -264,18 +264,63 @@ def dfi_dropped(idx: bytes, data_size: int, rule: str = "flag") -> dict:
                 outside += 1
         else:
             records -= 1
+    # **どこが外なのかを捨てない** (#203)。数だけ出していたので、社長は
+    # 「何かが足りない」ことは分かっても、**どこから足りないのか**が分からなかった。
+    # 索引が指す一番後ろの位置と本体の大きさを比べれば、**あとどれだけ足りないか**
+    # が出る。さらに、外を指すものが**ある位置から先に固まっている**なら
+    # 吸い出しが途中で切れた形、**散らばっている**なら位置の単位の読み違い
+    spans, far, first_out = [], 0, None
+    for k in range(rec_count):
+        p = 16 + k * 16
+        if (idx[p] | (idx[p + 1] << 8)) == 1:
+            continue
+        lba, length = struct.unpack_from("<II", idx, p + 8)
+        if length <= 0:
+            continue
+        at, end = lba * SECTOR, lba * SECTOR + length
+        far = max(far, end)
+        spans.append((at, end > data_size))
+        if end > data_size and (first_out is None or at < first_out):
+            first_out = at
+    # **索引に並んでいる順**で見る。位置の順で並べ替えると、遠くを指すものは
+    # 必ず後ろに来るので「固まっている」が**いつも真**になる (#197 と同じ型の罠)。
+    # 吸い出しが途中で切れたなら、索引の**後ろのほう**が丸ごと外になる
+    flags = [bad for _at, bad in spans]
+    first_bad = next((i for i, bad in enumerate(flags) if bad), None)
+    clean_cut = first_bad is not None and all(flags[first_bad:])
     return {"records": records, "taken": len(read_dfi(idx, data_size, rule)),
-            "outside": outside}
+            "outside": outside, "needs": far, "have": data_size,
+            "first_outside": first_out, "clean_cut": clean_cut}
 
 
 def dropped_note(d: dict) -> str:
     """`dfi_dropped` の結果を、社長に読める 1 行にする。出す必要が無ければ空文字."""
     if not d["outside"]:
         return ""
+    # **どこから足りないのかまで言う** (#203)
+    short = d.get("needs", 0) - d.get("have", 0)
+    where = ""
+    if d.get("first_outside") is not None:
+        where = f"外を指し始めるのは 0x{d['first_outside']:X} から。"
+    if short > 0:
+        where += (f"索引は最大 0x{d['needs']:X} ({d['needs']:,} バイト) までを指していますが、"
+                  f"本体は {d['have']:,} バイトしかありません "
+                  f"(**{short:,} バイト足りない**)。")
+    if d.get("clean_cut"):
+        tail = ("外を指すものが**ある位置から先に固まっています**。"
+                "**吸い出しが途中で切れた形**です —— もう一度吸い出すか、"
+                "上の大きさになるまで足りない分を取り込んでください")
+    else:
+        tail = ("外を指すものが**ばらけています**。切れたというより、"
+                "**位置の単位の読み方 (バイト / セクタ) が外れている**形です。"
+                "この行ごと報告してください")
+    # 矢印で始まる文字列は、**return の中に直に**置くこと。いったん変数に入れて
+    # から返すと、見張り (両側の矢印がそろっているか) が拾えない (#178 と同じ話)。
+    # この注釈にも矢印の形を書かないこと —— 見張りは原本の字面を読むので、
+    # 注釈の中の例まで矢印として数えてしまう (今それで 1 度落とした)
     return (f"→ 索引は {d['records']} 個のファイルを名乗っていますが、取り出せるのは "
             f"{d['taken']} 個です (本体の外を指す {d['outside']} 個)。"
-            "**吸い出しが途中で切れている**か、索引の読み方 (位置の単位) が"
-            "外れている疑いがあります。この行ごと報告してください")
+            + where + tail)
 
 
 def unpack(idx_path: str, img_path: str, out_dir: str) -> int:

@@ -753,6 +753,59 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_where_the_dump_runs_out_is_said_not_just_how_many(self):
+        """**取り出せない項目の「どこ」まで言うこと** (#203).
+
+        今までは数だけでした ——「索引は 20 個を名乗っていますが、取り出せるのは
+        12 個です」。社長は**何かが足りない**ことは分かっても、**どこから
+        足りないのか**が分かりません。道具は知っています: 索引が指す一番後ろの
+        位置と、本体の大きさ。引けば**あと何バイト足りないか**が出ます。
+
+        さらに、外を指す項目が**索引の後ろのほうに固まっている**なら
+        吸い出しが途中で切れた形、**ばらけている**なら位置の単位 (バイト /
+        セクタ) の読み違い。原因が 2 つあると言うだけだった所を、
+        材料から**どちらかに寄せられます**。
+        """
+        import boku2
+
+        def build(lbas, size):
+            idx = bytearray(b"DFI\0" + struct.pack("<III", len(lbas), 0, 0))
+            for lba in lbas:
+                idx += struct.pack("<HHIII", 0, 0, 0, lba, 2048)
+            for i in range(len(lbas)):
+                idx += f"f{i:02d}.bin".encode() + b"\0"
+            return boku2.dfi_dropped(bytes(idx), size)
+
+        # 1. **途中で切れた形**: 後ろの 8 件が本体の外
+        cut = build(list(range(20)), 12 * 2048)
+        self.assertEqual(cut["outside"], 8, f"外を指す数が違う: {cut}")
+        self.assertTrue(cut["clean_cut"], f"切れた形だと見ていない: {cut}")
+        self.assertEqual(cut["needs"] - cut["have"], 8 * 2048,
+                         f"足りない量が違う: {cut}")
+        note = boku2.dropped_note(cut)
+        self.assertTrue("バイト足りない" in note, f"足りない量を言っていない: {note}")
+        self.assertTrue(f"0x{cut['first_outside']:X}" in note,
+                        f"どこから外なのかを言っていない: {note}")
+        self.assertTrue("切れた形" in note, f"どちらの形かを言っていない: {note}")
+
+        # 2. **単位の読み違いの形**: 1 つおきに遠くを指す
+        mixed = build([i if i % 2 == 0 else i + 10_000 for i in range(20)], 20 * 2048)
+        self.assertFalse(mixed["clean_cut"], f"ばらけているのに切れた形と見ている: {mixed}")
+        note = boku2.dropped_note(mixed)
+        self.assertTrue("ばらけて" in note and "単位" in note,
+                        f"単位の読み違いだと言っていない: {note}")
+        self.assertFalse("切れた形" in note, f"両方の言い方をしている: {note}")
+
+        # 3. **並べ替えで判定しない。** 位置の順に並べると遠いものは必ず後ろに
+        #    来るので、「固まっている」が**いつも真**になる (#197 と同じ型の罠)
+        self.assertNotEqual(cut["clean_cut"], mixed["clean_cut"],
+                            "2 つの形を見分けられていない (いつも同じ答えになっている)")
+
+        # 4. 全部が本体の中なら、何も言わない
+        fine = build(list(range(20)), 20 * 2048)
+        self.assertEqual(fine["outside"], 0, f"無事なのに外があると言う: {fine}")
+        self.assertEqual(boku2.dropped_note(fine), "", "無事なのに知らせている")
+
     def test_entries_that_cannot_be_taken_out_are_counted(self):
         """索引が名乗る数と、**取り出せる数**の差を言うこと (#178).
 
@@ -799,7 +852,7 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
         note = boku2.dropped_note(half)
         for must in (str(half["records"]), str(half["taken"]), str(half["outside"])):
             self.assertIn(must, note, f"{must} を言っていない: {note}")
-        self.assertIn("途中で切れている", note, f"いちばんありそうな原因を言っていない: {note}")
+        self.assertIn("途中で切れた形", note, f"いちばんありそうな原因を言っていない: {note}")
 
         # 3. 通しで: unpack が赤くなり、check もその行を出すこと
         with tempfile.TemporaryDirectory() as tmp:
