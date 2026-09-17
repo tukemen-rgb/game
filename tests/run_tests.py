@@ -4488,6 +4488,42 @@ class TestViewer(unittest.TestCase):
         )
         cls.data = make_viewer.build_data(cls.args)
 
+    def run_viewer(self, *args):
+        import subprocess
+
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "make_viewer.py"), *args],
+                             capture_output=True, text=True, cwd=REPO)
+        return res.stdout + res.stderr
+
+    def test_another_games_text_is_not_measured_with_the_practice_font(self):
+        """別の作品の TSV を渡したら、**練習用のフォントで測っている**と言うこと (#214).
+
+        この画面の売りは「出ている字はゲームが持っているグリフそのもの」。
+        ところがそのフォントは練習用の作品 (リィンフォルト戦記) の 333 字なので、
+        僕の夏休み 2 の文章を入れると**漢字がほぼ全部 □ になり、`font` の ERROR が
+        大量に出る**。どちらもその作品の話ではないのに、画面は同じ顔で出る。
+        proofread.py が #89 で断っているのと同じことを、こちらは言っていなかった。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            other = os.path.join(tmp, "other.tsv")
+            with open(other, "w", encoding="utf-8") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                fh.write("r0\t夏休みの虫取り\t夏休みの虫取り\n")     # 練習用の表に無い漢字
+            out = self.run_viewer("--tsv", other, "-o", os.path.join(tmp, "v.html"))
+            # **材料が弱くないこと**: この題材が実際に ERROR を生んでいること
+            self.assertIn("訳文の ERROR 1 件", out, f"材料が弱い (ERROR が出ていない):\n{out}")
+            self.assertIn("練習用の作品のフォント", out, f"断っていない:\n{out}")
+            self.assertIn("その作品の話ではありません", out, f"何が嘘になるか言っていない:\n{out}")
+            self.assertIn("proofread.py", out, f"代わりの見方を言っていない:\n{out}")
+
+    def test_the_practice_material_does_not_get_the_warning(self):
+        """**題材が練習用のときは言わない。** 毎回出る注意は読まれなくなる."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.run_viewer("-o", os.path.join(tmp, "v.html"))
+            self.assertIn("メッセージ", out, f"そもそも動いていない:\n{out}")
+            self.assertNotIn("練習用の作品のフォント", out,
+                             f"練習用の題材なのに断っている:\n{out}")
+
     def test_glyph_data_matches_char_list(self):
         import base64
 

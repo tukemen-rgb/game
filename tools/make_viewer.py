@@ -1406,6 +1406,23 @@ def main() -> int:
     print(f"  メッセージ {len(data['messages'])} 件 / グリフ {len(data['glyphs']['chars'])} 字 / "
           f"訳文の ERROR {errors} 件")
     print(f"  題材: {data['source']}")
+    # **別の作品の文章を、練習用のフォントで測っていないか** (#214)。
+    # この画面の売りは「出ている字はゲームが持っているグリフそのもの」だが、
+    # そのフォントは練習用の作品 (リィンフォルト戦記) のもの。別の作品の文章を
+    # 入れると、□ も「訳文の ERROR」も**その作品の話ではなくなる** ——
+    # しかも画面は同じ顔で出る。proofread.py が #89 で同じことを断っている
+    same = lambda a, b: os.path.abspath(a) == os.path.abspath(b)
+    if not same(args.tsv, ap.get_default("tsv")) and same(args.font, ap.get_default("font")):
+        print(f"\n注意: 描いているのは**練習用の作品のフォント** "
+              f"({os.path.relpath(args.font, REPO)} の {len(data['glyphs']['chars'])} 字) です。"
+              "別の作品の文章を入れると、**□ になる字も「訳文の ERROR」も、"
+              "その作品の話ではありません** (練習用のフォントに無いだけ)")
+        print("  枠に入るか・変数で伸びないかは、そのまま見て構いません。"
+              "字が出るかどうかだけは、その作品の文字表で見てください:")
+        print("    python3 tools/proofread.py <その TSV> --font-chars <その作品の文字表>")
+        print("  僕の夏休み 2 なら docs/10 の「3. 校正にかける」。"
+              "`--font-chars` はこの画面の**判定**にも効きますが、"
+              "**描く字は変わりません** (絵は --font のフォントから取るため)")
     print("  ブラウザで開いてください (外部への通信は一切しません)")
     return 0
 
