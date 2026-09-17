@@ -753,6 +753,87 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                           "形で拾ったのに、フォントの中身を診ていない")
             self.assertIn("マスは", res.stdout, "マス数の知らせまで届いていない")
 
+    def test_the_two_sides_classify_the_same_bytes_the_same_way(self):
+        """**同じバイトを見て、画面と CLI が同じ性質を言うこと** (#205).
+
+        画面には「性質を地図にする」(`blockStats` / `classifyStats`) があり、
+        圧縮らしい / 波形らしい / ゼロ埋め まで言えます。CLI には**同じものが
+        無かった**ので、読めない `.msg` については 16 進を見せるだけでした。
+        16 バイトでは何も言えませんが、数 KB あればここまで言えます。
+
+        写したからには**ずれていないこと**を見ます。言葉を比べるのではなく、
+        **同じ材料を両方に通して、同じ答えになるか**を見ます (言葉だけそろえて
+        判定がずれる、を防ぐ)。
+        """
+        import json
+        import math
+        import random
+        import shutil
+        import subprocess
+        import boku2
+
+        if not shutil.which("node"):
+            self.skipTest("node がありません")
+
+        random.seed(9)
+        fixtures = {
+            "乱数": bytes(random.getrandbits(8) for _ in range(4096)),
+            "波形": bytes(int(127 + 100 * math.sin(i / 20)) & 0xFF for i in range(4096)),
+            "ゼロ": bytes(4096),
+            "英文": (b"The quick brown fox jumps over the lazy dog. " * 100)[:4096],
+            "本文の番号": b"".join(int.to_bytes(random.randint(1, 900), 2, "little")
+                                   for _ in range(2048)),
+            "詰め物混じり": (b"\x41" * 80) + bytes(4016),
+            # **小さい標本の乱数**。しきい値を固定値にすると、ここを取りこぼす
+            # (256 個しか見ていないと、完全な乱数でもエントロピーは 7.3 程度)
+            "小さい乱数": bytes(random.getrandbits(8) for _ in range(256)),
+        }
+        mine = {k: boku2.classify_block(boku2.block_stats(v)) for k, v in fixtures.items()}
+        # **標本数から期待値を出していること**の裏付け。固定のしきい値だと
+        # 小さい乱数を「不明」に落とす (docs/07 の「しきい値を固定値にしてはいけない」)
+        self.assertEqual(mine["小さい乱数"], "high",
+                         "小さい標本の乱数を取りこぼしている (しきい値が固定値になっていないか)")
+        # **1 種類しか出ないなら、比べても意味が無い** (#197 と同じ)
+        self.assertGreaterEqual(len(set(mine.values())), 3,
+                                f"材料が偏っていて答えが {set(mine.values())} しか出ない")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "in.json")
+            with open(data, "w", encoding="utf-8") as fh:
+                json.dump({k: list(v) for k, v in fixtures.items()}, fh)
+            script = os.path.join(tmp, "run.mjs")
+            with open(script, "w", encoding="utf-8") as fh:
+                fh.write(f'''
+import fs from "node:fs";
+const src = fs.readFileSync({json.dumps(os.path.join(REPO, "web", "app.js"))}, "utf8");
+/* blockStats / classifyStats は sniff の切り出し印の外にあるので、
+   その 2 つと、使っている SJIS_LEAD / SJIS_TRAIL だけを名前で切り出す */
+const take = (head, stop) => {{
+  const i = src.indexOf(head);
+  if (i < 0) throw new Error("見つからない: " + head);
+  const j = src.indexOf(stop, i + head.length);
+  return src.slice(i, j < 0 ? src.length : j);
+}};
+const code = take("const SJIS_LEAD =", "\\nfunction ")
+  + take("function blockStats(", "\\n/**")
+  + take("function classifyStats(", "\\n/**");
+const m = new Function(code + "\\nreturn {{ blockStats, classifyStats }};")();
+const input = JSON.parse(fs.readFileSync({json.dumps(data)}, "utf8"));
+const out = {{}};
+for (const [k, v] of Object.entries(input)) {{
+  out[k] = m.classifyStats(m.blockStats(Uint8Array.from(v)));
+}}
+console.log(JSON.stringify(out));
+''')
+            res = subprocess.run(["node", script], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0,
+                             f"画面側を動かせない:\n{res.stderr[-400:]}")
+            theirs = json.loads(res.stdout)
+
+        self.assertEqual(mine, theirs,
+                         "同じバイトを見て、画面と CLI が違う性質を言っています\n"
+                         f"  CLI : {mine}\n  画面: {theirs}")
+
     def test_the_unreadable_bytes_are_named_when_they_can_be(self):
         """**読めなかった 16 バイトから、分かることは言うこと** (#204).
 
@@ -803,6 +884,25 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
             self.assertTrue(line, "読めない .msg の行が出ていない")
             self.assertTrue("同じバイト" in line,
                             f"16 進を見せるだけで、分かることを言っていない: {line}")
+
+        # **先頭 4 バイトで分からないときは、広く見た性質を言うこと** (#205)
+        import random as _random
+        _random.seed(3)
+        blob = bytes(_random.getrandbits(8) for _ in range(4096))
+        with tempfile.TemporaryDirectory() as tmp:
+            idx = bytearray(b"DFI\0" + struct.pack("<III", 1, 0, 0))
+            idx += struct.pack("<HHIII", 0, 0, 0, 0, len(blob))
+            idx += b"a.msg\0"
+            with open(os.path.join(tmp, "BOKU2.IDX"), "wb") as fh:
+                fh.write(bytes(idx))
+            with open(os.path.join(tmp, "BOKU2.IMG"), "wb") as fh:
+                fh.write(blob)
+            out = io.StringIO()
+            boku2.check(tmp, out=out)
+            line = next((ln for ln in out.getvalue().splitlines()
+                         if "読めない .msg の例" in ln), "")
+            self.assertTrue("圧縮らしい" in line,
+                            f"広く見た性質を言っていない: {line}")
 
         # **画面と同じ一覧を持っていること** (#189 と同じ、片側だけ増えるのを防ぐ)
         with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:

@@ -26,6 +26,7 @@ Python にしたもの。画面で 1 つずつ確かめた後、全部をまと�
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import struct
@@ -233,6 +234,89 @@ MAGICS = (
 )
 
 
+def block_stats(whole: bytes) -> dict | None:
+    """バイトの性質を数える (#205)。**画面 (web/app.js の blockStats) と同じ数え方**.
+
+    末尾のゼロはセクタの詰め物なので除いて数える。ディスクイメージでは
+    「80 バイトのテキスト + 1968 バイトの詰め物」が普通にあり、そのまま平均を
+    取ると何もかもゼロ埋めに見えてしまう。
+    """
+    if not whole:
+        return None
+    end = len(whole)
+    while end > 0 and whole[end - 1] == 0:
+        end -= 1
+    pad_ratio = (len(whole) - end) / len(whole)
+    if end < 16:
+        zeros = whole.count(0)
+        return {"n": len(whole), "entropy": 0.0, "zero_ratio": zeros / len(whole),
+                "print_ratio": 0.0, "pair_ratio": 0.0, "mean_diff": 0.0,
+                "pad_ratio": pad_ratio, "scant": True}
+    b = whole[:end]
+    n = len(b)
+    hist = [0] * 256
+    zeros = printable = diff_sum = 0
+    for i, v in enumerate(b):
+        hist[v] += 1
+        if v == 0:
+            zeros += 1
+        if (0x20 <= v < 0x7F) or v in (0x0A, 0x0D, 0x09):
+            printable += 1
+        if i:
+            diff_sum += abs(v - b[i - 1])
+    entropy = 0.0
+    for count in hist:
+        if count:
+            pr = count / n
+            entropy -= pr * math.log2(pr)
+    pairs = i = 0
+    while i + 1 < n:
+        if (0x81 <= b[i] <= 0x9F or 0xE0 <= b[i] <= 0xEF) and 0x40 <= b[i + 1] <= 0xFC:
+            pairs += 1
+            i += 2
+            continue
+        i += 1
+    return {"n": n, "entropy": entropy, "pad_ratio": pad_ratio,
+            "zero_ratio": zeros / n, "print_ratio": printable / n,
+            "pair_ratio": pairs * 2 / n,
+            "mean_diff": diff_sum / (n - 1) if n > 1 else 0.0}
+
+
+#: `classify_block` が返す名前と、人に見せる言葉。
+#: **画面 (SNIFF_BY_CLASS) と同じ言葉**にしておくこと (#205)
+CLASS_LABELS = {
+    "jp": "日本語テキストらしい",
+    "ascii": "ASCII テキストらしい",
+    "zero": "ゼロ埋め",
+    "high": "圧縮らしい (乱数に近い並び)",
+    "wave": "波形らしい (ヘッダ無しの音声など)",
+    "tile": "",                    # 「不明」は言わない。黙るほうが親切
+}
+
+
+def classify_block(s: dict | None) -> str:
+    """バイトの性質から種類を 1 語で決める。**画面の classifyStats と同じ判定**.
+
+    エントロピーのしきい値を固定値にしないこと。256 種類の値を n 個しか
+    標本にしていないと、完全な乱数でもエントロピーは 8 に届かない。
+    標本数から「乱数だったときの期待値」を出して、それと比べる。
+    """
+    if not s:
+        return "zero"
+    if s["zero_ratio"] > 0.92:
+        return "zero"
+    if s["pair_ratio"] > 0.45:
+        return "jp"
+    if s["print_ratio"] > 0.85:
+        return "ascii"
+    if s["entropy"] > 4.5 and s["mean_diff"] < 24:
+        return "wave"
+    expected_random = 8 - 255 / (2 * s["n"] * math.log(2))
+    if s["n"] >= 192 and s["entropy"] > expected_random - 0.3:
+        return "high"
+    return "tile"
+
+
 def guess_kind(head: bytes) -> str:
     """読めなかったファイルの先頭から、**分かることだけ**を言う (#204).
 
@@ -260,18 +344,27 @@ def guess_kind(head: bytes) -> str:
     return ""
 
 
-def guess_kind_note(head: bytes) -> str:
+def guess_kind_note(head: bytes, body: bytes | None = None) -> str:
     """`guess_kind` を、報告に足せる形にする (分からなければ空文字).
 
     **別の形式の目印が出たときだけ**「名前と中身が違う」と言う。詰め物や
     ゼロ埋めは形式ではないので、そう言うと的外れになる。
+
+    先頭 4 バイトで分からないときは、**もっと広く見て性質を言う** (#205)。
+    16 バイトでは何も言えないが、数 KB あれば「圧縮らしい」「波形らしい」
+    までは言える (画面の「性質を地図にする」と同じ判定)。
+    それでも分からなければ黙る —— 「不明」と書いても何も足さない。
     """
     kind = guess_kind(head)
-    if not kind:
-        return ""
-    known = any(head.startswith(m) for m, _label in MAGICS)
-    return (f" ({kind}。**名前は .msg ですが、中身は別のもの**です)" if known
-            else f" ({kind})")
+    if kind:
+        known = any(head.startswith(m) for m, _label in MAGICS)
+        return (f" ({kind}。**名前は .msg ですが、中身は別のもの**です)" if known
+                else f" ({kind})")
+    if body:
+        label = CLASS_LABELS.get(classify_block(block_stats(body)), "")
+        if label:
+            return f" ({label})"
+    return ""
 
 
 def safe_parts(path: str) -> list[str]:
@@ -1412,7 +1505,7 @@ def check(folder: str, out=sys.stdout) -> int:
                 for _, _, _, text in text_rows_bytes(b, e["path"], None, alt=is_alt_break(e["path"])):
                     used_here.update(int(m) for m in re.findall(r"\[(\d+)\]", text))
             elif first_bad is None:
-                first_bad = (e, b[:16])
+                first_bad = (e, b[:16], b)
         if msgs:
             looked = min(MSG_CHECK_FILES, len(msgs))
             if msg_by_shape:
@@ -1448,9 +1541,9 @@ def check(folder: str, out=sys.stdout) -> int:
                         " (合わない分は位置だけで読んでいます)。この行ごと報告してください")
             if first_bad:
                 problems += 1
-                e, head = first_bad
+                e, head, body = first_bad
                 say(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト "
-                    f"{head.hex(' ').upper()}{guess_kind_note(head)}")
+                    f"{head.hex(' ').upper()}{guess_kind_note(head, body)}")
         # 文字表 (font.txt) がこのフォルダにあれば、その出来具合も診る (docs/10 の手順 3 の途中経過)
         font_txt = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "font.txt"), None)
         if font_txt:

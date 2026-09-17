@@ -1089,12 +1089,22 @@ function guessKind(head) {
   return "";
 }
 
-/** `guessKind` を、報告に足せる形にする (分からなければ空文字)。 */
-function guessKindNote(head) {
+/** `guessKind` を、報告に足せる形にする (分からなければ空文字)。
+ *
+ * 先頭 4 バイトで分からないときは、**もっと広く見て性質を言う** (#205)。
+ * 一括処理 (boku2.py の guess_kind_note) と同じ判定・同じ言葉。 */
+function guessKindNote(head, body) {
   const kind = guessKind(head);
-  if (!kind) return "";
-  const known = MAGICS.some((m) => m.bytes.every((v, i) => head[i] === v));
-  return known ? ` (${kind}。**名前は .msg ですが、中身は別のもの**です)` : ` (${kind})`;
+  if (kind) {
+    const known = MAGICS.some((m) => m.bytes.every((v, i) => head[i] === v));
+    return known ? ` (${kind}。**名前は .msg ですが、中身は別のもの**です)` : ` (${kind})`;
+  }
+  if (body && body.length) {
+    const label = (SNIFF_BY_CLASS[classifyStats(blockStats(body))] || {}).label || "";
+    /* 「不明 (タイル・表など)」は何も足さないので言わない (CLI と同じ) */
+    if (label && !label.startsWith("不明")) return ` (${label})`;
+  }
+  return "";
 }
 
 const SNIFF_BY_CLASS = {
@@ -3915,7 +3925,7 @@ async function buildIdxReport() {
       else if (r.lenField === "ng") lenNg++;
       const list = r.items ? r.items.filter((x) => x.codes && x.codes.length) : [];
       for (const c of bokuMsgUsed(list, isAltBreak(it.name))) usedHere.add(c);
-    } else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16) };
+    } else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16), body: bytes };
   }
   if (msgs.length) {
     const looked = Math.min(MSG_CHECK_FILES, msgs.length);
@@ -3953,7 +3963,8 @@ async function buildIdxReport() {
       /* 先頭から**分かることだけ**を足す (#204)。一括処理 (boku2.py の
          guess_kind / guess_kind_note) と同じ判定・同じ言葉 */
       lines.push(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト `
-        + [...badMsg.head].map((v) => hex(v, 2)).join(" ") + guessKindNote(badMsg.head));
+        + [...badMsg.head].map((v) => hex(v, 2)).join(" ")
+        + guessKindNote(badMsg.head, badMsg.body));
     }
     /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
     const glyphText = $("msgglyphs").value;
