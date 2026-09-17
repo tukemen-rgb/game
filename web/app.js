@@ -3558,6 +3558,32 @@ function buildReport() {
   $("repnote").textContent = `${$("reptext").value.length.toLocaleString("ja-JP")} 文字`;
 }
 
+/* ==================== ファイルに保存 ====================
+ *
+ * ここまで画面が作るもの (文字表・校正用の TSV) は、**手で貼って保存する**しか
+ * 道がなかった。貼り先がメモ帳や Excel だと、保存のときに「ANSI (cp932)」を選べて
+ * しまい、この作品の文字表にある `¥` `—` `♡` `︙` が黙って `?` に化ける (#199/#200)。
+ * 化けたことは道具が後から気づけるが、**気づかせる前に起きないほうがいい**。
+ * ここで書き出せば、中身は必ず UTF-8 のまま落ちる。
+ *
+ * BOM の有無は**渡す先で決まる**:
+ *   文字表 → 付けない。1 文字ずつが番号なので、BOM が 1 つ入ると番号が丸ごとずれる
+ *   TSV    → 付ける。Excel が UTF-8 だと分かるように (CLI の write_tsv と同じ utf-8-sig)
+ */
+function saveTextFile(name, text, opts) {
+  const bom = opts && opts.bom ? "\ufeff" : "";
+  const blob = new Blob([bom + text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return name;
+}
+
 $("repmake").addEventListener("click", buildReport);
 $("repcopy").addEventListener("click", async () => {
   const box = $("reptext");
@@ -6224,9 +6250,13 @@ $("msgparse").addEventListener("click", () => {
   btn.className = "btn";
   btn.id = "msgtsv";
   btn.textContent = "校正用の TSV をコピー";
+  const savebtn = document.createElement("button");
+  savebtn.className = "btn";
+  savebtn.id = "msgtsvsave";
+  savebtn.textContent = "TSV をファイルに保存";
   const stat = document.createElement("span");
   stat.className = "pos";
-  exp.append(btn, stat);
+  exp.append(btn, savebtn, stat);
   const ta = document.createElement("textarea");
   ta.id = "msgtsvtext";
   ta.spellcheck = false;
@@ -6247,6 +6277,14 @@ $("msgparse").addEventListener("click", () => {
         + "python3 tools/proofread.py <貼ったファイル> --font-chars <この作品の文字表>"
       : "コピーできませんでした。下の枠の中を選んで手でコピーしてください";
   });
+  /* 貼らずに落とす道 (#209)。Excel に貼って保存すると、列が崩れたり
+     ANSI で字が消えたりする。ここで落としたものは一括処理の書き出しと同じ形 */
+  savebtn.addEventListener("click", () => {
+    const name = (stem ? stem.replace(/[\\/:*?"<>|]/g, "_") : "msg") + ".tsv";
+    saveTextFile(name, ta.value.endsWith("\n") ? ta.value : ta.value + "\n", { bom: true });
+    stat.textContent = `${filled.length} 行を ${name} に保存しました (UTF-8)。`
+      + `この先: python3 tools/proofread.py ${name} --font-chars font_chars.txt`;
+  });
   box.append(exp, ta);
 });
 
@@ -6264,6 +6302,20 @@ $("msgcands").addEventListener("input", () => {
 });
 $("msgglyphs").addEventListener("input", () => {
   try { localStorage.setItem("boku2.glyphs", $("msgglyphs").value); } catch (err) { /* 同上 */ }
+});
+
+/* 文字表をそのままファイルにする。貼り直さないので、保存のときに字が化けない (#209) */
+$("glyphsave").addEventListener("click", () => {
+  const text = $("msgglyphs").value;
+  const note = $("glyphsavenote");
+  if (!text.trim()) {
+    note.textContent = "上の欄がまだ空です (「文字の番号を重ねる」か「文字表の下書きを作る」で埋めてから)";
+    return;
+  }
+  const chars = parseGlyphTable(text).length;
+  saveTextFile("font.txt", text.endsWith("\n") ? text : text + "\n", { bom: false });
+  note.textContent = `font.txt に ${chars} 字を保存しました (UTF-8)。`
+    + "この先: python3 tools/boku2.py fontlist font.txt -o font_chars.txt";
 });
 
 $("mapsplit").addEventListener("click", async () => {

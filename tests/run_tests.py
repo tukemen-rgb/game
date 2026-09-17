@@ -2507,6 +2507,8 @@ class TestTheDocMatchesTheButtons(unittest.TestCase):
         "文字表の下書きを作る",
         "マップの入れ物を切り分ける",
         "校正用の TSV をコピー",
+        "文字表をファイルに保存",
+        "TSV をファイルに保存",
     )
 
     @classmethod
@@ -2548,6 +2550,27 @@ class TestTheDocMatchesTheButtons(unittest.TestCase):
         for label in self.BUTTONS:
             self.assertIn(label, self.section,
                           f"docs/10 の「画面で確かめる」から「{label}」の案内が消えている")
+
+    def test_every_button_that_writes_a_file_is_in_the_list(self):
+        """**ファイルを書き出す釦は、必ずこの一覧を通すこと** (#209).
+
+        上の 3 つの検査は「一覧に載っている釦」しか見ないので、釦を足しただけでは
+        何も落ちない —— 実際 #209 で「ファイルに保存」を 2 つ足したとき、
+        検査は全部緑のままだった。**文書に一行も書かなくても通ってしまう。**
+
+        全部の釦を文書必須にすると練習用のタブまで巻き込むので、ここでは
+        **ファイルを書き出すもの**に絞る。押した結果が社長の手元に残る釦で、
+        どんな形で落ちるか (UTF-8 か、BOM が付くか) を知らずに使うと、
+        この一式がいちばん長く付き合ってきた事故 (#199/#200) がそのまま起きる。
+        """
+        labels = set(re.findall(r"<button[^>]*>([^<]{2,60})</button>", self.html))
+        labels |= set(re.findall(r'\.textContent\s*=\s*"([^"]{2,60})"', self.app))
+        writers = sorted(l for l in labels if "ファイルに保存" in l)
+        self.assertTrue(writers, "「ファイルに保存」の釦が 1 つも見つからない (拾い方が壊れた)")
+        for label in writers:
+            self.assertIn(label, self.BUTTONS,
+                          f"「{label}」は書き出す釦なのに一覧に無い "
+                          "(一覧に入れると docs/10 に書いたかどうかも見ます)")
 
     def test_the_list_is_not_empty_or_trivially_passing(self):
         """一覧が空だったり、短すぎる文言で素通しになっていないこと (#81 と同じ形)."""
@@ -4442,7 +4465,16 @@ class TestWebBuild(unittest.TestCase):
             self.assertEqual(bad, [], f"app.js:{lineno} に生の制御文字があります")
 
     def test_no_replacement_character_in_sources_or_build(self):
-        """置換文字 (U+FFFD) が生で入っていると公開先に弾かれる。エスケープで書く (#25 で踏んだ)."""
+        """置換文字 (U+FFFD) と BOM (U+FEFF) が生で入っていないこと.
+
+        置換文字は公開先に弾かれる (#25 で踏んだ)。**BOM のほうは #209 で踏んだ** ——
+        「TSV の先頭に BOM を付ける」を書くつもりで、ソースに**生の BOM**が入った。
+        生の BOM は目に見えず、ファイルの頭に来れば読み込みが壊れ、文字列の中なら
+        幅ゼロの字が 1 つ増える。どちらも**見て気づけない**ので、書くときは必ず
+        エスケープ (`\\ufeff`) にする。中身として BOM を持つのは
+        `exercises/qa_target.tsv` だけで、あれは「BOM 付きの練習材料」そのもの
+        (ここが見ているのはソースなので、はじめから入っていない)。
+        """
         import glob
         # **道具と検査も見る** (#199)。ここは web/ と docs/ しか見ていなかったので、
         # `tools/boku2.py` に生の置換文字を書いても誰も気づかなかった
@@ -4463,7 +4495,12 @@ class TestWebBuild(unittest.TestCase):
                 text = fh.read()
             self.assertTrue("\ufffd" not in text,
                             f"{os.path.relpath(path, REPO)} に生の置換文字があります")
-        self.assertNotIn("\ufffd", self._build(), "組み立てた HTML に置換文字があります")
+            self.assertTrue("\ufeff" not in text,
+                            f"{os.path.relpath(path, REPO)} に生の BOM があります "
+                            "(見えないので、\\ufeff と書くこと)")
+        built = self._build()
+        self.assertNotIn("\ufffd", built, "組み立てた HTML に置換文字があります")
+        self.assertNotIn("\ufeff", built, "組み立てた HTML に生の BOM があります")
 
 
 class TestArchiveFixture(unittest.TestCase):
