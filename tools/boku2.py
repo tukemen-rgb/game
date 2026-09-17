@@ -537,6 +537,32 @@ def map_rec_derived_count(b: bytes, rec: int) -> int | None:
     return None
 
 
+def map_extra_after_declared(b: bytes, rec: int, declared: int) -> int | None:
+    """先頭の数より**後ろにも中身のある項目**が並んでいないか (#217).
+
+    実物の入れ物は `[u32 0xE][u32 0x80] …` の形で、公開ソースの `unpackMap` は
+    先頭を種別 ID として読み捨て、**表の終わりは「最初の位置」**として回している。
+    こちらは先頭を項目数として読むので、0xE = 14 個で止まる。ところが
+    4〜0x80 には 8 バイト刻みで **15 項目**が並ぶ。最後の 1 個が空でなければ、
+    こちらの読み方は**黙って 1 個落とす**。
+
+    落ちる場合だけ、公開ソースの数え方に乗り換えるための関数。
+    数が増えても中身が空なら乗り換えない (乗り換えると 12 バイト刻みの入れ物を
+    8 バイト刻みと読み違える道が開く。#126 でそこを踏んでいる)。
+    """
+    derived = map_rec_derived_count(b, rec)
+    if derived is None or derived <= declared:
+        return None
+    for i in range(declared, derived):
+        at = 4 + i * rec
+        if at + 8 > len(b):
+            return None
+        off, length = struct.unpack_from("<II", b, at)
+        if off and length and off + length <= len(b):
+            return derived                      # 中身のある項目が後ろにある
+    return None
+
+
 def parse_map_rec(b: bytes) -> tuple[int, list[dict]] | None:
     """入れ物を読み、(項目の刻み, 部品の一覧) を返す。刻み 8 が普通、12 は日記・保存画面など."""
     if len(b) < 16:
@@ -544,6 +570,14 @@ def parse_map_rec(b: bytes) -> tuple[int, list[dict]] | None:
     declared = struct.unpack_from("<I", b, 0)[0]
     tries = [(rec, declared) for rec in (8, 12) if 1 <= declared <= 64]
     best = _best_map_rec(b, tries)
+    if best is not None:
+        # **落ちている部品が無いか見る** (#217)。先頭の数を項目数として読むのは
+        # こちらの解釈で、実物で動いている公開ソースは「最初の位置まで」で回す
+        more = map_extra_after_declared(b, best[1], declared)
+        if more is not None:
+            longer = _best_map_rec(b, [(best[1], more)])
+            if longer is not None and longer[0] > best[0]:
+                best = longer
     if best is None:
         # こちらの数え方では読めなかった。公開ソースの数え方で読み直す
         tries = [(rec, c) for rec in (8, 12)

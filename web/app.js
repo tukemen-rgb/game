@@ -5574,11 +5574,39 @@ function bokuMapDerivedCount(b, rec) {
   return null;
 }
 
+/** 先頭の数より**後ろにも中身のある項目**が並んでいないか (#217)。
+ *
+ *  実物の入れ物は `[u32 0xE][u32 0x80] …` の形で、公開ソースの `unpackMap` は
+ *  先頭を種別 ID として読み捨て、**表の終わりは「最初の位置」**として回す。
+ *  こちらは先頭を項目数として読むので 0xE = 14 個で止まるが、4〜0x80 には
+ *  8 バイト刻みで 15 項目並ぶ。最後が空でなければ**黙って 1 個落とす**。
+ *  落ちる場合だけ乗り換える (空なら乗り換えない。12 バイト刻みの読み違えを招く)
+ */
+function bokuMapExtraAfterDeclared(b, rec, declared) {
+  const derived = bokuMapDerivedCount(b, rec);
+  if (derived === null || derived <= declared) return null;
+  for (let i = declared; i < derived; i++) {
+    const at = 4 + i * rec;
+    if (at + 8 > b.length) return null;
+    const off = u32le(b, at), len = u32le(b, at + 4);
+    if (off && len && off + len <= b.length) return derived;
+  }
+  return null;
+}
+
 function parseBokuMap(b) {
   if (b.length < 16) return null;
   const declared = u32le(b, 0);
   const best = bestBokuMap(b, declared >= 1 && declared <= 64 ? [[8, declared], [12, declared]] : []);
-  if (best) return best;
+  if (best) {
+    /* 落ちている部品が無いか見る (#217) */
+    const more = bokuMapExtraAfterDeclared(b, best.rec, declared);
+    if (more !== null) {
+      const longer = bestBokuMap(b, [[best.rec, more]]);
+      if (longer && longer.filled > best.filled) return longer;
+    }
+    return best;
+  }
   /* こちらの数え方では読めなかった。公開ソースの数え方で読み直す */
   return bestBokuMap(b, [8, 12]
     .map((r) => [r, bokuMapDerivedCount(b, r)]).filter(([, c]) => c !== null));

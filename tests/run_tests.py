@@ -7473,6 +7473,36 @@ class TestAgainstThePublicSource(unittest.TestCase):
             _, ours = self.parts_ours(data)
             self.assertEqual(ours, theirs, f"先頭 u32 が {ident} の入れ物で食い違う")
 
+    def test_no_part_is_dropped_when_the_first_u32_is_smaller_than_the_table(self):
+        """**先頭の数で止めて部品を落とさないこと** (#217).
+
+        実物の見出しは `[u32 0xE][u32 0x80]` で、公開ソースの `unpackMap` は
+        先頭を種別 ID として読み捨て、表は **+4 から「最初の位置」まで**回す。
+        4〜0x80 に 8 バイト刻みで並ぶのは **15 項目**なので、0xE = 14 を項目数と
+        して読むこちらは、**15 個目が中身入りでも黙って落とす**。
+        落ちたことは誰にも分からない (残りの部品はちゃんと出るので)。
+
+        ここでは向こうの `unpackMap` を実際に走らせて、同じ数になることを見る。
+        """
+        unpack_map = self.their_unpack_map()
+        n, head = 15, 0x80
+        parts = [bytes([0x50 + i]) * 64 for i in range(n)]
+        out, off = bytearray(struct.pack("<I", 0xE)), head
+        for p in parts:
+            out += struct.pack("<II", off, len(p))
+            off += 64
+        out += b"\0" * (head - len(out))
+        data = bytes(out) + b"".join(parts)
+
+        theirs = self.parts_theirs(unpack_map, data, 1)
+        # **材料が弱くないこと**: 先頭の数 (14) は本当に項目数より小さい
+        self.assertLess(struct.unpack_from("<I", data, 0)[0], n, "材料が弱い")
+        self.assertEqual(len(theirs), n,
+                         f"前提が崩れた: 公開ソースが {len(theirs)} 個と読む")
+        _, ours = self.parts_ours(data)
+        self.assertEqual(sorted(ours), sorted(theirs),
+                         f"部品を落としている (こちら {len(ours)} 個 / 向こう {len(theirs)} 個)")
+
 
 class TestTheCitationsPointAtSomethingReal(unittest.TestCase):
     """文書が挙げる**出典そのもの**を、公開ソースと突き合わせる (#165).

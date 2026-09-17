@@ -178,6 +178,32 @@ if (!mp12b || mp12b.rec !== 12 || mp12b.items.filter((it) => it.len).length !== 
     fail(`控えの数え方が (0x80-4)/8 になっていない: ${m.bokuMapDerivedCount(mkIdent(0xE), 8)}`);
   }
 }
+
+
+/* 先頭の数で止めると**部品を落とす**形 (#217)。
+   実物の見出しは [u32 0xE][u32 0x80] で、4〜0x80 には 8 バイト刻みで 15 項目並ぶ。
+   0xE = 14 を項目数として読むと、15 個目が中身入りでも黙って落ちる。
+   公開ソースの unpackMap は「表の終わり = 最初の位置」で回すので落ちない */
+{
+  const n = 15, head = 0x80;
+  const parts = [];
+  for (let i = 0; i < n; i++) parts.push(new Uint8Array(64).fill(0x50 + i));
+  const out = new Uint8Array(head + n * 64);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, 0xE, true);                       /* 種別 ID。項目数ではない */
+  let off = head;
+  parts.forEach((p, i) => {
+    dv.setUint32(4 + i * 8, off, true);
+    dv.setUint32(8 + i * 8, p.length, true);
+    out.set(p, off);
+    off += 64;
+  });
+  const got = m.parseBokuMap(out);
+  const filled = got ? got.items.filter((it) => it.len).length : 0;
+  if (filled !== n) fail(`先頭の数で止めて部品を落としている (${filled}/${n} 個)`);
+  /* 材料が弱くないこと: 先頭の数 (14) で止めれば本当に足りなくなる形であること */
+  if (dv.getUint32(0, true) >= n) fail("材料が弱い (先頭の数が項目数と同じでは落ちようがない)");
+}
 if (m.parseBokuMap(msg8)) fail(".msg を入れ物と誤認した");
 if (m.parseBokuMap(sjis)) fail("テキストを入れ物と誤認した");
 
