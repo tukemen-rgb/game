@@ -7,12 +7,15 @@
 丸ごとずれる —— 出てくる字は日本語のままなので、目では気づけない (#158 と同じ型)。
 
 練習データ (`make_boku2_sample.py`) は #169 からフォントを 2 枚に分けてある。
-ここで見るのは 4 つ:
+ここで見るのは 5 つ:
 
 1. `bk_font.tms` を開くと、**切り替えの釦が 2 つ以上**出るか
 2. 1 枚目の左上が **0** 番か
 3. 2 枚目に切り替えると、左上が **1 枚目のマス数** から始まるか (0 に戻らないか)
 4. 2 枚目の案内が、**前の頁の続きだと言う**か
+5. 緑の枠が **読むたびに足されて**いき、**どこまでの本文の分か**を言うか (#233)。
+   1 ファイルごとに入れ替えていたので、緑は「直前に読んだ 1 本の分」でしかないのに
+   「ここだけ書き出せば読めます」と言っていた。書き写しの主戦場での言い間違い
 """
 import asyncio
 import os
@@ -122,6 +125,58 @@ async def main() -> int:
             note = re.sub(r"\s+", " ", (await page.text_content(".tim2body .hint")) or "")
             if "前の頁の続き" not in note:
                 errors.append(f"2 枚目が前の頁の続きだと言っていない: {note[:120]!r}")
+
+        # 5. 緑の枠は読むたびに足していき、どこまでの分かを言う (#233)
+        async def green() -> tuple:
+            notes = await page.eval_on_selector_all(
+                ".tim2body .hint, .tim2body .warnbar", "e => e.map(x => x.textContent)")
+            note = re.sub(r"\s+", " ", " ".join(notes))
+            m = re.search(r"緑の枠は、(.+?)で使われている (\d+) 字", note)
+            return (m.group(1), int(m.group(2))) if m else (None, 0)
+
+        async def read_msg(name: str):
+            await select_file(page, name, name)
+            await page.click('[data-tab="format"]')
+            await page.click("#msgparse")
+            await page.wait_for_timeout(400)
+
+        async def show_grid():
+            await select_file(page, "font", "bk_font.tms")
+            await page.click('[data-tab="format"]')
+            await page.wait_for_selector("#formatbox canvas", timeout=30000)
+            if await page.get_attribute("#tim2grid", "aria-pressed") != "true":
+                await page.click("#tim2grid")
+            await page.wait_for_timeout(700)
+
+        await read_msg("system.msg")
+        await show_grid()
+        whose1, n1 = await green()
+        print(f"  1 本読んだあと: {whose1!r} {n1} 字")
+        if not n1:
+            errors.append("1 本読んでも緑の枠が出ていない (材料が弱い)")
+        if whose1 and "ここまでに読んだ本文" not in whose1:
+            errors.append(f"どこまでの分か言っていない: {whose1!r}")
+
+        await read_msg("namemsg.msg")
+        await show_grid()
+        whose2, n2 = await green()
+        print(f"  2 本読んだあと: {whose2!r} {n2} 字")
+        if n2 <= n1:
+            errors.append(f"2 本目を読んでも緑が増えていない ({n1} → {n2})。"
+                          "入れ替えているなら、書き写した所が消える")
+
+        # 報告用の要約を一度作ると、吸い出しぜんぶの分が緑になる
+        await page.click('[data-tab="index"]')
+        await page.click("#idxreport")
+        await page.wait_for_timeout(1500)
+        await show_grid()
+        whose3, n3 = await green()
+        print(f"  要約のあと: {whose3!r} {n3} 字")
+        if n3 <= n2:
+            errors.append(f"要約を作っても緑が増えていない ({n2} → {n3})。"
+                          "入れ物と MAP の会話の分が入っていない")
+        if whose3 != "この吸い出しの本文ぜんぶ":
+            errors.append(f"ぜんぶの分だと言っていない: {whose3!r}")
 
         await browser.close()
 

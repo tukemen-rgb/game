@@ -2191,6 +2191,13 @@ const state = {
   elfBuf: null,     /* そこから先の切り出し。逆アセンブルはこれを見る */
   disAddr: null,    /* 逆アセンブルを表示している仮想アドレス */
   disHist: [],      /* 飛んできた履歴 (戻る用) */
+  /* フォント画像の目盛りで緑にする文字番号。**読むたびに足していく** (#233)。
+     1 ファイルごとに入れ替えていたので、緑は「直前に読んだ 1 本の分」しかなく、
+     文字表づくりの主戦場で「ここだけ書き出せば読めます」と言っていた */
+  usedGlyphs: new Set(),
+  usedGlyphFiles: 0,   /* 何本の本文を足したか */
+  usedGlyphsWhole: false,  /* 報告用の要約で、吸い出しぜんぶの分を入れたか */
+  missingGlyphs: new Set(),
   marks: [],        /* マップに重ねる印 (見つけた構造の位置) */
   lit: -1,          /* 強調中の印 */
   showMarks: true,
@@ -2249,6 +2256,11 @@ async function openFiles(files) {
   state.files = list;
   state.entries = [];
   state.iso = null;
+  /* 別の吸い出しを読ませたら、貯めた文字番号は前のデータのもの。持ち越さない */
+  state.usedGlyphs = new Set();
+  state.usedGlyphFiles = 0;
+  state.usedGlyphsWhole = false;
+  state.missingGlyphs = new Set();
 
   for (const file of list) {
     /* どのファイルもディスクイメージかどうかを試す。読むのは 2KB だけなので安い */
@@ -4192,6 +4204,11 @@ async function buildIdxReport() {
     for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) boxUsed.add(c);
   }
   const usedHere = new Set([...msgUsed, ...boxUsed, ...mapScan.used]);
+  /* **目盛りの緑に、吸い出しぜんぶの分を入れる** (#233)。ここでしか全部の番号は
+     分からないので、要約を一度作れば、フォント画像の上で「本文が要る字」が
+     まとめて見える。読んだ .msg 1 本ぶんの緑で書き写しを終える事故を防ぐ */
+  for (const c of usedHere) state.usedGlyphs.add(c);
+  state.usedGlyphsWhole = true;
   const usedBy = [`.msg ${msgUsed.size}`, `入れ物 ${boxUsed.size}`,
                   maps.length ? `MAP の会話 ${mapScan.used.size}` : "MAP は診ていない"];
   /* **使われている文字番号の最大**は、実物で最初に出る大事な数 (#230)。
@@ -4206,6 +4223,7 @@ async function buildIdxReport() {
   const glyphs = glyphText.trim() ? parseGlyphTable(glyphText) : null;
   if (glyphs) {
     const missing = [...usedHere].filter((c) => glyphs[c] === undefined || glyphs[c] === null).sort((a, b) => a - b);
+    state.missingGlyphs = new Set([...state.usedGlyphs].filter((c) => glyphs[c] === undefined || glyphs[c] === null));
     const verdict = bokuGlyphVerdict(true, usedHere.size, missing.length);
     lines.push(`[文字表] 貼ってある文字表: ${glyphs.filter((g) => g !== undefined && g !== null).length} 字 / 本文で使われている番号 `
       + `${usedHere.size} 種 (${usedBy.join(" / ")}) のうち文字表に無い ${missing.length} 種`
@@ -6439,10 +6457,18 @@ $("msgparse").addEventListener("click", () => {
     }
   }
   const used = bokuMsgUsed(filled, alt);
-  state.usedGlyphs = new Set(used);                            /* TIM2 の目盛りで強調する */
-  /* 文字表に無い番号 (本文に [番号] のまま残るもの)。目盛りでは橙で示し、まずそこを書き出せばよい */
+  /* **入れ替えずに足す** (#233)。文字表は吸い出しぜんぶで 1 枚作るものなので、
+     前に読んだファイルの分が消えると、書き写した所が緑から外れてしまう */
+  if (used.length) {
+    const before = state.usedGlyphs.size;
+    for (const c of used) state.usedGlyphs.add(c);
+    if (state.usedGlyphs.size > before || !state.usedGlyphFiles) state.usedGlyphFiles++;
+  }
+  /* 文字表に無い番号 (本文に [番号] のまま残るもの)。目盛りでは橙で示す */
+  state.missingGlyphs = new Set(glyphs
+    ? [...state.usedGlyphs].filter((c) => glyphs[c] === undefined || glyphs[c] === null)
+    : []);
   const missing = glyphs ? used.filter((c) => glyphs[c] === undefined || glyphs[c] === null) : [];
-  state.missingGlyphs = new Set(missing);
   note.textContent = tablesInfo + `${r.count} 件` + (r.stride ? ` (位置表は ${r.stride} バイト刻み)` : "") + ` · 本文あり ${filled.length} 件`
     + ` · 文字番号の最大 ${maxCode}`
     /* 数字だけ出すのは、出さないより悪い (#96)。**文字表に収まらない**ときだけは、
@@ -6801,7 +6827,7 @@ function fontGridMismatch(cols, width, cell) {
  * 残るのを見て **自分の書き写しを疑う**。原因は別の所にある。
  *
  * @param cells このマス目で番号を振れるマスの数 (列 × 行)
- * @param maxUsed 直前に読んだ .msg が使っている最大の番号 (無ければ -1)
+ * @param maxUsed ここまでに読んだ本文が使っている最大の番号 (無ければ -1)
  * @returns {string} 足りないときの説明。足りていれば空文字
  */
 function fontPageShortfall(cells, maxUsed) {
@@ -6811,7 +6837,7 @@ function fontPageShortfall(cells, maxUsed) {
     + `**この 1 枚では ${rest} 字ぶん足りません**。残りは別の画像にあります`
     + ` (別のファイルか、同じファイルの別の位置)。`;
   if (maxUsed >= cells) {
-    s += `直前に読んだ .msg は番号 ${maxUsed} まで使っていて、この画像の番号は ${cells - 1} までです。`
+    s += `ここまでに読んだ本文は番号 ${maxUsed} まで使っていて、この画像の番号は ${cells - 1} までです。`
       + `この画像を全部書き写しても、その先は [番号] のまま残ります —— 書き写しの間違いではありません。`;
   } else {
     s += `まずこの 1 枚を書き写して構いません。本文に残る大きい番号は、次の画像の分です。`;
@@ -7088,7 +7114,14 @@ function renderTim2(b, at, firstNum = 0) {
       hint.textContent = (off ? `⚠ ${off} ` : "")
         + `1 行 ${cols} 字で番号を振っています。番号 = .msg の文字番号。左上の ${firstNum} から順に文字を書き出して、.msg 読みの文字表に貼ってください。`
         + (firstNum ? ` (この画像は ${firstNum} 番から始まります —— 前の頁の続きです)` : "")
-        + (usedSet && usedSet.size ? ` 緑の枠は、直前に読んだ .msg で使われている ${usedSet.size} 字 (まずここだけ書き出せば読めます)。` : "")
+        /* **どこまでの本文の分か**を必ず言う (#233)。「ここだけ書き出せば読めます」と
+           言っていたが、緑は直前に読んだ 1 本の分でしかなかった */
+        + (usedSet && usedSet.size
+          ? ` 緑の枠は、${state.usedGlyphsWhole ? "この吸い出しの本文ぜんぶ" : `ここまでに読んだ本文 ${state.usedGlyphFiles} 本`}`
+            + `で使われている ${usedSet.size} 字。`
+            + (state.usedGlyphsWhole ? "" : "**まだ読んでいないファイルの分は入っていません** —— "
+              + "「索引ファイル」タブの「報告用の要約を作る」を一度押すと、吸い出しぜんぶの分が緑になります。")
+          : "")
         + (missingSet && missingSet.size ? ` 橙の枠は、そのうち文字表にまだ無い ${missingSet.size} 字 (本文で [番号] のまま残る所)。` : "")
         + (short ? ` ⚠ ${short}` : "");
       hint.className = off || short ? "hint warnbar" : "hint";
