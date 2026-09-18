@@ -1251,6 +1251,14 @@ def unpicked_nearby(given: list[str]) -> list[str]:
     return [p for p in expand_inputs([root]) if os.path.abspath(p) not in had]
 
 
+def unpicked_note(missed: list[str]) -> str:
+    """`unpicked_nearby` の結果を 1 行にする。**`text` と `used` で同じ言葉**にする (#232)."""
+    names = ", ".join(os.path.basename(f) for f in missed[:5])
+    return (f"→ 同じ場所に、**渡されなかった**読めるファイルが {len(missed)} 個"
+            f"あります ({names}{' …' if len(missed) > 5 else ''})。"
+            "ファイルを並べるより、**フォルダごと渡す**と全部拾います")
+
+
 def expand_inputs(paths: list[str]) -> list[str]:
     """引数のフォルダを中まで辿り、会話の入ったファイルだけを拾う.
 
@@ -2323,12 +2331,10 @@ def run(args) -> int:
                 return 1
         missed = unpicked_nearby(given)
         if missed:
-            names = ", ".join(os.path.basename(f) for f in missed[:5])
-            print(f"→ 同じ場所に、**渡されなかった**読めるファイルが {len(missed)} 個 "
-                  f"あります ({names}{' …' if len(missed) > 5 else ''})。"
-                  f"ファイルを並べるより、**フォルダごと渡す**と全部拾います", file=sys.stderr)
+            print(unpicked_note(missed), file=sys.stderr)
     elif args.cmd == "used":
-        used = used_codes(expand_patterns(args.files))
+        given = expand_patterns(args.files)
+        used = used_codes(given)
         if not used:
             # 0 種を「この番号だけ書き出せばよい」と言うと、**書き出す番号が無い**のに
             # 手順が進んだように読める。読めるファイルが無かっただけなので、そう言う (#123)
@@ -2337,8 +2343,22 @@ def run(args) -> int:
                   "先に unpack / maps を回すか、boku2.py check で診てください", file=sys.stderr)
             return 1
         print(" ".join(str(u) for u in used))
-        print(f"# {len(used)} 種 (最大 {used[-1]})。フォント画像のこの番号だけ書き出せば本文は読める", file=sys.stderr)
-        print(glyph_range_note(used[-1]).strip(), file=sys.stderr)
+        # **`text` にあって `used` に無かった見張り** (#232)。ファイルを並べて渡すと
+        # 深い所の `.msg` と入れ物が丸ごと落ちる。練習データでは 68 種が 15 種になり、
+        # いちばん大きい番号も 165 が 87 になった。それでも今までは
+        # 「この番号だけ書き出せば本文は読める」と言い切っていた —— **文字表を
+        # 作る手順はこの数を見ている**ので、そのまま足りない文字表ができあがる
+        missed = unpicked_nearby(given)
+        print(f"# {len(used)} 種 (最大 {used[-1]})。"
+              + ("**渡したファイルの中だけ**の数です"
+                 if missed else "フォント画像のこの番号だけ書き出せば本文は読める"),
+              file=sys.stderr)
+        if missed:
+            print(unpicked_note(missed), file=sys.stderr)
+            print("   このままだと書き写す番号が足りません。いちばん大きい番号も変わるので、"
+                  "**文字表の 2 枚目が要るかどうかも決まりません**", file=sys.stderr)
+        else:
+            print(glyph_range_note(used[-1]).strip(), file=sys.stderr)
     elif args.cmd == "table":
         glyphs = load_font(args.font) or []
         mapping = glyph_table_mapping(glyphs)

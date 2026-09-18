@@ -2651,6 +2651,11 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
     ONLY_CLI = {
         "索引と本体が揃っていません":
             "画面は 2 つのファイルを選ばせるので、揃っていない状態そのものが作れない",
+        "同じ場所に":
+            "`text` / `used` にファイルを並べて渡したときの知らせ (#160/#232)。"
+            "画面はファイルを 1 つずつ選ぶ作りなので、並べて渡す状態そのものが作れない。"
+            "画面側の同じ穴 (1 ファイル分の数を全部の数に見せる) は、"
+            "「いま開いているファイルの分だけ」と書いて塞いだ",
     }
 
     def test_every_judgement_exists_on_both_sides(self):
@@ -6464,6 +6469,7 @@ class TestDocs(unittest.TestCase):
             (r"文字表は全部で (\d+) 字", boku2.FONT_GLYPHS, "文字表の字数"),
             (r"1 行 (\d+) 字", boku2.FONT_COLS, "1 行の字数"),
             (r"刻み (\d+) ドット", boku2.FONT_CELL, "文字の刻み"),
+            (r"先頭 (\d+) 件の `\.msg`", boku2.MSG_CHECK_FILES, "check が中身まで開く .msg の数"),
             (r"ヘッドレス (\d+)", len(e2e.CHECKS), "ヘッドレスの検査"),
             (r"テスト (\d+) 件", tests_here, "Python の検査"),
         ]
@@ -11446,6 +11452,65 @@ class TestTextSaysWhatItDidNotTake(unittest.TestCase):
                 self.assertEqual(res.returncode, 0, res.stderr[-300:])
                 self.assertFalse("渡されなかった" in res.stderr,
                                  f"{what}を渡したのに知らせが出た: {res.stderr[-300:]!r}")
+
+    def test_used_warns_the_same_way_as_text(self):
+        """**`used` にも同じ見張りを付ける** (#232).
+
+        `text` は #160 から「渡されなかったファイルが N 個」と言っていましたが、
+        `used` は言っていませんでした。**文字表を作る手順が見ているのは `used` の
+        側**です (docs/10 の手順 3)。ファイルを並べて渡すと、練習データですら
+        68 種が 15 種に、いちばん大きい番号が 165 から 87 になります。それでも
+        `used` は「フォント画像のこの番号だけ書き出せば本文は読める」と
+        言い切っていた —— **足りない文字表がそのままできあがる**形です。
+        """
+        import glob
+        import re
+        import subprocess
+
+        def run_used(args):
+            return subprocess.run([sys.executable, "tools/boku2.py", "used", *args],
+                                  capture_output=True, text=True, cwd=REPO)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.unpacked(tmp)
+            listed = sorted(glob.glob(os.path.join(out, "system", "*.msg")))
+            self.assertTrue(listed, "並べる材料が無い (題材が変わった)")
+
+            whole = run_used([out])
+            part = run_used(listed)
+            self.assertEqual(whole.returncode, 0, whole.stderr[-300:])
+            self.assertEqual(part.returncode, 0, part.stderr[-300:])
+
+            def kinds(res):
+                m = re.search(r"# (\d+) 種 \(最大 (\d+)\)", res.stderr)
+                self.assertTrue(m, f"種と最大が出ていない: {res.stderr[-300:]!r}")
+                return int(m.group(1)), int(m.group(2))
+
+            all_kinds, all_top = kinds(whole)
+            part_kinds, part_top = kinds(part)
+            # **材料が弱くないこと。** 並べても同じ数になるなら、何を言っても検査は通る
+            self.assertGreater(all_kinds, part_kinds,
+                               "材料が弱い: 並べて渡しても種類が減らない")
+            self.assertGreater(all_top, part_top,
+                               "材料が弱い: 並べて渡してもいちばん大きい番号が変わらない")
+
+            # 1. 並べて渡したら、知らせと**言い方の断り**が出ること
+            self.assertTrue("渡されなかった" in part.stderr,
+                            f"used が渡し損ねを知らせていない: {part.stderr[-400:]!r}")
+            self.assertTrue("渡したファイルの中だけ" in part.stderr,
+                            f"部分的な数だと断っていない: {part.stderr[-400:]!r}")
+            # 2. **間違った太鼓判を押さないこと。**「この番号だけ書き出せば読める」も、
+            #    「2 枚目は要りません」も、部分的な数の上では言ってはいけない
+            for lie in ("この番号だけ書き出せば本文は読める", "2 枚目の画像は要りません"):
+                self.assertFalse(lie in part.stderr,
+                                 f"部分的な数で「{lie}」と言っている: {part.stderr[-400:]!r}")
+            # 3. フォルダを渡したら黙って、今までどおり言い切ること
+            self.assertFalse("渡されなかった" in whole.stderr,
+                             f"フォルダを渡したのに知らせが出た: {whole.stderr[-300:]!r}")
+            self.assertTrue("この番号だけ書き出せば本文は読める" in whole.stderr,
+                            f"言い切っていない: {whole.stderr[-300:]!r}")
+            self.assertTrue("使われている文字番号の最大は" in whole.stderr,
+                            f"最大の意味を言っていない: {whole.stderr[-300:]!r}")
 
     def test_the_search_does_not_wander_outside(self):
         """探す範囲が、渡したファイルの共通の親より**上に登らない**こと.

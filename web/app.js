@@ -6460,11 +6460,17 @@ $("msgparse").addEventListener("click", () => {
      文字を埋めて上の欄に貼れば、その番号だけの文字表として読める */
   const usedBox = document.createElement("details");
   const sum = document.createElement("summary");
-  sum.textContent = `使われている文字番号 ${used.length} 種 (フォント画像からはこれだけ書き出せば足りる)`;
+  /* 「これだけ書き出せば足りる」と言っていたが、**いま開いているファイルの分だけ**
+     の数だった (#232)。練習データの system.msg では 15 種、吸い出しぜんぶでは 68 種。
+     そのまま書き写すと文字表が足りないまま出来上がる。CLI の used も同じ穴だった */
+  sum.textContent = `使われている文字番号 ${used.length} 種 (**いま開いているファイルの分だけ**)`;
   const usedHint = document.createElement("p");
   usedHint.className = "hint";
   usedHint.textContent = "下の雛形をコピーし、= の後ろにフォント画像のその番号の文字を書いて、上の欄に貼ってください。"
-    + "番号の無い行は飛ばして構いません。まだ書いていない番号は [番号] のまま出ます。";
+    + "番号の無い行は飛ばして構いません。まだ書いていない番号は [番号] のまま出ます。"
+    + "この数は**このファイルの分だけ**です。本文ぜんぶで何種要るかは、"
+    + "「索引ファイル」タブの「報告用の要約を作る」に出ます "
+    + "(.msg・入れ物・MAP の会話を合わせた数)。ここだけ書き写して終わりにしないでください。";
   const usedTa = document.createElement("textarea");
   usedTa.id = "msgused";
   usedTa.readOnly = true; usedTa.spellcheck = false; usedTa.rows = 4;
