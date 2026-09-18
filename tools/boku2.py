@@ -1434,6 +1434,68 @@ def unpicked_note(missed: list[str]) -> str:
             "ファイルを並べるより、**フォルダごと渡す**と全部拾います")
 
 
+#: `unpack` が名前を付けられなかったときの名前 (`#0` `#12`)。`~2` が付くこともある
+NUMBERED_NAME = re.compile(r"#\d+(~\d+)?$")
+
+
+def files_present(paths: list[str]) -> tuple[int, int, list[str]]:
+    """渡された場所に**実際にあるファイル**の数と、そのうち名前が番号だけの数 (#248).
+
+    @returns (ファイル数, 番号だけの名前の数, 名前の例 3 つ)
+    """
+    total = numbered = 0
+    shown: list[str] = []
+    for p in paths:
+        names = []
+        if os.path.isdir(p):
+            for root, dirs, fs in os.walk(p):
+                dirs.sort()
+                names += sorted(fs)
+        elif os.path.exists(p):
+            names = [os.path.basename(p)]
+        for f in names:
+            total += 1
+            if NUMBERED_NAME.fullmatch(f):
+                numbered += 1
+            if len(shown) < 3:
+                shown.append(f)
+    return total, numbered, shown
+
+
+def nothing_picked_note(given: list[str]) -> list[str]:
+    """名前で 1 つも拾えなかったときに言うこと。**`text` と `used` で同じ言葉** (#248).
+
+    今までは「先に `unpack` / `maps` を回してください」の一点張りだった。ところが
+    **社長の実物はまさにこの形**で、`unpack` は正しく切り分けたのに名前が
+    `#0 #1 …` になる (#1・#3)。`.msg` でも `1.bin` でも入れ物の名前でもないので、
+    名前では 1 つも拾えない。そこへ「先に `unpack` を回せ」と言うのは、
+    **いまやったことをもう一度やらせる**ということ —— 原因も直し方も違う。
+    """
+    total, numbered, shown = files_present(given)
+    eg = ", ".join(shown) + (" …" if total > len(shown) else "")
+    if not total:
+        return ["   指定した場所に読めるファイルがありません。"
+                "先に unpack (索引の切り分け) と maps (入れ物の切り分け) を回してください:",
+                "     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/",
+                "     python3 tools/boku2.py maps 実物/MAP -o OUT/maps",
+                "   そのうえで OUT を指定します: "
+                "python3 tools/boku2.py text OUT -f font.txt -o all.tsv"]
+    if numbered:
+        return [f"   ファイルは {total} 個ありましたが、**{numbered} 個の名前が番号だけ** "
+                f"({eg}) です。`.msg` でも `1.bin` でも入れ物の名前でも"
+                "ないので、**名前では 1 つも拾えません**。索引の名前の置き場の"
+                "読み取りが外れています (切り分けそのものは合っているかもしれません)。",
+                "   `BOKU2.CRC` があれば、そちらの名前を当てて切り分け直せます:",
+                "     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/ "
+                "--names-from-crc 実物/BOKU2.CRC",
+                "   それでも名前が付かないときは、"
+                "python3 tools/boku2.py check 実物/ の出力ごと報告してください"]
+    return [f"   ファイルは {total} 個ありましたが、`.msg` でも `1.bin` でも"
+            f"入れ物の名前 ({', '.join(TEXT_CONTAINERS)}) でもないので拾いません "
+            f"({eg})。場所が違うかもしれません。",
+            "   python3 tools/boku2.py check 実物/ で、どの段で外れているかを診てください"]
+
+
 def expand_inputs(paths: list[str]) -> list[str]:
     """引数のフォルダを中まで辿り、会話の入ったファイルだけを拾う.
 
@@ -2642,11 +2704,9 @@ def run(args) -> int:
             # 素人が踏むのは「unpack / maps を先に回していない」か「場所違い」(#77)
             print(f"→ 文言が 1 行も見つかりませんでした (見たファイル {len(files)} 個)")
             if not files:
-                print("   指定した場所に読めるファイルがありません。"
-                    "先に unpack (索引の切り分け) と maps (入れ物の切り分け) を回してください:")
-                print("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/")
-                print("     python3 tools/boku2.py maps 実物/MAP -o OUT/maps")
-                print("   そのうえで OUT を指定します: python3 tools/boku2.py text OUT -f font.txt -o all.tsv")
+                # **「無い」のか「名前で拾えない」のかを区別する** (#248)
+                for line in nothing_picked_note(given):
+                    print(line)
             else:
                 print("   ファイルはありましたが、どれも .msg / 入れ物の部品として読めませんでした。"
                     "python3 tools/boku2.py check 実物/ で、どの段で外れているかを診てください")
@@ -2722,8 +2782,14 @@ def run(args) -> int:
             # 0 種を「この番号だけ書き出せばよい」と言うと、**書き出す番号が無い**のに
             # 手順が進んだように読める。読めるファイルが無かっただけなので、そう言う (#123)
             print("→ 使われている文字番号が 1 つも見つかりませんでした", file=sys.stderr)
-            print("   指定したファイルが .msg として読めていません。"
-                  "先に unpack / maps を回すか、boku2.py check で診てください", file=sys.stderr)
+            # **`text` と同じ言葉で言う** (#248)。ここも「先に unpack を回せ」の
+            # 一点張りで、名前が番号だけの吸い出し (社長の実物) では見当違いだった
+            if expand_inputs(given):
+                print("   渡したファイルが .msg として読めていません。"
+                      "boku2.py check で診てください", file=sys.stderr)
+            else:
+                for line in nothing_picked_note(given):
+                    print(line, file=sys.stderr)
             return 1
         print(" ".join(str(u) for u in used))
         # **`text` にあって `used` に無かった見張り** (#232)。ファイルを並べて渡すと

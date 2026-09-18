@@ -6681,6 +6681,103 @@ class TestTheSuffixWeAddDoesNotHideTheFile(unittest.TestCase):
         self.assertEqual(json.loads(res.stdout), [boku2.plain_name(n) for n in names])
 
 
+class TestWhenNothingIsPickedTheAdviceFitsTheCause(unittest.TestCase):
+    """**「1 行も見つかりません」の次の 1 行が、原因に合っていること** (#248).
+
+    今までは「先に `unpack` / `maps` を回してください」の一点張りだった。ところが
+    **社長の実物はまさにこの形**で (#1・#3)、`unpack` は正しく切り分けたのに
+    名前が `#0 #1 …` になる。そこへ「先に `unpack` を回せ」と言うのは、
+    **いまやったことをもう一度やらせる**ということ。
+    """
+
+    @staticmethod
+    def unpack_with_no_names(tmp: str) -> str:
+        import boku2
+        import make_boku2_sample
+        folder = os.path.join(tmp, "S")
+        make_boku2_sample.build_sample(folder)
+        make_boku2_sample.damage(folder, "allnames")
+        out = os.path.join(tmp, "OUT")
+        with contextlib.redirect_stderr(io.StringIO()):
+            boku2.unpack(os.path.join(folder, "BOKU2.IDX"),
+                         os.path.join(folder, "BOKU2.IMG"), out)
+        return out
+
+    @staticmethod
+    def run_tool(*args: str) -> str:
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), *args],
+                           capture_output=True, text=True, cwd=REPO)
+        return r.stdout + r.stderr
+
+    def test_numbered_names_are_not_answered_with_run_unpack_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.unpack_with_no_names(tmp)
+            # **材料が弱くないこと**: 番号だけの名前が本当に 20 個できている
+            landed = sorted(os.listdir(out))
+            self.assertEqual(len(landed), 20, landed)
+            self.assertTrue(all(re.fullmatch(r"#\d+", f) for f in landed), landed)
+
+            said = self.run_tool("text", out, "-o", os.path.join(tmp, "a.tsv"))
+            self.assertIn("名前が番号だけ", said, said)
+            self.assertIn("--names-from-crc", said, said)
+            self.assertNotIn("先に unpack", said,
+                             f"いまやったことをもう一度やらせている:\n{said}")
+
+    def test_an_empty_place_is_still_answered_with_run_unpack_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = os.path.join(tmp, "EMPTY")
+            os.makedirs(empty)
+            said = self.run_tool("text", empty, "-o", os.path.join(tmp, "a.tsv"))
+            self.assertIn("先に unpack", said, said)
+            self.assertNotIn("名前が番号だけ", said, said)
+
+    def test_the_wrong_place_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            other = os.path.join(tmp, "TM2")
+            os.makedirs(other)
+            for n in ("a.tm2", "b.tm2"):
+                with open(os.path.join(other, n), "wb") as fh:
+                    fh.write(b"\0" * 64)
+            said = self.run_tool("text", other, "-o", os.path.join(tmp, "a.tsv"))
+            self.assertIn("場所が違うかもしれません", said, said)
+            self.assertIn("a.tm2", said, said)
+            self.assertNotIn("先に unpack", said, said)
+            self.assertNotIn("名前が番号だけ", said, said)
+
+    def test_text_and_used_say_the_same_thing(self):
+        """#232 と同じ約束: 同じ困りごとを 2 つの道具が別の言葉で言わない."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.unpack_with_no_names(tmp)
+            a = self.run_tool("text", out, "-o", os.path.join(tmp, "a.tsv"))
+            b = self.run_tool("used", out)
+            import boku2
+            for line in boku2.nothing_picked_note([out]):
+                self.assertIn(line.strip(), a, f"text が言っていない: {line}")
+                self.assertIn(line.strip(), b, f"used が言っていない: {line}")
+
+    def test_the_example_names_do_not_pretend_there_are_more(self):
+        """3 個しか無いのに `…` を付けない (#96 の「数だけ出すな」と同じ筋)."""
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            for n in ("a.tm2", "b.tm2"):
+                with open(os.path.join(tmp, n), "wb") as fh:
+                    fh.write(b"\0")
+            said = "\n".join(boku2.nothing_picked_note([tmp]))
+            self.assertIn("a.tm2, b.tm2)", said, said)
+            self.assertNotIn("…", said, said)
+
+    def test_a_suffixed_number_name_still_counts_as_numbered(self):
+        """`#12~2` も番号だけの名前 (#245〜#247 で付く形)."""
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            for n in ("#0", "#12~2"):
+                with open(os.path.join(tmp, n), "wb") as fh:
+                    fh.write(b"\0")
+            total, numbered, _shown = boku2.files_present([tmp])
+            self.assertEqual((total, numbered), (2, 2))
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
