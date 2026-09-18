@@ -1154,6 +1154,26 @@ console.log(JSON.stringify(out));
                          "分からないのに当てずっぽうを言っている")
         self.assertEqual(boku2.guess_kind_note(bytes(range(16))), "")
 
+        # **先頭で分からなくても、中身の性質でなら言える** (#236)。
+        # ここが `guess_kind_note` の最後の枝で、実物の「知らない形」で必ず通る道。
+        # 練習データの `.msg` は 56〜80 バイトしかなく、この分類は `tile`
+        # (言うことなし) にしかならないので、通しでは一度も通らない
+        unknown = bytes(range(16))
+        bodies = {
+            "ゼロ埋め": b"\x00" * 512,
+            "日本語テキストらしい": bytes(v for i in range(256) for v in (0x82, 0xA0 + (i % 40))),
+            "ASCII テキストらしい": b"HELLO WORLD THIS IS PLAIN TEXT. " * 16,
+        }
+        for want, body in bodies.items():
+            note = boku2.guess_kind_note(unknown, body)
+            self.assertTrue(want in note,
+                            f"中身の性質で「{want}」と言えるはずが {note!r}")
+            self.assertFalse("中身は別のもの" in note,
+                             f"目印が無いのに名前と中身の話をしている: {note!r}")
+        # **性質も分からなければ黙る** (当てずっぽうを足さない)
+        self.assertEqual(boku2.guess_kind_note(unknown, bytes(range(16)) * 4), "",
+                         "分からない中身に当てずっぽうを言っている")
+
         # 診断にその言葉が出ること (関数にあっても出さなければ意味が無い)
         import io
         import make_boku2_sample
@@ -7045,6 +7065,115 @@ class TestCheckFontTable(unittest.TestCase):
             rc = boku2.check(folder, out=out)
             self.assertIn("[文字表] font.txt はまだ無い", out.getvalue())
             self.assertEqual(rc, 0)                         # 文字表の有無は「問題」には数えない
+
+
+class TestEverySharedJudgementIsReached(unittest.TestCase):
+    """両側にある判定が、**実際に呼ばれる所まで**検査を通っていること (#236).
+
+    #234・#235 で同じ穴を 2 度踏んだ: 判定の関数は画面と一括処理で 1 字まで
+    突き合わせているのに、**その関数に何を渡しているか**、そもそも
+    **呼ばれるのか**を見ている検査が無い。要約から判定が静かに消えても全部緑。
+
+    1 つずつ検査を足すやり方は #189・#190・#191 で何度も破れている
+    (一覧を手で並べると、足した人が書き忘れる)。ここでは**一覧を作らない**:
+
+    1. 対になっている関数を**機械で数える** —— `tools/boku2.py` の `def 名前`
+       と `web/app.js` の `function 名前` が snake / camel で対応するもの
+    2. 練習データと `--break` の全部を `check` に通し、**実際に呼ばれた関数**を数える
+    3. 呼ばれなかったものは、**理由を書いて下に置く**。書けないなら、
+       それは「誰も通していない判定」なので通す材料を足すこと
+
+    これで、新しく対の判定を足した人は「`check` で通る材料」か「通らない理由」の
+    どちらかを必ず書くことになる。
+    """
+
+    #: `check` からは呼ばれないと分かっているもの と、**その理由**。
+    #: 理由の書けるものだけをここに置く (ONLY_CLI と同じ決まり)
+    NOT_FROM_CHECK = {
+        "block_stats":
+            "`guess_kind_note` の最後の枝 (先頭が知らない形で、中身の性質でしか"
+            "言えないとき) からしか呼ばれない。練習データの `.msg` は 56〜80 バイト"
+            "しかなく、この分類は `tile` (言うことなし) にしかならないので、"
+            "実物でしか通らない。枝そのものは "
+            "test_the_unreadable_bytes_are_named_when_they_can_be が直接見ている",
+    }
+
+    @staticmethod
+    def _camel(name: str) -> list:
+        head, *rest = name.split("_")
+        camel = head + "".join(w.capitalize() for w in rest)
+        return [camel, "boku" + camel[0].upper() + camel[1:]]
+
+    def shared_names(self) -> list:
+        """両側にある関数の名前 (一括処理側の呼び方) を機械で拾う."""
+        import re
+
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            py = set(re.findall(r"^def ([a-z_][a-z0-9_]*)\(", fh.read(), re.M))
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            js = set(re.findall(r"^function ([A-Za-z][A-Za-z0-9_]*)\(", fh.read(), re.M))
+        return sorted(n for n in py if any(c in js for c in self._camel(n)))
+
+    def test_check_reaches_every_shared_judgement(self):
+        import io
+        import boku2
+        import make_boku2_sample
+
+        names = self.shared_names()
+        # **0 件で緑にしない。** 拾い方が壊れたら「全部通っている」に化ける
+        self.assertGreaterEqual(len(names), 15,
+                                f"両側にある関数を {len(names)} 件しか拾えない: {names}")
+
+        seen = set()
+        original = {}
+        for n in names:
+            original[n] = getattr(boku2, n)
+
+            def wrap(name, func):
+                def call(*a, **k):
+                    seen.add(name)
+                    return func(*a, **k)
+                return call
+
+            setattr(boku2, n, wrap(n, original[n]))
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                # 練習データそのまま + **壊し方の全部** (道具の一覧を正にする)
+                for kind in [None] + sorted(make_boku2_sample.DAMAGE):
+                    folder = os.path.join(tmp, "S" + (kind or "ok"))
+                    make_boku2_sample.build_sample(folder)
+                    if kind:
+                        make_boku2_sample.damage(folder, kind)
+                    boku2.check(folder, out=io.StringIO())
+                # 文字表を 2 通り壊した版 (#235 と同じ材料)
+                folder = os.path.join(tmp, "Sfont")
+                make_boku2_sample.build_sample(folder)
+                table = os.path.join(folder, "font.txt")
+                with open(table, encoding="utf-8") as fh:
+                    rows = [ln for ln in fh.read().replace("\r", "").split("\n") if ln]
+                rows[1] = rows[1][:-1]
+                rows[-1] = rows[-1] + "??"
+                with open(table, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(rows) + "\n")
+                boku2.check(folder, out=io.StringIO())
+        finally:
+            for n, f in original.items():
+                setattr(boku2, n, f)
+
+        missed = sorted(set(names) - seen - set(self.NOT_FROM_CHECK))
+        self.assertEqual(missed, [],
+                         "check で一度も呼ばれない両側の判定があります。"
+                         "通る材料 (--break の壊し方など) を足すか、"
+                         "NOT_FROM_CHECK に理由を書いてください:\n  "
+                         + "\n  ".join(missed))
+        # 逃がした分が**本当にまだ呼ばれない**こと。呼ばれるようになったのに
+        # 残しておくと、そこだけ見張りの外になる (ONLY_CLI と同じ)
+        for name, why in self.NOT_FROM_CHECK.items():
+            self.assertTrue(name in names,
+                            f"NOT_FROM_CHECK に両側の関数でない名前がある: {name}")
+            self.assertFalse(name in seen,
+                             f"{name} は check から呼ばれるようになりました。"
+                             f"NOT_FROM_CHECK から外してください (理由: {why[:40]}…)")
 
 
 class TestDamageDrill(unittest.TestCase):
