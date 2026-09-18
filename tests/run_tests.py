@@ -7183,6 +7183,95 @@ class TestCrcFileCrossCheck(unittest.TestCase):
             self.assertTrue(str(crc["n"]) in got and str(len(entries) - 1) in got,
                             f"両方の数を出していない:\n{got}")
 
+    def test_names_can_come_from_the_crc_file(self):
+        """**索引の名前が読めなくても、検査値ファイルから名前を付けられる** (#240).
+
+        社長の実物は名前が付かず `#0 #1 …` のままでした (docs/09 の #1・#3)。
+        名前は検査値ファイルにも入っていて、そこは索引とは別の場所なので、
+        片方が読めなくてももう片方から出ることがあります。
+
+        並び順が索引と同じかどうかは実物でしか決まらないので、**1 件ずつ
+        検査値で裏を取り**、合った項目だけ名前を使います。
+        """
+        import subprocess
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            # **索引の名前を最後まで潰す** (社長の実物と同じ形)
+            make_boku2_sample.damage(folder, "allnames")
+            idx = os.path.join(folder, "BOKU2.IDX")
+            img = os.path.join(folder, "BOKU2.IMG")
+            crc = os.path.join(folder, "BOKU2.CRC")
+
+            def run(out, *extra):
+                return subprocess.run(
+                    [sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                     "unpack", idx, img, out, *extra],
+                    capture_output=True, text=True, cwd=REPO)
+
+            plain = run(os.path.join(tmp, "A"))
+            self.assertTrue("#0" in plain.stdout,
+                            f"材料が弱い: 名前が潰れていない:\n{plain.stdout[:300]}")
+
+            got = run(os.path.join(tmp, "B"), "--names-from-crc", crc)
+            # 名前が付いたので、**「名前が付かなかった」の知らせは出ない** (出たら嘘)
+            self.assertEqual(got.returncode, 0,
+                             f"名前が付いたのに問題ありで終わった:\n{got.stderr[:400]}")
+            self.assertFalse("名前が付かなかったファイル" in got.stderr,
+                             f"名前が付いたのにそう言っていない:\n{got.stderr[:400]}")
+            self.assertTrue("検査値ファイルの名前を 20 件当てました" in got.stderr,
+                            f"当てた件数を言っていない:\n{got.stderr[:400]}")
+            self.assertTrue("diary.bin" in got.stdout,
+                            f"名前が付いていない:\n{got.stdout[:300]}")
+            self.assertFalse("最初の名前: #0" in got.stdout,
+                             f"番号のままの名前が残っている:\n{got.stdout[:300]}")
+            self.assertTrue(os.path.exists(os.path.join(tmp, "B", "diary.bin")),
+                            "その名前でファイルが落ちていない")
+
+            # **中身が違えば名前を使わない。** 並び順が違う実物では、ここで止まる
+            with open(crc, "rb") as fh:
+                raw = bytearray(fh.read())
+            head = struct.unpack_from("<5I", raw, 0)
+            for k in range(len(boku2.read_dfi(open(idx, "rb").read(),
+                                              os.path.getsize(img)))):
+                at = head[3] + k * 2
+                struct.pack_into("<H", raw, at, struct.unpack_from("<H", raw, at)[0] ^ 0xFFFF)
+            bad = os.path.join(tmp, "bad.crc")
+            with open(bad, "wb") as fh:
+                fh.write(raw)
+            res = run(os.path.join(tmp, "C"), "--names-from-crc", bad)
+            self.assertTrue("1 件も当たりませんでした" in res.stderr,
+                            f"当たらなかったと言っていない:\n{res.stderr[:400]}")
+            self.assertTrue("#0" in res.stdout,
+                            f"裏が取れないのに名前を使っている:\n{res.stdout[:300]}")
+
+    def test_check_points_at_that_way_out(self):
+        """名前が読めないときに、`check` がその道を**教える**こと (#240)."""
+        import io
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            # 名前が読めているうちは言わない (毎回出ると読まれなくなる)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            self.assertFalse("--names-from-crc" in out.getvalue(),
+                             "名前が読めているのに逃げ道を案内している")
+
+            make_boku2_sample.damage(folder, "allnames")
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            got = out.getvalue()
+            self.assertTrue("この検査値ファイルに名前が" in got,
+                            f"名前があることを言っていない:\n{got[-600:]}")
+            self.assertTrue("--names-from-crc" in got,
+                            f"打つべきコマンドを出していない:\n{got[-600:]}")
+
     def test_it_says_when_there_is_none(self):
         """無いときは「無い」と言い、**診ていない段**に数えること (#175)."""
         import io
@@ -9274,6 +9363,16 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             run(tool("make_boku2_sample.py"), "--break", how, "--out", at("BR" + how))
             out.append(run(tool("boku2.py"), "check", at("BR" + how)))
         os.makedirs(at("void"), exist_ok=True)
+        # 検査値を全部反転させた表 (並び順が合わない形。名前は 1 件も当たらない)
+        import struct as _struct
+        with open(os.path.join(sample, "BOKU2.CRC"), "rb") as fh:
+            _raw = bytearray(fh.read())
+        _at = _struct.unpack_from("<5I", _raw, 0)[3]
+        for _k in range((len(_raw) - _at) // 2):
+            _p = _at + _k * 2
+            _struct.pack_into("<H", _raw, _p, _struct.unpack_from("<H", _raw, _p)[0] ^ 0xFFFF)
+        with open(at("flipped.crc"), "wb") as fh:
+            fh.write(_raw)
         out += [
             run(tool("boku2.py"), "check", at("void")),
             run(tool("boku2.py"), "unpack", os.path.join(sample, "BOKU2.IDX"),
@@ -9284,6 +9383,14 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             # docs/10 がそれを引用した瞬間に「道具も画面も言わない」で落ちた
             run(tool("boku2.py"), "unpack", at("BRname", "BOKU2.IDX"),
                 at("BRname", "BOKU2.IMG"), at("OUTname")),
+            # **検査値ファイルから名前を付ける道** (#240)。読めない検査値ファイルと、
+            # 並び順が合わない検査値ファイルの 2 通りは、この道でしか知らせが出ない
+            run(tool("boku2.py"), "unpack", at("BRname", "BOKU2.IDX"),
+                at("BRname", "BOKU2.IMG"), at("OUTcrc1"),
+                "--names-from-crc", os.path.join(sample, "font.txt")),
+            run(tool("boku2.py"), "unpack", at("BRname", "BOKU2.IDX"),
+                at("BRname", "BOKU2.IMG"), at("OUTcrc2"),
+                "--names-from-crc", at("flipped.crc")),
             run(tool("boku2.py"), "maps", at("void"), "-o", at("m0")),
             run(tool("boku2.py"), "maps", at("nosuch") + "/*.BIN", "-o", at("m2")),
         ]

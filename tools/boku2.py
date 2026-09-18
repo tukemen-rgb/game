@@ -511,11 +511,58 @@ def body_looks_empty(img, entries: list[dict]) -> tuple[int, int]:
     return checked, zero
 
 
-def unpack(idx_path: str, img_path: str, out_dir: str) -> int:
+def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int]:
+    """検査値ファイルの名前を、切り分けた項目に当てる (#240).
+
+    名前の並びと索引の並びが同じ順かどうかは、実物でしか決まらない。だから
+    **1 件ずつ検査値で裏を取る** —— その項目の先頭 0x80 バイトの CRC が、
+    名前が指す検査値と合ったときだけ名前を使う。合わなければ元の名前のまま。
+
+    合った件数も返す。全部合えば「並びが同じ」という強い裏付けになり、
+    1 件も合わなければ並びが違う (名前は使えない) と分かる。
+    """
+    named: list = []
+    hit = 0
+    for i, e in enumerate(entries):
+        keep = e["path"]
+        if i < len(crc["names"]) and crc["names"][i]:
+            slot = crc["slots"][i] if i < len(crc["slots"]) else i
+            if slot < len(crc["crcs"]):
+                img.seek(e["at"])
+                if crc16_ccitt(img.read(min(e["len"], CRC_HEAD))) == crc["crcs"][slot]:
+                    base = crc["names"][i]
+                    folder = os.path.dirname(e["path"])
+                    keep = f"{folder}/{base}" if folder else base
+                    hit += 1
+        named.append(dict(e, path=keep))
+    return named, hit
+
+
+def unpack(idx_path: str, img_path: str, out_dir: str, crc_path: str | None = None) -> int:
     with open(idx_path, "rb") as fh:
         idx = fh.read()
     size = os.path.getsize(img_path)
     entries = read_dfi(idx, size)
+    # **索引の名前が読めないときの逃げ道** (#240)。社長の実物では名前が付かず
+    # `#0 #1 …` のままだった (#1・#3)。名前は検査値ファイルにも入っていて、
+    # そこは索引とは別の場所なので、片方が読めなくてももう片方から出ることがある
+    if crc_path:
+        with open(crc_path, "rb") as fh:
+            crc = read_crc_file(fh.read())
+        if crc is None:
+            print(f"注意: {os.path.basename(crc_path)} をこの形で読めないので、"
+                  "名前は索引のものを使います", file=sys.stderr)
+        else:
+            with open(img_path, "rb") as img:
+                entries, hit = names_from_crc(crc, entries, img)
+            if hit:
+                print(f"検査値ファイルの名前を {hit} 件当てました "
+                      f"(その項目の先頭 {CRC_HEAD} バイトの検査値が合ったものだけ)",
+                      file=sys.stderr)
+            else:
+                print("注意: 検査値ファイルの名前は 1 件も当たりませんでした "
+                      "(並び順が索引と違うようです)。名前は索引のものを使います",
+                      file=sys.stderr)
     dupes = sum(1 for e in entries if "~" in os.path.basename(e["path"]))
     if dupes:
         print(f"注意: 同じ名前が {dupes} 件あり `~2` を付けて区別しました。"
@@ -1729,7 +1776,8 @@ def used_numbers_of(b: bytes, name: str) -> set:
     return used
 
 
-def crc_report(crc: dict, entries: list, img, rec_count: int) -> tuple[list, int]:
+def crc_report(crc: dict, entries: list, img, rec_count: int,
+               names_missing: bool = False) -> tuple[list, int]:
     """`BOKU2.CRC` と、こちらの切り分けを突き合わせた行 (#239).
 
     実物には索引 (`BOKU2.IDX`) とは**別に**このファイルがあり、項目数・名前・
@@ -1773,6 +1821,15 @@ def crc_report(crc: dict, entries: list, img, rec_count: int) -> tuple[list, int
     elif not ng:
         lines.append(f"  切り分けた先頭 {CRC_HEAD} バイトの検査値: {ok:,} 件すべて合いました "
                      "(**位置も中身も合っている**という、いちばん強い裏付けです)")
+        # **索引の名前が読めないときの逃げ道** (#240)。検査値が全部合っているなら、
+        # 名前の並びも索引と同じ順とみてよい (1 件ずつ検査値で裏が取れる)
+        if names_missing and any(crc["names"]):
+            lines.append(f"  索引の名前は読めていませんが、**この検査値ファイルに名前が "
+                         f"{sum(1 for x in crc['names'] if x):,} 件あります**。"
+                         "検査値が全部合っているので、並びも同じ順とみてよいです。"
+                         "こう打つと名前が付きます (1 件ずつ検査値で裏を取ります):")
+            lines.append("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/"
+                         " --names-from-crc 実物/BOKU2.CRC")
     else:
         problems += 1
         lines.append(f"→ 切り分けた先頭 {CRC_HEAD} バイトの検査値が {ng:,} 件合いません "
@@ -1944,7 +2001,8 @@ def check(folder: str, out=sys.stdout) -> int:
             skipped.append("検査値との突き合わせ (BOKU2.CRC が読めない)")
         else:
             with open(img_path, "rb") as probe:
-                lines, more = crc_report(crc, entries, probe, rec_count)
+                lines, more = crc_report(crc, entries, probe, rec_count,
+                                         names_missing=named < len(entries) * 0.9)
             for line in lines:
                 say(line)
             problems += more
@@ -2276,6 +2334,9 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("unpack", help="索引で本体を切り分ける")
     p.add_argument("idx"); p.add_argument("img"); p.add_argument("out")
+    p.add_argument("--names-from-crc", metavar="BOKU2.CRC",
+                   help="索引の名前が読めないとき、検査値ファイルの名前を使う "
+                        "(検査値が合った項目だけ)")
     p = sub.add_parser("maps", help="マップの入れ物を部品にする")
     p.add_argument("files", nargs="+"); p.add_argument("-o", "--out", required=True)
     p = sub.add_parser("text", help="会話を TSV にする (フォルダを渡せば中の *.msg と 1.bin を全部)")
@@ -2332,7 +2393,8 @@ def run(args) -> int:
         return check(args.folder)
 
     if args.cmd == "unpack":
-        n, unnamed, dropped, paths = unpack(args.idx, args.img, args.out)
+        n, unnamed, dropped, paths = unpack(args.idx, args.img, args.out,
+                                            getattr(args, "names_from_crc", None))
         print(f"{n} 個に切り分けました → {args.out}")
         if paths:
             # **名前を並べて見せる** (#206)。docs/10 の 20 分の行が見ろと言っている当のもの

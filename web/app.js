@@ -4201,6 +4201,19 @@ async function buildIdxReport() {
       } else if (!crcNg) {
         lines.push(`  切り分けた先頭 ${CRC_HEAD} バイトの検査値: ${crcOk.toLocaleString()} 件すべて合いました `
           + "(**位置も中身も合っている**という、いちばん強い裏付けです)");
+        /* **索引の名前が読めないときの逃げ道** (#240)。一括処理 (boku2.py の
+           crc_report) と同じ判定・同じ言葉。検査値が全部合っているなら、
+           名前の並びも索引と同じ順とみてよい (1 件ずつ検査値で裏が取れる) */
+        const namesMissing = (c.named_ok ?? items.length) < items.length * 0.9;
+        const haveNames = crc.names.filter((x) => x).length;
+        if (namesMissing && haveNames) {
+          lines.push(`  索引の名前は読めていませんが、**この検査値ファイルに名前が `
+            + `${haveNames.toLocaleString()} 件あります**。`
+            + "検査値が全部合っているので、並びも同じ順とみてよいです。"
+            + "こう打つと名前が付きます (1 件ずつ検査値で裏を取ります):");
+          lines.push("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/"
+            + " --names-from-crc 実物/BOKU2.CRC");
+        }
       } else {
         problems++;
         lines.push(`→ 切り分けた先頭 ${CRC_HEAD} バイトの検査値が ${crcNg.toLocaleString()} 件合いません `
