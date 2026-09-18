@@ -4,13 +4,16 @@
 メモ帳や Excel で「ANSI (cp932)」を選んで保存すると、その 4 字が黙って `?` に
 化ける。道具は後から気づけるようにしたが、**そもそも手で貼らせるから起きる**。
 
-そこで画面に「ファイルに保存」を付けた。ここで見るのは 3 つ:
+そこで画面に「ファイルに保存」を付けた。ここで見るのは 4 つ:
 
 1. 落ちたファイルが **UTF-8 のまま**で、cp932 に無い字が生きていること
 2. 文字表には **BOM を付けない** (1 文字ずつが番号なので、1 つ増えると全部ずれる)
    / TSV には **BOM を付ける** (Excel 向け。一括処理の書き出しと同じ)
 3. 落ちたファイルを**そのまま一括処理に渡せる**こと
    (`boku2.py fontlist` / `proofread.py`)。ここが通らなければ保存する意味がない
+4. 保存した文字表の**行幅が揃っていなければ、その場で何行目かを言う**こと (#229)。
+   1 行だけ 22 字になると、そこから下の番号が全部ずれる。ずれても全部の番号に
+   字は当たるので、保存した瞬間に言わないと、もう誰も気づけない
 """
 import asyncio
 import os
@@ -91,6 +94,27 @@ async def main():
         print("note:", note)
         if "UTF-8" not in (note or ""):
             errors.append(f"何で保存したかを言っていない: {note!r}")
+        # **無事な表には何も言わないこと** (毎回出たら誰も読まなくなる)
+        if "行目" in (note or ""):
+            errors.append(f"無事な文字表に書き写しのずれを言っている: {note!r}")
+
+        # 4. **1 行だけ字数が違う文字表**を保存すると、何行目かを言うこと (#229)。
+        #    ずれても全部の番号に字は当たるので、ここで言わないと誰も気づけない
+        rows = [ln for ln in font.split("\n") if ln]
+        widths = {len(ln) for ln in rows[:-1]}
+        if len(rows) < 3 or len(widths) != 1:
+            errors.append(f"材料が弱い: 練習データの文字表の行幅が揃っていない ({widths})")
+        slipped = list(rows)
+        slipped[1] = slipped[1][:-1]              # 2 行目だけ 1 字少ない
+        await page.fill("#msgglyphs", "\n".join(slipped))
+        async with page.expect_download() as got3:
+            await page.click("#glyphsave")
+        await (await got3.value).save_as(os.path.join(OUT, "font_slipped.txt"))
+        note2 = await page.text_content("#glyphsavenote")
+        print("note (slipped):", note2)
+        for want in ("2 行目", str(len(rows[0]))):
+            if want not in (note2 or ""):
+                errors.append(f"書き写しのずれで「{want}」を言っていない: {note2!r}")
         await browser.close()
 
     # --- 落ちた中身を見る ---

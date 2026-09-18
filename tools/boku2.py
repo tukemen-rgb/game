@@ -1015,6 +1015,78 @@ def ansi_damage_note(bad: list[int]) -> str:
             "校正では「半角文字が混ざっています」と出ます")
 
 
+def glyph_table_trouble(text: str) -> list[str]:
+    """文字表を**書き写すとき**の事故を見つける (#229).
+
+    文字表は、フォント画像を左上から 1 行 23 字ずつ手で書き写して作る
+    (docs/10 の手順 3)。公開ソースの font.txt も **72 行 × 23 字 = 1656 字**、
+    font1.txt は 46 行 × 23 字、font2.txt は 26 行 × 23 字で、どの行もぴったり
+    23 字だった。つまり「1 行 23 字」は実物の文字表の形そのもの。
+
+    ここで 1 行だけ 22 字や 24 字になると、**その行から下の番号が全部ずれる**。
+    ずれても全部の番号に字は当たるので、`text` は「文字表で全部読めました」と
+    言い、TSV は日本語のまま出てくる。1 行だけ見ても絶対に分からない事故なので、
+    **行の幅**という、書き写したときにしか残らない手がかりで見つける。
+
+    番号は改行を捨てた並びで決まるので、行の幅そのものは読みに影響しない。
+    幅は「どこで数え間違えたか」を指す目印として使う。
+    """
+    import re
+    text = text.replace("\ufeff", "").replace("\r", "")
+    lines = text.split("\n")
+    pair = re.compile(r"^\s*(\d+)\s*(?:[=:：＝]|\t| )\s*(\S)\s*$")
+    if any(pair.match(ln) for ln in lines):
+        return []                       # 「12=あ」の対応表。行の幅に意味は無い
+    # 空行は字を 1 つも足さないので番号には効かない。画像の何行目かは、空行を
+    # 除いて数える。ファイルの行番号とずれたときは、そちらも添える (編集で探す先)
+    rows = [(i + 1, len(ln)) for i, ln in enumerate(lines) if ln]
+    if len(rows) < 2:
+        return []                       # 1 行に流し込んだ書き方。幅では見られない
+    notes: list[str] = []
+    widths = [w for _, w in rows]
+    common = max(set(widths), key=widths.count)
+    # 最後の行が短いのは、まだ書き終えていないだけ (途中経過)。長いのは数え間違い
+    bad = [(k, no, w) for k, (no, w) in enumerate(rows)
+           if w != common and not (k == len(rows) - 1 and w < common)]
+    if bad and common == FONT_COLS:
+        k, no, w = bad[0]
+        start = sum(widths[:k])         # その行の先頭の文字番号 (ここから下がずれる)
+        in_file = f" (ファイルでは {no} 行目)" if no != k + 1 else ""
+        notes.append(
+            f"→ 文字表の書き写しがずれています: **{k + 1} 行目だけ {w} 字**です "
+            f"(ほかの行は {common} 字)。フォント画像は 1 行 {FONT_COLS} 字なので、この行で "
+            f"{w - common:+d} 字ずれたまま書き写すと、**{start} 番から下の字が全部ずれます**"
+            + (f" (ほかにも {len(bad) - 1} 行)" if len(bad) > 1 else ""))
+        notes.append(
+            f"   直し方: フォント画像の {k + 1} 行目{in_file}を数え直してください。"
+            "直したらもう一度かけて、この注意が消えることを確かめてください")
+    total = sum(widths)
+    # 書き上がりに近い字数のときだけ、全体の数でも見る。行を 1 つ飛ばしたり
+    # 二度書いたりすると幅は全部 23 のままなので、幅では見つからない
+    if total != FONT_GLYPHS and abs(total - FONT_GLYPHS) <= FONT_COLS * 2:
+        gap = FONT_GLYPHS - total
+        notes.append(
+            f"→ 文字表の字数が合いません: **{total} 字**あります。"
+            f"この作品の文字表は **{FONT_GLYPHS} 字** "
+            f"(1 行 {FONT_COLS} 字 × {FONT_GLYPHS // FONT_COLS} 行) なので、"
+            f"{abs(gap)} 字{'足りません' if gap > 0 else '多いです'}"
+            + (f"。ちょうど {FONT_COLS} の倍数なので、行を 1 つ"
+               f"{'飛ばした' if gap > 0 else '二度書いた'}疑いがあります"
+               if gap % FONT_COLS == 0 else ""))
+        notes.append("   まだ書き終えていない途中なら、書き終えてから見てください"
+                     if gap > 0 else
+                     "   直し方: 同じ行を二度書いていないか、上から数えて確かめてください")
+    return notes
+
+
+def font_trouble(path: str | None) -> list[str]:
+    """`glyph_table_trouble` をファイル相手に回す."""
+    if not path:
+        return []
+    with scrp.open_text(path) as fh:
+        return glyph_table_trouble(fh.read())
+
+
 def load_font(path: str | None) -> list | None:
     """フォント画像を左上から書き出したテキスト、または「番号=文字」の対応表."""
     if not path:
@@ -1759,6 +1831,13 @@ def check(folder: str, out=sys.stdout) -> int:
             if damaged:
                 problems += 1
                 say(ansi_damage_note(damaged))
+            # **書き写しで 1 行ぶんずれた疑い**があれば、そう言う (#229)。
+            # ずれても全部の番号に字は当たるので、上の「全部読める」では出ない
+            trouble = font_trouble(font_txt)
+            if trouble:
+                problems += 1
+                for line in trouble:
+                    say(line)
         else:
             say("[文字表] font.txt はまだ無い (作ったらこのフォルダに置くと、ここで出来具合を確かめられる)")
             skipped.append("文字表の出来具合 (font.txt がまだ無い)")
@@ -2078,6 +2157,10 @@ def run(args) -> int:
         damaged = ansi_damage(glyphs)
         if damaged:
             print(ansi_damage_note(damaged), file=sys.stderr)
+        # 書き写しで 1 行ぶんずれていたら、**取り出す前に**言う (#229)。
+        # ずれたまま取り出すと、下の「文字表で全部読めました」まで通ってしまう
+        for line in font_trouble(args.font):
+            print(line, file=sys.stderr)
         rows = []
         given = expand_patterns(args.files)
         files = expand_inputs(given)
@@ -2188,6 +2271,10 @@ def run(args) -> int:
         print(f"{len(mapping)} 件 → {args.out}  (例: python3 tools/hexdump.py system.msg --table {args.out})")
     elif args.cmd == "fontlist":
         glyphs = load_font(args.font) or []
+        # 校正の文字表に渡す前に、書き写しのずれを言う (#229)。ここを通った一覧が
+        # proofread の `--font-chars` になるので、ずれたまま渡すと校正ごと外れる
+        for line in font_trouble(args.font):
+            print(line, file=sys.stderr)
         # 全角の空白 (U+3000) を落とさないこと。フォントには入っている (僕の夏休み 2 では
         # 0 番) ので、落とすと本文の空白が「フォントに無い文字」として誤って指摘される (#89)
         lines = ["# フォント画像の並び (tools/boku2.py fontlist)"] + [g for g in glyphs if g]

@@ -3724,6 +3724,64 @@ function ansiDamageNote(bad) {
     + "校正では「半角文字が混ざっています」と出ます";
 }
 
+/**
+ * 文字表を**書き写すとき**の事故 (#229)。一括処理 (boku2.py の glyph_table_trouble) と
+ * 同じ判定・同じ言葉にしておくこと。
+ *
+ * 文字表はフォント画像を左上から 1 行 23 字ずつ手で書き写して作る。公開ソースの
+ * font.txt も 72 行 × 23 字 = 1656 字で、どの行もぴったり 23 字だった。1 行だけ
+ * 22 字や 24 字になると、**その行から下の番号が全部ずれる**。ずれても全部の番号に
+ * 字は当たるので「この範囲は全部読める」のまま通ってしまう。
+ */
+function glyphTableTrouble(text) {
+  text = text.replace(/\uFEFF/g, "").replace(/\r/g, "");
+  const lines = text.split("\n");
+  const pair = /^\s*(\d+)\s*(?:[=:：＝]|\t| )\s*(\S)\s*$/;
+  if (lines.some((ln) => pair.test(ln))) return [];   /* 「12=あ」の対応表。行の幅に意味は無い */
+  /* 空行は字を 1 つも足さないので番号には効かない。画像の何行目かは空行を除いて数える */
+  const rows = [];
+  lines.forEach((ln, i) => { if (ln.length) rows.push({ no: i + 1, w: Array.from(ln).length }); });
+  if (rows.length < 2) return [];                     /* 1 行に流し込んだ書き方。幅では見られない */
+  const notes = [];
+  const widths = rows.map((r) => r.w);
+  let common = widths[0];
+  const tally = new Map();
+  for (const w of widths) tally.set(w, (tally.get(w) || 0) + 1);
+  for (const [w, n] of tally) if (n > (tally.get(common) || 0)) common = w;
+  /* 最後の行が短いのは、まだ書き終えていないだけ (途中経過)。長いのは数え間違い */
+  const bad = rows.map((r, k) => ({ k, ...r }))
+    .filter((r) => r.w !== common && !(r.k === rows.length - 1 && r.w < common));
+  if (bad.length && common === FONT_COLS) {
+    const b = bad[0];
+    const start = widths.slice(0, b.k).reduce((a, w) => a + w, 0);
+    const inFile = b.no !== b.k + 1 ? ` (ファイルでは ${b.no} 行目)` : "";
+    const d = b.w - common;
+    notes.push(`→ 文字表の書き写しがずれています: **${b.k + 1} 行目だけ ${b.w} 字**です `
+      + `(ほかの行は ${common} 字)。フォント画像は 1 行 ${FONT_COLS} 字なので、この行で `
+      + `${d > 0 ? "+" : ""}${d} 字ずれたまま書き写すと、**${start} 番から下の字が全部ずれます**`
+      + (bad.length > 1 ? ` (ほかにも ${bad.length - 1} 行)` : ""));
+    notes.push(`   直し方: フォント画像の ${b.k + 1} 行目${inFile}を数え直してください。`
+      + "直したらもう一度かけて、この注意が消えることを確かめてください");
+  }
+  const total = widths.reduce((a, w) => a + w, 0);
+  /* 書き上がりに近い字数のときだけ、全体の数でも見る。行を 1 つ飛ばしたり二度書いたり
+     すると幅は全部 23 のままなので、幅では見つからない */
+  if (total !== FONT_GLYPHS && Math.abs(total - FONT_GLYPHS) <= FONT_COLS * 2) {
+    const gap = FONT_GLYPHS - total;
+    notes.push(`→ 文字表の字数が合いません: **${total} 字**あります。`
+      + `この作品の文字表は **${FONT_GLYPHS} 字** `
+      + `(1 行 ${FONT_COLS} 字 × ${FONT_GLYPHS / FONT_COLS} 行) なので、`
+      + `${Math.abs(gap)} 字${gap > 0 ? "足りません" : "多いです"}`
+      + (gap % FONT_COLS === 0
+        ? `。ちょうど ${FONT_COLS} の倍数なので、行を 1 つ${gap > 0 ? "飛ばした" : "二度書いた"}疑いがあります`
+        : ""));
+    notes.push(gap > 0
+      ? "   まだ書き終えていない途中なら、書き終えてから見てください"
+      : "   直し方: 同じ行を二度書いていないか、上から数えて確かめてください");
+  }
+  return notes;
+}
+
 /** `check` が中身まで開く `.msg` の数。**一括処理 (boku2.py) と同じ数字**にしておくこと。
  *
  * 長らく 50 だった。練習データの `.msg` は 4 件なので全部入るが、実物は 651 件あり、
@@ -4077,6 +4135,13 @@ async function buildIdxReport() {
       if (damaged.length) {
         problems++;
         lines.push(ansiDamageNote(damaged));
+      }
+      /* **書き写しで 1 行ぶんずれた疑い**があれば、そう言う (#229)。ずれても全部の
+         番号に字は当たるので、すぐ上の「この範囲は全部読める」には出ない */
+      const trouble = glyphTableTrouble(glyphText);
+      if (trouble.length) {
+        problems++;
+        trouble.forEach((t) => lines.push(t));
       }
     } else {
       lines.push("[文字表] 文字表はまだ貼っていない (「.msg として読む」の欄に貼ってから、もう一度この要約を作ると出来具合が出る)");
@@ -6411,8 +6476,12 @@ $("glyphsave").addEventListener("click", () => {
   }
   const chars = parseGlyphTable(text).length;
   saveTextFile("font.txt", text.endsWith("\n") ? text : text + "\n", { bom: false });
+  /* 保存した直後が、書き写しのずれを言うのに一番効く時 (#229) */
+  const trouble = glyphTableTrouble(text);
   note.textContent = `font.txt に ${chars} 字を保存しました (UTF-8)。`
-    + "この先: python3 tools/boku2.py fontlist font.txt -o font_chars.txt";
+    + "この先: python3 tools/boku2.py fontlist font.txt -o font_chars.txt"
+    + (trouble.length ? "\n" + trouble.join("\n") : "");
+  note.style.whiteSpace = "pre-wrap";
 });
 
 $("mapsplit").addEventListener("click", async () => {

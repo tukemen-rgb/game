@@ -1505,6 +1505,196 @@ console.log(JSON.stringify(out));
             return False
         return True
 
+    # ---- 文字表の書き写しで 1 行ぶんずれる事故 (#229) ----------------------
+
+    def _public_table_lines(self, name: str) -> list[str]:
+        """公開ソースの文字表を行のまま返す (無ければ skip)."""
+        path = os.path.join(PUBLIC_SRC, name)
+        if not os.path.isfile(path):
+            self.skipTest(f"公開ソースに {name} が無い ({path})")
+        with open(path, encoding="utf-8") as fh:
+            return [ln for ln in fh.read().replace("\r", "").split("\n") if ln]
+
+    def test_the_real_font_tables_are_all_23_wide(self):
+        """**前提を実物で確かめる**: 文字表はどの行もぴったり 23 字 (#229).
+
+        「1 行の幅で数え間違いを見つける」という話は、実物の文字表が
+        行ごとに揃っているときしか成り立ちません。公開ソースの 3 つの表で
+        確かめます (`font.txt` 72 行 / `font1.txt` 46 行 / `font2.txt` 26 行)。
+        """
+        import boku2
+
+        want = {"font.txt": (72, boku2.FONT_GLYPHS), "font1.txt": (46, 1058), "font2.txt": (26, 598)}
+        for name, (rows, chars) in want.items():
+            lines = self._public_table_lines(name)
+            self.assertEqual(len(lines), rows, f"{name} が {len(lines)} 行 (前提が崩れた)")
+            odd = [(i + 1, len(ln)) for i, ln in enumerate(lines) if len(ln) != boku2.FONT_COLS]
+            self.assertEqual(odd, [], f"{name} に {boku2.FONT_COLS} 字でない行がある: {odd}")
+            self.assertEqual(sum(len(ln) for ln in lines), chars, f"{name} の字数が合わない")
+            # **無事な表には何も言わないこと** (毎回出たら誰も読まなくなる)
+            self.assertEqual(boku2.glyph_table_trouble("\n".join(lines) + "\n"), [],
+                             f"そのままの {name} に文句を言っている")
+
+    def test_a_miscounted_row_says_which_row_and_from_which_number(self):
+        """**どの行でいくつずれて、何番から先が狂うか**まで言うこと (#229).
+
+        文字表を手で書き写して 1 行だけ 22 字にすると、そこから下の番号が
+        全部ずれます。**ずれても全部の番号に字は当たる**ので、`text` は
+        「文字表で全部読めました」と言い、TSV は日本語のまま出てきます。
+        目で見つけられない事故なので、行の幅で指すしかありません。
+        """
+        import boku2
+
+        lines = self._public_table_lines("font.txt")
+        for short, mark in ((True, "-1"), (False, "+1")):
+            bad = list(lines)
+            bad[10] = bad[10][:-1] if short else bad[10] + bad[10][0]
+            notes = boku2.glyph_table_trouble("\n".join(bad) + "\n")
+            self.assertTrue(notes, "1 行だけ幅が違うのに黙っている")
+            joined = "\n".join(notes)
+            self.assertIn("11 行目", joined, f"何行目かを言っていない: {joined}")
+            self.assertIn(mark, joined, f"いくつずれたかを言っていない: {joined}")
+            # その行の先頭の文字番号 = 23 × 10。ここから下が全部ずれる
+            self.assertIn(str(boku2.FONT_COLS * 10), joined,
+                          f"何番から下がずれるかを言っていない: {joined}")
+            self.assertTrue(any(n.lstrip().startswith("直し方:") for n in notes),
+                            f"直し方を言っていない: {joined}")
+            # **まだ書き終えていない途中**と取り違えないこと。11 行目は途中ではない
+            self.assertNotIn("72 行目", joined, f"関係の無い行を指している: {joined}")
+
+    def test_a_whole_skipped_row_is_caught_by_the_count(self):
+        """行を 1 つ**丸ごと飛ばす**と、幅は全部 23 のままになる (#229).
+
+        この形は幅では絶対に見つかりません。字数が 23 の倍数ぶん足りないことで
+        気づきます。逆に同じ行を二度書いた形も、23 の倍数ぶん多くなります。
+        """
+        import boku2
+
+        lines = self._public_table_lines("font.txt")
+        skipped = [ln for i, ln in enumerate(lines) if i != 30]
+        notes = "\n".join(boku2.glyph_table_trouble("\n".join(skipped) + "\n"))
+        self.assertIn(str(boku2.FONT_GLYPHS - boku2.FONT_COLS), notes,
+                      f"字数を言っていない: {notes}")
+        self.assertIn("飛ばした", notes, f"行を飛ばした疑いだと言っていない: {notes}")
+
+        twice = lines[:30] + [lines[30]] + lines[30:]
+        notes = "\n".join(boku2.glyph_table_trouble("\n".join(twice) + "\n"))
+        self.assertIn("二度書いた", notes, f"二度書いた疑いだと言っていない: {notes}")
+        self.assertIn("多いです", notes, f"多い側だと言っていない: {notes}")
+
+    def test_a_table_still_being_written_is_left_alone(self):
+        """**途中経過には文句を言わない** (#229).
+
+        手順 3 は上から書き写していく作業なので、最後の行が短いのも、
+        まだ 1 枚目の途中なのも普通です。ここで毎回鳴らすと読まれなくなります。
+        """
+        import boku2
+
+        lines = self._public_table_lines("font.txt")
+        # 1. 最後の行だけ短い (書きかけ)
+        half = lines[:40] + [lines[40][:7]]
+        self.assertEqual(boku2.glyph_table_trouble("\n".join(half) + "\n"), [],
+                         "書きかけの表に文句を言っている")
+        # 2. 1 枚目だけ書き終えた (1058 字)。まだ 2 枚目が残っているのは正常
+        page1 = self._public_table_lines("font1.txt")
+        self.assertEqual(boku2.glyph_table_trouble("\n".join(page1) + "\n"), [],
+                         "1 枚目だけの表に文句を言っている")
+        # 3. 改行せず 1 行に流し込んだ書き方では、幅で見られない (黙る)
+        self.assertEqual(boku2.glyph_table_trouble("".join(lines)), [],
+                         "1 行に流し込んだ表に、幅の話をしている")
+        # 4. 「12=あ」の対応表は行の幅に意味が無い
+        pairs = "\n".join(f"{i}={c}" for i, c in enumerate("あいうえおかきくけこ"))
+        self.assertEqual(boku2.glyph_table_trouble(pairs), [],
+                         "対応表の書き方に、幅の話をしている")
+
+    def test_the_two_sides_judge_the_table_the_same_way(self):
+        """**画面と一括処理が、同じ表に同じことを言う** (#229).
+
+        文字表は画面 (「.msg として読む」の欄) でも一括処理でも使います。
+        片側にだけ判定を足すと、画面で通ったものが CLI で鳴る (逆も) ので、
+        `app.js` の `glyphTableTrouble` を実際に node で走らせて、
+        `boku2.py` の `glyph_table_trouble` と 1 字まで突き合わせます。
+        """
+        import json
+        import re
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        import boku2
+
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        i = app.find("function glyphTableTrouble(")
+        self.assertGreater(i, 0, "app.js に glyphTableTrouble が無い")
+        j = app.index("\n}\n", i) + 3
+        consts = re.findall(r"^const (?:FONT_COLS|FONT_GLYPHS) = \d+;", app, re.M)
+        self.assertEqual(len(consts), 2, f"app.js から定数を {len(consts)} 件しか拾えない")
+
+        lines = self._public_table_lines("font.txt")
+        def joined(ls):
+            return "\n".join(ls) + "\n"
+        blank = list(lines)
+        blank.insert(5, "")
+        blank[11] = blank[11][:-1]                  # 空行をまたいで数える形
+        cases = [
+            joined(lines),                                                  # 無事
+            joined(lines[:10] + [lines[10][:-1]] + lines[11:]),             # 1 字少ない行
+            joined(lines[:10] + [lines[10] + "X"] + lines[11:]),            # 1 字多い行
+            joined([ln for k, ln in enumerate(lines) if k != 30]),          # 行を飛ばした
+            joined(lines[:30] + [lines[30]] + lines[30:]),                  # 行を二度書いた
+            joined(blank),
+            joined(lines[:40] + [lines[40][:7]]),                           # 書きかけ
+            "".join(lines),                                                 # 1 行に流し込んだ
+            "\n".join(f"{k}={c}" for k, c in enumerate("あいうえお")),      # 対応表
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            script = os.path.join(tmp, "parity.mjs")
+            with open(script, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(consts) + "\n" + app[i:j]
+                         + "\nconsole.log(JSON.stringify("
+                         "JSON.parse(process.argv[2]).map(glyphTableTrouble)));\n")
+            res = subprocess.run([node, script, json.dumps(cases)],
+                                 capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr[-2000:])
+        got = json.loads(res.stdout)
+        want = [boku2.glyph_table_trouble(c) for c in cases]
+        # 拾えていること自体を先に確かめる (空どうしは必ず一致する)
+        self.assertGreaterEqual(sum(1 for w in want if w), 5,
+                                "鳴るはずの材料で 1 つも鳴っていない")
+        for k, (a, b) in enumerate(zip(want, got)):
+            self.assertEqual(a, b, f"{k} 番目の文字表で言うことが違う:\n  CLI: {a}\n  画面: {b}")
+
+    def test_the_slip_shows_up_where_the_table_is_actually_used(self):
+        """**取り出す前**に言うこと。`text` / `fontlist` / `check` の 3 か所 (#229).
+
+        見つけられても、出る場所が違えば誰も読みません。文字表を渡す命令は
+        `text` (取り出し) と `fontlist` (校正の一覧作り) の 2 つ、それに
+        吸い出しフォルダを診る `check` があります。
+        """
+        import boku2
+
+        lines = self._public_table_lines("font.txt")
+        bad = list(lines)
+        bad[10] = bad[10][:-1]
+        with tempfile.TemporaryDirectory() as tmp:
+            table = os.path.join(tmp, "font.txt")
+            with open(table, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(bad) + "\n")
+            for cmd in (["text", tmp, "-f", table, "-o", os.path.join(tmp, "o.tsv")],
+                        ["fontlist", table, "-o", os.path.join(tmp, "o.txt")]):
+                res = self.run(os.path.join(REPO, "tools", "boku2.py"), *cmd)
+                out = res.stdout + res.stderr
+                self.assertIn("11 行目", out, f"{cmd[0]} が書き写しのずれを言っていない:\n{out}")
+        # `check` からも出ること (呼び出しを外したら落ちる)
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            cli = fh.read()
+        self.assertTrue("font_trouble(font_txt)" in cli,
+                        "check が文字表の書き写しを診ていない (boku2.py の check に"
+                        " font_trouble の呼び出しが無い)")
+
     def test_where_the_names_stopped_is_pointed_at(self):
         """**名前の読み取りが止まった所を指すこと** (#202).
 
@@ -2419,11 +2609,15 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         cli = {head(h) for h in re.findall(r'(?:say\(|^\s+)f?"→ ([^"{]+)', body, re.M)}
         # `check` から呼ぶ助けの関数が組み立てる → も、check の → として数える
         cli |= {head(h) for h in re.findall(r'return \(f?"→ ([^"{]+)', self.cli)}
+        # 一覧にして返す助けの関数 (`glyph_table_trouble`) の → も同じ (#229)。
+        # 一覧にした瞬間、上の 2 つの形では拾えなくなる —— #179 と同じ穴
+        cli |= {head(h) for h in re.findall(r'notes\.append\(\s*f?"→ ([^"{]+)', self.cli)}
         ui = {head(h) for h in re.findall(r'lines\.push\([`"]→ ([^`"$]+)', self.ui)}
         # 知らせの文を組み立てる助けの関数 (`ansiDamageNote`) に移すと `lines.push` の
         # 形では見つからない。**出る言葉のほうを見る** (CLI 側で #178 に直したのと同じ)
         ui |= {head(h) for h in re.findall(r'return "→ ([^"]+)"', self.ui)}
         ui |= {head(h) for h in re.findall(r'return `→ ([^`$]+)', self.ui)}
+        ui |= {head(h) for h in re.findall(r'notes\.push\(\s*`→ ([^`$]+)', self.ui)}
 
         # 拾えていること自体を先に確かめる (0 件どうしは必ず一致する)
         self.assertGreaterEqual(len(cli), 12, f"CLI の → を {len(cli)} 件しか拾えない")
