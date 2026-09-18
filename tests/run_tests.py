@@ -2390,9 +2390,14 @@ console.log(JSON.stringify(out));
                              f"数と並びが合っていない: {line}")
             return names
 
-        # 1. そろっているときは 0 件 (要らない心配をさせない)
-        self.assertEqual(skipped_of(self.folder), [],
+        # 1. そろっているときは、**文字表の 2 枚目だけ** (要らない心配をさせない)。
+        #    練習データのフォント画像は模様なので 207 マスしかなく、この作品の
+        #    1656 字はどうやっても入らない。**そこは診ていない**のが本当なので
+        #    数に入れる (#250)。それ以外が出たら、それは要らない心配
+        self.assertEqual([n for n in skipped_of(self.folder) if "2 枚目" not in n], [],
                          "全部そろっているのに「診ていない段」が出ている")
+        self.assertTrue(any("2 枚目" in n for n in skipped_of(self.folder)),
+                        "文字表の 2 枚目は練習データには無いので、数に入るはず")
 
         with tempfile.TemporaryDirectory() as tmp:
             # 2. font.txt が無ければ、文字表の段が数に入る
@@ -2429,7 +2434,8 @@ console.log(JSON.stringify(out));
             # 同じ言い回しを書いた注釈で通ってしまう (#63 の「説明文を拾う」と同じ)
             with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
                 ui = fh.read()
-            pushed = re.findall(r'skipped\.push\("([^"]+)"\)', ui)
+            # 文の中に数が入るものは `…` で書くので、そちらも拾う (#250)
+            pushed = re.findall(r'skipped\.push\([`"]([^`"]+)', ui)
             self.assertGreaterEqual(len(pushed), 2,
                                     f"画面側が {len(pushed)} 件しか数えていない: {pushed}")
             for n in names:
@@ -6858,6 +6864,104 @@ class TestMapsSaysWhichKindOfZeroItIs(unittest.TestCase):
             heads = [s.split("\n")[0] for s in said]
             self.assertEqual(len(set(heads)) + len(set(said)), 3 + 3,
                              "3 通りが同じ言葉になっている:\n" + "\n".join(heads))
+
+
+class TestTheSecondFontPageIsCountedAsNotChecked(unittest.TestCase):
+    """**「この行ごと報告してください」と言うなら、数える** (#250。#97 と同じ約束).
+
+    文字表の 2 枚目が見つからないとき、`check` は「この行ごと報告してください」と
+    言いながら、最後は「問題なし」で締めていた。**2 枚目がどのファイルのどこに
+    あるかはまだ分かっていない** (docs/09 の「実物で確かめていないこと」) ので、
+    実物でいちばん外れそうな所。しかも探し方には上限がある (ほとんどのファイルは
+    先頭 64 KB まで) ので、「無い」ではなく**「見ていない所がある」**が正しい。
+    """
+
+    @staticmethod
+    def build(folder: str, with_second_page: bool) -> None:
+        import struct
+        import boku2
+        import make_tim2
+        import make_boku2_sample
+
+        def page(rows: int) -> bytes:
+            tim2, _ = make_tim2.font_sheet(rows=rows, cols=boku2.FONT_COLS,
+                                           cell=boku2.FONT_CELL)
+            return tim2
+
+        os.makedirs(folder, exist_ok=True)
+        first = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + page(2)
+        tree = [(True, 1, "/", None), (True, 1, "system", None),
+                (False, 1, "bk_font.tms", first)]
+        # 残り全部が入る大きさの頁を、別のファイルに置く / 置かない
+        tree.append((False, 0, "bk_font2.tms", page(72)) if with_second_page
+                    else (False, 0, "pad.bin", b"\0" * 64))
+        idx, img, _ = make_boku2_sample.build_dfi(tree)
+        with open(os.path.join(folder, "BOKU2.IDX"), "wb") as fh:
+            fh.write(idx)
+        with open(os.path.join(folder, "BOKU2.IMG"), "wb") as fh:
+            fh.write(img)
+
+    @staticmethod
+    def skipped_of(folder: str) -> list[str]:
+        import re
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                            "check", folder], capture_output=True, text=True, cwd=REPO)
+        line = next((l for l in (r.stdout + r.stderr).splitlines()
+                     if l.startswith("診ていない段:")), None)
+        if line is None:
+            return []
+        got = re.search(r"\d+ 件 \((.+)\)$", line)
+        return got.group(1).split(", ") if got else []
+
+    def test_it_is_counted_when_the_continuation_is_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "MISS")
+            self.build(folder, with_second_page=False)
+            names = self.skipped_of(folder)
+            self.assertTrue(any("文字表の 2 枚目" in n for n in names),
+                            f"見つからないのに数えていない: {names}")
+            self.assertTrue(any("残り" in n and "字" in n for n in names),
+                            f"何字ぶん足りないのかを言っていない: {names}")
+
+    def test_it_is_not_counted_when_the_continuation_is_found(self):
+        """**材料が弱くないこと**: 見つかったときは数に入らない
+        (いつも数えるだけなら、数える意味が無い)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "FOUND")
+            self.build(folder, with_second_page=True)
+            names = self.skipped_of(folder)
+            self.assertFalse(any("文字表の 2 枚目" in n for n in names),
+                             f"見つかったのに数に入れている: {names}")
+
+    def test_the_two_sides_use_the_same_sentence(self):
+        """見つからなかったときの書き出しが、画面と一括処理で同じこと
+        (片側だけ書き換えると、数え方が黙って止まる)."""
+        import re
+        import boku2
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        # **ファイル全体を探さない** (#63)。その 1 行だけを取り出して比べる
+        got = re.search(r'^const FONT_HUNT_NONE = "(.*)";$', app, re.M)
+        self.assertTrue(got, "app.js に FONT_HUNT_NONE の行が無い")
+        self.assertEqual(got.group(1), boku2.FONT_HUNT_NONE,
+                         "app.js の FONT_HUNT_NONE が boku2.py と違う")
+        used = [l for l in app.splitlines() if "FONT_HUNT_NONE" in l and "const " not in l]
+        self.assertTrue(any("startsWith" in l for l in used),
+                        f"画面が FONT_HUNT_NONE で数えていない: {used}")
+
+    def test_the_sentence_really_starts_with_that_head(self):
+        """`check` はこの書き出しで数えるので、作る側が変わったら気づくこと."""
+        import io as _io
+        import struct
+        import boku2
+        import make_tim2
+        tim2, _ = make_tim2.font_sheet(rows=2, cols=boku2.FONT_COLS, cell=boku2.FONT_CELL)
+        first = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + tim2
+        entry = {"path": "system/bk_font.tms", "at": 0, "len": len(first)}
+        lines = boku2.font_page_hunt(_io.BytesIO(first), [entry], entry,
+                                     2 * boku2.FONT_COLS, {0x80})
+        self.assertTrue(lines[0].startswith(boku2.FONT_HUNT_NONE), lines[0])
 
 
 class TestBoku2Sample(unittest.TestCase):

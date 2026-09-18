@@ -3898,6 +3898,11 @@ const fontPageCells = (p) => Math.floor(p.width / FONT_CELL) * Math.floor(p.heig
  * 出す言葉と順番は `tools/boku2.py` の `font_page_hunt` と 1 行ずつ同じ。
  * 画面と一括処理で違うことを言うと、どちらを信じればいいか分からなくなる (#99)。
  */
+/* 続きが見つからなかったときの書き出し (#250)。報告は**これで「見つからなかった」を
+   判定して診ていない段に数える**。同じ文を 2 か所に書かないための定数。
+   tools/boku2.py の FONT_HUNT_NONE と同じ */
+const FONT_HUNT_NONE = "  この吸い出しの中には続きが見つかりませんでした";
+
 async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0) {
   const want = FONT_GLYPHS - cells;
   const out = [];
@@ -3949,7 +3954,7 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0) 
         + `(1 行 ${FONT_COLS} 字の幅で、残り ${want} 字が入る大きさ):`;
     return [head, ...out];
   }
-  return [`  この吸い出しの中には続きが見つかりませんでした `
+  return [`${FONT_HUNT_NONE} `
     + `(1 行 ${FONT_COLS} 字の幅で ${want} 字ぶん入るものを `
     + `${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探した。`
     + `名前に font が付くものと .tms は先頭 ${FONT_OWN_CAP / 1024 / 1024} MB まで、`
@@ -4496,7 +4501,16 @@ async function buildIdxReport() {
              両方の報告が 1 行ずつ一致することは tests/e2e/broken.py が見張っている */
           const known = new Set(own.map((q) => q.at));
           known.add(at);
-          for (const line of await fontPageHunt(items, it, known, cells, dataEntry, p.width || 0)) lines.push(line);
+          const hunt = await fontPageHunt(items, it, known, cells, dataEntry, p.width || 0);
+          for (const line of hunt) lines.push(line);
+          /* **「この行ごと報告してください」と言うなら、数える** (#250。#97 と同じ約束)。
+             文字表の 2 枚目がどこにあるかはまだ分かっていないので、実物でいちばん
+             外れそうな所。探し方に上限がある以上「無い」ではなく「見ていない所がある」 */
+          if (hunt.length && hunt[0].startsWith(FONT_HUNT_NONE)) {
+            skipped.push(`文字表の 2 枚目 (残り ${FONT_GLYPHS - cells} 字。`
+              + "この吸い出しからは見つからなかった)");
+          }
+
         } else {
           lines.push("  これで文字表はまかなえます");
         }

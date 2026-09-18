@@ -1730,6 +1730,11 @@ def pick_by_shape(img, entries: list[dict], test, limit: int = SHAPE_PICK_LIMIT)
     return out
 
 
+#: 続きが見つからなかったときの書き出し (#250)。`check` はここを見て
+#: **診ていない段**に数える。同じ文を 2 か所に書かないための定数
+FONT_HUNT_NONE = "  この吸い出しの中には続きが見つかりませんでした"
+
+
 def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
                    known: set | None = None, wide: int = 0) -> list[str]:
     """文字表の続きが入っていそうな画像を、**同じ吸い出しの中から**挙げる (#168).
@@ -1803,7 +1808,7 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
                     f"(1 行 {FONT_COLS} 字の幅で、残り {want} 字が入る大きさ。"
                     f"**1 枚目と同じ幅 {wide} ドット**のものから先に挙げます):")
         return [head] + out
-    return [f"  この吸い出しの中には続きが見つかりませんでした "
+    return [f"{FONT_HUNT_NONE} "
             f"(1 行 {FONT_COLS} 字の幅で {want} 字ぶん入るものを "
             f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探した。"
             f"名前に font が付くものと .tms は先頭 {FONT_OWN_CAP // 1024 // 1024} MB まで、"
@@ -2454,10 +2459,22 @@ def check(folder: str, out=sys.stdout) -> int:
                             "残るのは、そのためです")
                         # 足りないと言うだけで終わらず、**この吸い出しの中から探す** (#168)。
                         # 上で数えた頁は候補に入れない (数えた分をもう一度挙げない)
-                        for line in font_page_hunt(img, entries, e, cells,
-                                                   {p["at"] for p in own} | {info["at"]},
-                                                   wide=info.get("width") or 0):
+                        hunt = font_page_hunt(img, entries, e, cells,
+                                              {p["at"] for p in own} | {info["at"]},
+                                              wide=info.get("width") or 0)
+                        for line in hunt:
                             say(line)
+                        # **「この行ごと報告してください」と言うなら、数える** (#250。
+                        # #97 と同じ約束)。見つからないまま「問題なし」で締めていた。
+                        # 文字表の 2 枚目がどこにあるかは**まだ分かっていない**
+                        # (docs/09 の「実物で確かめていないこと」) ので、ここは
+                        # 実物でいちばん外れそうな所。探し方に上限がある
+                        # (ほとんどのファイルは先頭 64 KB まで) 以上、
+                        # 「無い」ではなく**「見ていない所がある」**が正しい
+                        if hunt and hunt[0].startswith(FONT_HUNT_NONE):
+                            skipped.append(f"文字表の 2 枚目 "
+                                           f"(残り {FONT_GLYPHS - cells} 字。"
+                                           "この吸い出しからは見つからなかった)")
                     else:
                         say("  これで文字表はまかなえます")
             else:
