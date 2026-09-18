@@ -266,6 +266,32 @@ def numbers_in(text: str) -> list[str]:
     return re.findall(r"\d+", visible)
 
 
+def columns_look_swapped(rows: list[dict]) -> tuple[int, int]:
+    """`original` と `translation` の欄が入れ替わっていないか (#226).
+
+    表計算で列を入れ替えて保存すると、`original` に訳文、`translation` に
+    ゲームの原文が入ります。**このままでは何も鳴りません** —— 1 行ずつ見ると
+    どちらも日本語で、タグの数も (訳文がタグを保っていれば) 合うからです。
+    実際に試すと「ERROR 0 件 / WARN 0 件 / 問題なし 31 行」で通りました。
+    そのまま入れ直せば、**訳文が消えて原文が戻ります**。
+
+    決め手は `size` の欄です。あれは**取り出したときの原文**が占めていた
+    バイト数なので、原文の側だけが合うはず。訳文の側ばかり合うなら入れ替わっている。
+    戻り値は (原文が合った行, 訳文が合った行)。
+    """
+    normal = swapped = 0
+    for row in rows:
+        original = row.get("original", "")
+        translation = row.get("translation", "")
+        if not translation.strip() or original == translation:
+            continue                      # 未訳と写しは、どちらの向きでも同じ
+        if room_of(row):
+            normal += 1
+        if room_of({"size": row.get("size", ""), "original": translation}):
+            swapped += 1
+    return normal, swapped
+
+
 def id_trouble(rows: list[dict]) -> tuple[list[str], int]:
     """`id` の欄の事故を数える (#225).
 
@@ -807,6 +833,16 @@ def main() -> int:
     elif len(translated) < len(rows):
         print(f"\n注意: {len(rows) - len(translated)} 行は訳文の欄が原文のままです "
               "(その行では、原文と見比べる検査は働きません)")
+
+    # **原文と訳文の欄が入れ替わっていないか** (#226)。`size` の欄が決め手
+    normal, swapped = columns_look_swapped(rows)
+    if swapped >= 3 and swapped >= len(rows) * 0.5 and swapped > normal * 3:
+        print(f"\n注意: **原文と訳文の欄が入れ替わっている疑い**があります。"
+              f"`size` の欄 (取り出したときの原文の大きさ) に合うのは、"
+              f"原文の側が {normal} 行、訳文の側が {swapped} 行です。"
+              "表計算で列を並べ替えて保存すると、この形になります。"
+              "**このまま入れ直すと訳文が消えて原文が戻ります** —— "
+              "取り出した TSV と 1 行だけ見比べてください")
 
     # **id の欄の事故** (#225)。取り出したままなら id は全部違う。
     # 重なっていれば入れ直す段で片方が消えるので、最初にかけるここで言う

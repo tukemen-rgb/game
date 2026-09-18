@@ -2712,6 +2712,95 @@ class TestTheDocMatchesTheButtons(unittest.TestCase):
             self.assertGreaterEqual(len(label), 4, f"{label!r} は短すぎて偶然一致する")
 
 
+class TestTheColumnsCanBeSwapped(unittest.TestCase):
+    """`original` と `translation` を入れ替えて保存した TSV を見つけること (#226).
+
+    表計算で列を並べ替えると、原文の欄に訳文、訳文の欄にゲームの原文が入ります。
+    **このままでは何も鳴りません** —— 1 行ずつ見るとどちらも日本語で、
+    タグの数も合うからです。実際、練習データで作って通したら
+    「ERROR 0 件 / WARN 0 件 / 問題なし 31 行」で**全部通りました**。
+    そのまま入れ直せば、訳文が消えて原文が戻ります。
+
+    決め手は `size` の欄 (取り出したときの原文の大きさ)。原文の側だけが
+    合うはずなので、訳文の側ばかり合うなら入れ替わっている。
+    """
+
+    @staticmethod
+    def sized(lines: list) -> list:
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        return [str(boku2.msg_bytes(one)) for one in lines]
+
+    def run_on(self, rows: list) -> str:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.tsv")
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("id\tsize\toriginal\ttranslation\n")
+                for r in rows:
+                    fh.write("\t".join(r) + "\n")
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "proofread.py"), path,
+                 "--no-font-check"], capture_output=True, text=True, cwd=REPO)
+            return res.stdout + res.stderr
+
+    def material(self) -> tuple[list, list, list]:
+        originals = [f"げんぶん{i}ばんめのせりふ。" for i in range(8)]
+        translations = [f"やく{i}" for i in range(8)]
+        return originals, translations, self.sized(originals)
+
+    def test_a_swapped_file_is_reported(self):
+        originals, translations, sizes = self.material()
+        rows = [[f"r{i}", sizes[i], translations[i], originals[i]] for i in range(8)]
+        out = self.run_on(rows)
+        self.assertIn("入れ替わっている疑い", out, out[-700:])
+        self.assertIn("訳文が消えて原文が戻ります", out, f"何が起きるかを言っていない:\n{out[-700:]}")
+
+    def test_a_normal_file_is_not_accused(self):
+        """**普通に訳した TSV で鳴らないこと。** ここが鳴ると誰も読まなくなる.
+
+        材料を弱くしない: 実物の校正では、**原文と同じ長さの訳文**がいくらでもある
+        (字数を合わせて訳すので)。その行は「訳文の側も size に合う」ので、
+        1 行でも当たれば言う作りにすると**健全なファイルで鳴ります**。
+        ここでは半分を同じ長さにして、それでも黙ることを見ます。
+        """
+        originals, translations, sizes = self.material()
+        rows = []
+        for i in range(8):
+            same_len = "や" * len(originals[i])          # 字数を合わせた訳文
+            rows.append([f"r{i}", sizes[i], originals[i],
+                         same_len if i % 2 else translations[i]])
+        out = self.run_on(rows)
+        self.assertNotIn("入れ替わっている", out, f"普通の TSV で鳴っている:\n{out[-500:]}")
+
+    def test_an_untranslated_file_is_not_accused(self):
+        """取り出したまま (原文の写し) では、どちらの向きでも同じなので黙ること."""
+        originals, _t, sizes = self.material()
+        rows = [[f"r{i}", sizes[i], originals[i], originals[i]] for i in range(8)]
+        self.assertNotIn("入れ替わっている", self.run_on(rows), "写しのままで鳴っている")
+
+    def test_it_needs_the_size_column(self):
+        """`size` の欄が無ければ**言わない** (決め手が無いので)."""
+        import subprocess
+
+        originals, translations, _s = self.material()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.tsv")
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("id\toriginal\ttranslation\n")
+                for i in range(8):
+                    fh.write(f"r{i}\t{translations[i]}\t{originals[i]}\n")
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "proofread.py"), path,
+                 "--no-font-check"], capture_output=True, text=True, cwd=REPO)
+        self.assertNotIn("入れ替わっている", res.stdout + res.stderr,
+                         "決め手が無いのに言っている")
+
+
 class TestTheIdColumnTellsOnItself(unittest.TestCase):
     """`id` の欄の事故を、**最初にかける道具**が言うこと (#225).
 
@@ -8543,6 +8632,13 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             fh.write("id\tsize\toriginal\ttranslation\n")
             fh.write("a\t12\tはじめから\tゲームをさいしょからはじめる\n")
             fh.write("b\t7\tはじめから\tはじめから\n")
+        # 列の入れ替えの道 (#226): size に合うのが訳文の側ばかりになる形
+        with open(at("swap.tsv"), "w", encoding="utf-8") as fh:
+            fh.write("id\tsize\toriginal\ttranslation\n")
+            for i in range(6):
+                one = f"げんぶん{i}ばんめのせりふ。"
+                fh.write(f"r{i}\t{(len(one) + 1) * 2}\tやく{i}\t{one}\n")
+        out.append(run(tool("proofread.py"), at("swap.tsv"), "--no-font-check"))
         # id の事故の道 (#225): 重なった id と、空欄の id
         with open(at("ids.tsv"), "w", encoding="utf-8") as fh:
             fh.write("id\toriginal\ttranslation\n")
