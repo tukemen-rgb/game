@@ -8693,6 +8693,15 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             cells = [c.strip() for c in line.split("|")]
             if len(cells) > 2 and cells[1] not in ("", "---", "症状"):
                 got += [("困ったとき", q) for q in re.findall(r"「([^」]+)」", cells[1])]
+        # **欄を消すなの表** (#227)。表計算の事故 4 つを 1 か所にまとめた所で、
+        # 「道具の言い方」の欄に引用がある。ここも歩かないと、まとめた瞬間に古くなる
+        keep = self.doc.split("### `id` と `size` の欄は消さないでください")
+        if len(keep) > 1:
+            table = next(c for c in keep[1].split("\n\n") if c.lstrip().startswith("| 起きる事故"))
+            for line in table.splitlines():
+                cells = [c.strip() for c in line.split("|")]
+                if len(cells) > 4 and cells[1] not in ("", "---", "起きる事故"):
+                    got += [("欄を消すな", q) for q in re.findall(r"「([^」]+)」", cells[3])]
         return got
 
     def where(self, phrase: str) -> str | None:
@@ -8718,6 +8727,11 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
         quotes = self.quoted()
         self.assertGreaterEqual(len(quotes), 15,
                                 f"引用を {len(quotes)} 個しか拾えていない (拾い方が壊れた)")
+        # **表ごとに拾えていること** (#227)。まとめた表を足しても、拾い方が
+        # その表に届いていなければ **0 件で緑**になる (足した回に実際に踏んだ)
+        for where in ("見る 1 点", "困ったとき", "欄を消すな"):
+            self.assertTrue(any(w == where for w, _q in quotes),
+                            f"「{where}」の表から 1 つも拾えていない")
         missing = [(where, q) for where, q in quotes if self.where(q) is None]
         self.assertEqual(missing, [],
                          "docs/10 が引用しているのに、道具も画面も言わない文言: "
