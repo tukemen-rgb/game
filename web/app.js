@@ -5139,6 +5139,34 @@ async function addParts(dataEntry, items, how) {
   });
   if (!kids.length) return;
 
+  /* **索引の名前が読めないときの逃げ道** (#244)。一括処理の
+     `unpack --names-from-crc` (#240) と同じ考え方: `BOKU2.CRC` に入っている名前を、
+     その項目の先頭 0x80 バイトの検査値で **1 件ずつ裏を取ってから**当てる。
+     合わなければ番号のまま —— 当てずっぽうでは名前を付けない。
+     社長の実物は名前が付かない吸い出しだった (docs/09 の #1・#3) ので、
+     CLI にだけ逃げ道があって画面に無い、という形にはしない */
+  let crcNamed = 0;
+  if (kids.filter((k) => k.bare).length > kids.length * 0.1) {
+    const crcEntry = state.entries.find((e) => /boku2\.crc$/i.test(e.name));
+    if (crcEntry) {
+      const crc = readCrcFile(await readRange(crcEntry.file, crcEntry.offset, crcEntry.size));
+      if (crc) {
+        for (let i = 0; i < kids.length; i++) {
+          const k = kids[i];
+          if (!k.bare || i >= crc.names.length || !crc.names[i]) continue;
+          const slot = i < crc.slots.length ? crc.slots[i] : i;
+          if (slot >= crc.crcs.length) continue;
+          const head = await readRange(k.file, k.offset, Math.min(k.size, CRC_HEAD));
+          if (crc16Ccitt(head) !== crc.crcs[slot]) continue;
+          k.name = crc.names[i];
+          k.path = prefix + crc.names[i];
+          k.bare = false;
+          crcNamed++;
+        }
+      }
+    }
+  }
+
   /* 名前が番号だけなら、中身を見て種類を末尾に付ける (#0012 → #0012.tm2)。
      1951 個でも先頭 4KB ずつなので数秒で終わる */
   const note = $("capnote");
@@ -5167,6 +5195,8 @@ async function addParts(dataEntry, items, how) {
       `${dataEntry.name} を${how} ${kids.length} 個に切り分けました`
       + (items.length > kids.length ? ` (長さ 0 の ${items.length - kids.length} 件は除外)` : "")
       + `。中身の見当: ${sniffSummary(kinds)}。`
+      + (crcNamed ? `検査値ファイルの名前を ${crcNamed} 件当てました `
+                    + `(その項目の先頭 ${CRC_HEAD} バイトの検査値が合ったものだけ)。` : "")
       + (bareCount ? `名前が無い ${bareCount} 件は種類を末尾に付けました。` : "")
       + (packed ? `圧縮らしい ${packed} 件 (packed) の中にテキストがある見込みです。`
                   + "上の絞り込みに packed と入れると並びます。" : "");
