@@ -4055,6 +4055,35 @@ async function buildIdxReport() {
     }
     return out;
   };
+  /* 読み込んである MAP のファイル (索引と本体以外の、部品でないもの)。
+     **文字表の判定より先に読む** (#231)。この作品の本文の大半は物語の会話で、
+     .msg だけを見て「文字表は足りている」と言うと、いちばん量の多い所を
+     見ないまま太鼓判を押すことになる。[MAP] の行は今までどおり下に出す */
+  const maps = state.entries.filter((e) => e.kind !== "part" && e !== idxEntry && e !== dataEntry
+    && !/\.(idx|img|cnf|crc)$/i.test(e.name) && e.size > 16 && e.size < 8 * 1024 * 1024
+    && (/\/map\//i.test("/" + e.path) || /^m_[a-z]\d/i.test(e.name)));
+  const mapScan = { okMap: 0, okTalk: 0, talkLines: 0, noTalkExample: null, bad: [], used: new Set() };
+  for (const e of maps.slice(0, 200)) {
+    const bytes = await readRange(e.file, e.offset, e.size);
+    const m = parseBokuMap(bytes);
+    if (!m) {
+      mapScan.bad.push(`${e.name}: ${[...bytes.subarray(0, 16)].map((v) => hex(v, 2)).join(" ")}`);
+      continue;
+    }
+    mapScan.okMap++;
+    const one = m.items.find((x) => x.i === 1 && x.len);
+    if (one) {
+      const mt = parseBokuMsgTables(bytes.subarray(one.at, one.at + one.len));
+      if (mt) {
+        mapScan.okTalk++;
+        for (const tb of mt.tables) if (tb.msg) mapScan.talkLines += tb.msg.items.filter((x) => x.codes.length).length;
+      } else if (!mapScan.noTalkExample) {
+        mapScan.noTalkExample = { name: e.name,
+          head: [...bytes.subarray(one.at, one.at + 16)].map((v) => hex(v, 2)).join(" ") };
+      }
+    }
+    for (const c of bokuUsedNumbers(bytes, isAltBreak(e.name))) mapScan.used.add(c);
+  }
   let msgs = items.filter((it) => /\.msg$/i.test(it.name));
   let msgByShape = false;
   if (!msgs.length) {
@@ -4095,7 +4124,7 @@ async function buildIdxReport() {
       + `${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探しました。この行ごと報告してください`);
   }
   let okMsg = 0, badMsg = null, lenOk = 0, lenNg = 0;
-  const usedHere = new Set();                                   /* 読めた .msg で使われている文字番号 (文字表の出来具合を診る) */
+  const msgUsed = new Set();                                    /* 読めた .msg で使われている文字番号 */
   const sjisDecode = DECODERS.sjis ? (x) => DECODERS.sjis.decode(x) : null;
   for (const it of msgs.slice(0, MSG_CHECK_FILES)) {
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, it.len);
@@ -4106,7 +4135,7 @@ async function buildIdxReport() {
       else if (r.lenField === "ng") lenNg++;
       /* **入れ物なら中まで降りる** (#230)。平らな .msg として読むと、部品の
          位置表が文字番号に見えてしまう (CLI の text_rows_bytes と同じ道を通る) */
-      for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) usedHere.add(c);
+      for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) msgUsed.add(c);
     } else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16), body: bytes };
   }
   if (msgs.length) {
@@ -4148,41 +4177,58 @@ async function buildIdxReport() {
         + [...badMsg.head].map((v) => hex(v, 2)).join(" ")
         + guessKindNote(badMsg.head, badMsg.body));
     }
-    /* **使われている文字番号の最大**は、実物で最初に出る大事な数 (#230)。
-       数字だけ出さず、文字表づくりの段取りが決まる所まで言う (CLI の check と同じ言葉) */
-    if (usedHere.size) {
-      const top = Math.max(...usedHere);
-      lines.push(glyphRangeNote(top));
-      if (top >= FONT_GLYPHS) problems++;
+  }
+
+  /* **入れ物 (日記・保存画面・出来事・釣り) の文言も数に入れる** (#231)。名前で
+     拾えたときは .msg に入らないので、そのままだと丸ごと落ちていた (皮肉なことに、
+     名前が読めない吸い出しのほうが多く読めていた)。`.msg` が 1 件も無くても
+     ここは診られるので、`.msg` の段の外に置く (CLI の check と同じ) */
+  const boxUsed = new Set();
+  const boxes = found.length
+    ? items.filter((it) => CONTAINERS.includes((it.base || it.name).toLowerCase()))
+    : shapedContainers;
+  for (const it of boxes.slice(0, MSG_CHECK_FILES)) {
+    const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, it.len);
+    for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) boxUsed.add(c);
+  }
+  const usedHere = new Set([...msgUsed, ...boxUsed, ...mapScan.used]);
+  const usedBy = [`.msg ${msgUsed.size}`, `入れ物 ${boxUsed.size}`,
+                  maps.length ? `MAP の会話 ${mapScan.used.size}` : "MAP は診ていない"];
+  /* **使われている文字番号の最大**は、実物で最初に出る大事な数 (#230)。
+     数字だけ出さず、文字表づくりの段取りが決まる所まで言う (CLI の check と同じ言葉) */
+  if (usedHere.size) {
+    const top = Math.max(...usedHere);
+    lines.push(glyphRangeNote(top));
+    if (top >= FONT_GLYPHS) problems++;
+  }
+  /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
+  const glyphText = $("msgglyphs").value;
+  const glyphs = glyphText.trim() ? parseGlyphTable(glyphText) : null;
+  if (glyphs) {
+    const missing = [...usedHere].filter((c) => glyphs[c] === undefined || glyphs[c] === null).sort((a, b) => a - b);
+    const verdict = bokuGlyphVerdict(true, usedHere.size, missing.length);
+    lines.push(`[文字表] 貼ってある文字表: ${glyphs.filter((g) => g !== undefined && g !== null).length} 字 / 本文で使われている番号 `
+      + `${usedHere.size} 種 (${usedBy.join(" / ")}) のうち文字表に無い ${missing.length} 種`
+      + { untested: "。文字番号を使っている行が無いので、文字表は試せていない",
+          missing: ` (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""}。フォント画像の目盛りで橙の枠の字を書き足す)`,
+          ok: "。この範囲は全部読める" }[verdict]);
+    /* **保存のときに潰れた疑い**があれば、そう言う (#199)。
+       一括処理 (boku2.py の ansi_damage) と同じ判定・同じ言葉 */
+    const damaged = ansiDamage(glyphs);
+    if (damaged.length) {
+      problems++;
+      lines.push(ansiDamageNote(damaged));
     }
-    /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
-    const glyphText = $("msgglyphs").value;
-    const glyphs = glyphText.trim() ? parseGlyphTable(glyphText) : null;
-    if (glyphs) {
-      const missing = [...usedHere].filter((c) => glyphs[c] === undefined || glyphs[c] === null).sort((a, b) => a - b);
-      const verdict = bokuGlyphVerdict(true, usedHere.size, missing.length);
-      lines.push(`[文字表] 貼ってある文字表: ${glyphs.filter((g) => g !== undefined && g !== null).length} 字 / 上の .msg で使われている番号 ${usedHere.size} 種のうち文字表に無い ${missing.length} 種`
-        + { untested: "。文字番号を使っている行が無いので、文字表は試せていない",
-            missing: ` (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""}。フォント画像の目盛りで橙の枠の字を書き足す)`,
-            ok: "。この範囲は全部読める" }[verdict]);
-      /* **保存のときに潰れた疑い**があれば、そう言う (#199)。
-         一括処理 (boku2.py の ansi_damage) と同じ判定・同じ言葉 */
-      const damaged = ansiDamage(glyphs);
-      if (damaged.length) {
-        problems++;
-        lines.push(ansiDamageNote(damaged));
-      }
-      /* **書き写しで 1 行ぶんずれた疑い**があれば、そう言う (#229)。ずれても全部の
-         番号に字は当たるので、すぐ上の「この範囲は全部読める」には出ない */
-      const trouble = glyphTableTrouble(glyphText);
-      if (trouble.length) {
-        problems++;
-        trouble.forEach((t) => lines.push(t));
-      }
-    } else {
-      lines.push("[文字表] 文字表はまだ貼っていない (「.msg として読む」の欄に貼ってから、もう一度この要約を作ると出来具合が出る)");
-      skipped.push("文字表の出来具合 (文字表をまだ貼っていない)");
+    /* **書き写しで 1 行ぶんずれた疑い**があれば、そう言う (#229)。ずれても全部の
+       番号に字は当たるので、すぐ上の「この範囲は全部読める」には出ない */
+    const trouble = glyphTableTrouble(glyphText);
+    if (trouble.length) {
+      problems++;
+      trouble.forEach((t) => lines.push(t));
     }
+  } else {
+    lines.push("[文字表] 文字表はまだ貼っていない (「.msg として読む」の欄に貼ってから、もう一度この要約を作ると出来具合が出る)");
+    skipped.push("文字表の出来具合 (文字表をまだ貼っていない)");
   }
   /* 名前で拾えなければ**形で拾う** (#172)。社長の実物では名前が付かず `#0 #1 …` の
      ままだったことがある (docs/09 の #1・#3)。名前だけで選ぶと、そのときフォントの
@@ -4272,28 +4318,8 @@ async function buildIdxReport() {
     }
   }
 
-  /* 読み込んである MAP のファイル (索引と本体以外の、部品でないもの) */
-  const maps = state.entries.filter((e) => e.kind !== "part" && e !== idxEntry && e !== dataEntry
-    && !/\.(idx|img|cnf|crc)$/i.test(e.name) && e.size > 16 && e.size < 8 * 1024 * 1024
-    && (/\/map\//i.test("/" + e.path) || /^m_[a-z]\d/i.test(e.name)));
   if (maps.length) {
-    let okMap = 0, okTalk = 0, talkLines = 0, noTalkExample = null;
-    const bad = [];
-    for (const e of maps.slice(0, 200)) {
-      const bytes = await readRange(e.file, e.offset, e.size);
-      const m = parseBokuMap(bytes);
-      if (!m) { bad.push(`${e.name}: ${[...bytes.subarray(0, 16)].map((v) => hex(v, 2)).join(" ")}`); continue; }
-      okMap++;
-      const one = m.items.find((x) => x.i === 1 && x.len);
-      if (one) {
-        const mt = parseBokuMsgTables(bytes.subarray(one.at, one.at + one.len));
-        if (mt) { okTalk++; for (const tb of mt.tables) if (tb.msg) talkLines += tb.msg.items.filter((x) => x.codes.length).length; }
-        else if (!noTalkExample) {
-          noTalkExample = { name: e.name,
-            head: [...bytes.subarray(one.at, one.at + 16)].map((v) => hex(v, 2)).join(" ") };
-        }
-      }
-    }
+    const { okMap, okTalk, talkLines, noTalkExample, bad } = mapScan;
     lines.push(`[MAP] ${maps.length} 件 / 入れ物として読めた ${okMap} 件 / 1 番が会話だった ${okTalk} 件 / 会話 ${talkLines.toLocaleString()} 行`);
     if (okMap && !okTalk) {
       problems++;

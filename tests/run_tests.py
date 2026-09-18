@@ -6856,6 +6856,72 @@ class TestDocs(unittest.TestCase):
 class TestCheckFontTable(unittest.TestCase):
     """check が、フォルダに font.txt があればその出来具合 (使われている番号のうち無い数) を出すこと (#67)."""
 
+    def test_the_glyph_count_covers_the_whole_text_not_just_msg(self):
+        """**文字表の判定は、本文ぜんぶを見て言うこと** (#231).
+
+        `check` は `.msg` だけを見て「この範囲は全部読める」と言っていました。
+        ところがこの作品の本文は、`.msg` のほかに**入れ物** (日記・保存画面・
+        出来事・釣り) と **MAP の物語の会話**にあり、量はそちらのほうが多い。
+        練習データですら、`.msg` に出てこない番号が入れ物に 21・会話に 21 あり、
+        いちばん大きい番号は 91 ではなく 165 でした。**足りない文字表に
+        太鼓判を押す**形なので、いちばん高くつく外れ方です。
+        """
+        import io
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            # 1. **材料が弱くないこと**を先に確かめる。3 つの出どころが同じ番号しか
+            #    使っていなければ、union にしてもしなくても同じ数になり、検査は通る
+            idx = open(os.path.join(folder, "BOKU2.IDX"), "rb").read()
+            img_path = os.path.join(folder, "BOKU2.IMG")
+            entries = boku2.read_dfi(idx, os.path.getsize(img_path))
+            msg_used, box_used = set(), set()
+            with open(img_path, "rb") as img:
+                for e in entries:
+                    base = os.path.basename(e["path"]).lower()
+                    if not (base.endswith(".msg") or base in boku2.TEXT_CONTAINERS):
+                        continue
+                    img.seek(e["at"])
+                    got = boku2.used_numbers_of(img.read(e["len"]), e["path"])
+                    (msg_used if base.endswith(".msg") else box_used).update(got)
+            map_used = boku2.scan_map_folder(os.path.join(folder, "MAP"))["used"]
+            self.assertTrue(box_used - msg_used,
+                            "材料が弱い: 入れ物に .msg と違う番号が 1 つも無い")
+            self.assertTrue(map_used - msg_used,
+                            "材料が弱い: MAP の会話に .msg と違う番号が 1 つも無い")
+            everything = msg_used | box_used | map_used
+            self.assertGreater(max(everything), max(msg_used),
+                               "材料が弱い: いちばん大きい番号が .msg の中にある")
+
+            # 2. `check` が出す数が、3 つを合わせた数であること
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            got = out.getvalue()
+            self.assertTrue(f"本文で使われている番号 {len(everything)} 種" in got,
+                            f"合わせた {len(everything)} 種で言っていない (.msg だけなら "
+                            f"{len(msg_used)} 種)")
+            self.assertTrue(f"(.msg {len(msg_used)} / 入れ物 {len(box_used)} / "
+                            f"MAP の会話 {len(map_used)})" in got,
+                            "どこから来た番号かの内訳が出ていない")
+            # 3. いちばん大きい番号も、合わせたほうで言うこと (#230 の判定がこれで決まる)
+            self.assertTrue(f"使われている文字番号の最大は {max(everything)}" in got,
+                            f"最大が合わせた {max(everything)} になっていない")
+
+            # 4. **MAP が無いときは、0 種ではなく「診ていない」**と言うこと。
+            #    0 は「見た結果 0」に読めるが、ここは「見ていない」。意味が違う
+            import shutil
+            shutil.rmtree(os.path.join(folder, "MAP"))
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            got = out.getvalue()
+            self.assertTrue("MAP は診ていない" in got,
+                            "MAP が無いのに「診ていない」と言っていない")
+            self.assertFalse("MAP の会話 0" in got,
+                             "診ていないものを 0 種と書いている")
+
     def test_font_table_progress_line(self):
         import io
         import boku2
@@ -6865,7 +6931,7 @@ class TestCheckFontTable(unittest.TestCase):
             make_boku2_sample.build_sample(folder)
             out = io.StringIO()
             boku2.check(folder, out=out)
-            self.assertRegex(out.getvalue(), r"\[文字表\] font\.txt: \d+ 字 / 上の \.msg で使われている番号 \d+ 種のうち文字表に無い 0 種。この範囲は全部読める")
+            self.assertRegex(out.getvalue(), r"\[文字表\] font\.txt: \d+ 字 / 本文で使われている番号 \d+ 種 \(\.msg \d+ / 入れ物 \d+ / MAP の会話 \d+\) のうち文字表に無い 0 種。この範囲は全部読める")
             # 文字表を先頭 3 字に削ると、無い番号が出る
             fp = os.path.join(folder, "font.txt")
             with open(fp, encoding="utf-8") as fh:

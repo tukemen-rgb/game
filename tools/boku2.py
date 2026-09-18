@@ -1607,6 +1607,46 @@ def find_map_dir(folder: str, depth: int = 2) -> str | None:
     return None
 
 
+def scan_map_folder(map_dir: str) -> dict:
+    """`MAP/` を一通り読んで、件数・会話の行数・**使われている文字番号**を返す (#231).
+
+    `check` の [MAP] の行を出すための下読み。**文字表の判定より先に呼ぶ**こと ——
+    物語の会話はこの作品の本文の大半で、`.msg` だけを見て「文字表は足りている」と
+    言うと、いちばん量の多い所を見ないまま太鼓判を押すことになる。
+    """
+    got: dict = {"files": sorted(os.listdir(map_dir)), "ok_map": 0, "ok_talk": 0,
+                 "lines": 0, "bad": [], "no_talk": None, "used": set()}
+    for name in got["files"]:
+        path = os.path.join(map_dir, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as fh:
+            b = fh.read()
+        items = parse_map(b)
+        if not items:
+            got["bad"].append((name, b[:16].hex(" ").upper()))
+            continue
+        got["ok_map"] += 1
+        one = next((it for it in items if it["i"] == 1 and it["len"]), None)
+        if one:
+            tables = parse_tables(b[one["at"]:one["at"] + one["len"]])
+            if tables:
+                got["ok_talk"] += 1
+                got["lines"] += sum(1 for t in tables if t["msg"] for it in t["msg"] if it["codes"])
+            elif got["no_talk"] is None:
+                got["no_talk"] = (name, b[one["at"]:one["at"] + 16].hex(" ").upper())
+        got["used"] |= used_numbers_of(b, name)
+    return got
+
+
+def used_numbers_of(b: bytes, name: str) -> set:
+    """1 ファイルの本文が使っている文字番号 (文字表なしで読んで `[番号]` を拾う)."""
+    used: set = set()
+    for _, _, _, text in text_rows_bytes(b, name, None, alt=is_alt_break(name)):
+        used.update(int(x) for x in re.findall(r"\[(\d+)\]", text))
+    return used
+
+
 def check(folder: str, out=sys.stdout) -> int:
     """吸い出したフォルダを一通り診て、報告用の要約を出す (ゲームの本文は出さない).
 
@@ -1756,7 +1796,10 @@ def check(folder: str, out=sys.stdout) -> int:
     found = [n for n in TEXT_CONTAINERS if n in bases]
     missing = [n for n in TEXT_CONTAINERS if n not in bases]
 
-    used_here: set[int] = set()
+    # **MAP の会話を、文字表の判定より先に読む** (#231)。この作品の本文の大半は
+    # 物語の会話で、`.msg` だけを見て「文字表は足りている」と言うのは、いちばん
+    # 量の多い所を見ないまま太鼓判を押すこと。[MAP] の行は今までどおり下に出す
+    m = scan_map_folder(map_dir) if map_dir else None
     with open(img_path, "rb") as img:
         # 名前で 1 つも拾えなければ**中身の形**で探す (#173)。名前が付かない索引でも、
         # 本文と入れ物の診断が黙って飛ばないように (#172 をフォントから広げた)
@@ -1792,6 +1835,7 @@ def check(folder: str, out=sys.stdout) -> int:
                 f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探しました。"
                 "この行ごと報告してください")
         ok_msg, first_bad = 0, None
+        msg_used: set[int] = set()
         len_ok, len_ng = 0, 0            # 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が合うか
         for e in msgs[:MSG_CHECK_FILES]:
             img.seek(e["at"])
@@ -1804,8 +1848,7 @@ def check(folder: str, out=sys.stdout) -> int:
                 elif info.get("len_field") == "ng":
                     len_ng += 1
                 # 文字表の確認用に、使われている番号も拾っておく (文字表なしの復号は [番号] の形)
-                for _, _, _, text in text_rows_bytes(b, e["path"], None, alt=is_alt_break(e["path"])):
-                    used_here.update(int(m) for m in re.findall(r"\[(\d+)\]", text))
+                msg_used |= used_numbers_of(b, e["path"])
             elif first_bad is None:
                 first_bad = (e, b[:16], b)
         if msgs:
@@ -1846,6 +1889,21 @@ def check(folder: str, out=sys.stdout) -> int:
                 e, head, body = first_bad
                 say(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト "
                     f"{head.hex(' ').upper()}{guess_kind_note(head, body)}")
+        # **入れ物 (日記・保存画面・出来事・釣り) の文言も数に入れる** (#231)。
+        # 名前で拾えたときは `.msg` に入らないので、そのままだと丸ごと落ちていた
+        # (皮肉なことに、名前が読めない吸い出しのほうが多く読めていた)
+        box_used: set[int] = set()
+        boxes = ([e for e in entries if os.path.basename(e["path"]).lower() in TEXT_CONTAINERS]
+                 or shaped_containers)
+        for e in boxes[:MSG_CHECK_FILES]:
+            img.seek(e["at"])
+            box_used |= used_numbers_of(img.read(e["len"]), e["path"])
+        map_used = m["used"] if m else set()
+        used_here = msg_used | box_used | map_used
+        # MAP が無い / 空のときは、0 種と書かずに**診ていない**と言う。0 は
+        # 「見た結果 0」に読めるが、ここは「見ていない」。数の意味が違う
+        used_by = [f".msg {len(msg_used)}", f"入れ物 {len(box_used)}",
+                   f"MAP の会話 {len(map_used)}" if m and m["files"] else "MAP は診ていない"]
         # 文字表 (font.txt) がこのフォルダにあれば、その出来具合も診る (docs/10 の手順 3 の途中経過)
         # **使われている文字番号の最大**は、実物で最初に出る大事な数 (#230)。
         # 数字だけ出さず、文字表づくりの段取りが決まる所まで言う
@@ -1857,7 +1915,8 @@ def check(folder: str, out=sys.stdout) -> int:
         if font_txt:
             glyphs = load_font(font_txt) or []
             missing = sorted(u for u in used_here if u >= len(glyphs) or glyphs[u] is None)
-            say(f"[文字表] font.txt: {sum(1 for g in glyphs if g)} 字 / 上の .msg で使われている番号 {len(used_here)} 種のうち"
+            say(f"[文字表] font.txt: {sum(1 for g in glyphs if g)} 字 / 本文で使われている番号 "
+                f"{len(used_here)} 種 ({' / '.join(used_by)}) のうち"
                 f"文字表に無い {len(missing)} 種"
                 + (f" (例: {' '.join(str(u) for u in missing[:10])}{' …' if len(missing) > 10 else ''})。"
                    "フォント画像のこの番号を書き足す (docs/10 の手順 3)" if missing
@@ -1958,29 +2017,9 @@ def check(folder: str, out=sys.stdout) -> int:
                 say(f"→ [フォント] {e['path']} は TIM2 として読めません。先頭 16 バイト {img.read(16).hex(' ').upper()}")
 
     if map_dir:
-        files = sorted(os.listdir(map_dir))
-        ok_map, ok_talk, lines, bad_examples = 0, 0, 0, []
-        no_talk_example = None          # 会話として読めなかった 1 番の部品 (名前, 先頭 16 バイト)
-        for name in files:
-            p = os.path.join(map_dir, name)
-            if not os.path.isfile(p):
-                continue
-            with open(p, "rb") as fh:
-                b = fh.read()
-            items = parse_map(b)
-            if not items:
-                bad_examples.append((name, b[:16].hex(" ").upper()))
-                continue
-            ok_map += 1
-            one = next((it for it in items if it["i"] == 1 and it["len"]), None)
-            if one:
-                tables = parse_tables(b[one["at"]:one["at"] + one["len"]])
-                if tables:
-                    ok_talk += 1
-                    lines += sum(1 for t in tables if t["msg"] for it in t["msg"] if it["codes"])
-                elif no_talk_example is None:
-                    head = b[one["at"]:one["at"] + 16]
-                    no_talk_example = (name, head.hex(" ").upper())
+        files = m["files"]
+        ok_map, ok_talk, lines = m["ok_map"], m["ok_talk"], m["lines"]
+        bad_examples, no_talk_example = m["bad"], m["no_talk"]
         say(f"\n[MAP] {len(files)} 件 / 入れ物として読めた {ok_map} 件 / 1 番が会話だった {ok_talk} 件 / 会話 {lines:,} 行")
         # 入れ物としては読めたのに会話が 1 つも取れないのは、1 番の部品の読み方
         # (表の数 + 12 バイトの項目) が外れている合図。数字を出すだけで判定して
