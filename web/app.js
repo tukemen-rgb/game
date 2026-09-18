@@ -4254,7 +4254,7 @@ async function buildIdxReport() {
     }
   }
 
-  let msgs = items.filter((it) => /\.msg$/i.test(it.name));
+  let msgs = items.filter((it) => /\.msg$/.test(plainName(it.name)));
   let msgByShape = false;
   if (!msgs.length) {
     msgByShape = true;
@@ -4272,7 +4272,7 @@ async function buildIdxReport() {
   }
   /* 文言の入れ物 (公開ソースの一覧): 日記・保存画面・出来事・釣り */
   const CONTAINERS = TEXT_CONTAINERS;
-  const bases = new Set(items.map((it) => (it.base || it.name).toLowerCase()));
+  const bases = new Set(items.map((it) => plainName(it.base || it.name)));
   const found = CONTAINERS.filter((n) => bases.has(n)), missing = CONTAINERS.filter((n) => !bases.has(n));
   let shapedContainers = [], containerByShape = false;
   if (!found.length) {
@@ -4355,7 +4355,7 @@ async function buildIdxReport() {
      ここは診られるので、`.msg` の段の外に置く (CLI の check と同じ) */
   const boxUsed = new Set();
   const boxes = found.length
-    ? items.filter((it) => CONTAINERS.includes((it.base || it.name).toLowerCase()))
+    ? items.filter((it) => CONTAINERS.includes(plainName(it.base || it.name)))
     : shapedContainers;
   for (const it of boxes.slice(0, MSG_CHECK_FILES)) {
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, it.len);
@@ -6074,9 +6074,19 @@ function bokuMsgVoice(codes) {
    (公開ソース MSG.py の ALT_NEWLINE_FILES)。待ち時間として読むと 1 字飛ばして本文がずれる */
 const ALT_BREAK_FILES = new Set(["turi_info.msg", "phot_info.msg", "okan_info.msg", "item_info.msg",
                                  "insect_menu.msg", "fishing.msg", "fish_info.msg"]);
+/* 名前で決まる規則を引くための名前 —— **道具が付けた `~2` を外した**小文字の名前 (#247)。
+   索引の名前がぶつかると `~2` を付ける。検査値ファイルから名前を当てるとフォルダが
+   付かないので、実物 (116 フォルダに 1951 件) では必ず何件も付く。ところが
+   「名前で決まる規則」(`.msg` かどうか / 0x8002 の読み方 / 文言の入れ物か) は
+   付いたままの名前で引いていたので、`system.msg~2` は丸ごと落ちていた。
+   外すのは**末尾の `~数字` だけ** —— 実物には `~saveload` のように先頭に `~` が
+   付くフォルダがある (公開ソースの SJIS_FILES)。tools/boku2.py の plain_name と同じ */
+function plainName(name) {
+  return String(name || "").split(/[\\/]/).pop().replace(/~\d+$/, "").toLowerCase();
+}
+
 function isAltBreak(name) {
-  const base = String(name || "").split(/[\\/]/).pop().toLowerCase();
-  return ALT_BREAK_FILES.has(base);
+  return ALT_BREAK_FILES.has(plainName(name));
 }
 
 function bokuMsgText(codes, glyphs, tags, alt) {
@@ -6549,7 +6559,7 @@ function bokuTsvBaseOffset(entry, entries) {
   let last = parts.length - 1;
   while (last > 0 && isPart(parts[last])) last--;
   if (last === parts.length - 1) return 0;                     /* 部品ではない */
-  if (!TEXT_CONTAINERS.includes((parts[last] || "").toLowerCase())) return 0;   /* マップ */
+  if (!TEXT_CONTAINERS.includes(plainName(parts[last] || ""))) return 0;   /* マップ */
   const basePath = "/" + parts.slice(0, last + 1).join("/");
   const base = (entries || []).find((e) => e.path === basePath);
   return base && typeof base.offset === "number" && typeof entry.offset === "number"
@@ -6562,10 +6572,13 @@ function bokuTsvStem(path) {
   let last = parts.length - 1;
   while (last > 0 && isPart(parts[last])) last--;
   const baseName = parts[last] || "";
-  const baseStem = baseName.replace(/\.[^.]*$/, "");
+  /* **`~2` は id に残す** (#247)。拡張子を落とすと `system.msg` と `system.msg~2` が
+     どちらも `system` になり、校正用 TSV の id がぶつかる */
+  const tail = (baseName.match(/~\d+$/) || [""])[0];
+  const baseStem = baseName.slice(0, baseName.length - tail.length).replace(/\.[^.]*$/, "") + tail;
   const idx = parts.slice(last + 1).map((s) => s.replace(/\.bin$/i, ""));
   if (!idx.length) return baseStem;
-  const container = TEXT_CONTAINERS.includes(baseName.toLowerCase());
+  const container = TEXT_CONTAINERS.includes(plainName(baseName));
   if (!container && idx.length === 1 && idx[0] === "1") return baseStem;   /* マップの会話 */
   return baseStem + "#" + idx.join("#");
 }

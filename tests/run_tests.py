@@ -6520,6 +6520,167 @@ class TestUnpackLandsEveryFile(unittest.TestCase):
                                  f"{kind}: {n} 個に切り分けたのに {len(got)} 個")
 
 
+class TestTheSuffixWeAddDoesNotHideTheFile(unittest.TestCase):
+    """**道具が付けた `~2` で、その先の段が取りこぼさないこと** (#247).
+
+    `unpack` は名前がぶつかると `~2` を付ける (#245・#246)。ところが
+    「名前で決まる規則」—— `.msg` かどうか / 0x8002 の読み方 / 文言の入れ物か ——
+    は付いたままの名前で引いていたので、**`system.msg~2` が丸ごと落ちていた**。
+    しかも `text` は「文字表で全部読めました」と言うので、気づけない。
+    """
+
+    @staticmethod
+    def sample_with_a_duplicate_name(tmp: str) -> tuple[str, str]:
+        """練習用データを作り、検査値ファイルの 15 番の名前を 14 番と同じにする.
+
+        実物ではフォルダが 116 あってファイル名だけが重なるので、`--names-from-crc`
+        を使えば**必ず**この形になる。@returns (一式のフォルダ, 検査値ファイル)
+        """
+        import struct
+        import boku2
+        import make_boku2_sample
+        folder = os.path.join(tmp, "S")
+        make_boku2_sample.build_sample(folder)
+        with open(os.path.join(folder, "BOKU2.CRC"), "rb") as fh:
+            raw = bytearray(fh.read())
+        dir_start = struct.unpack_from("<5I", raw, 0)[1]
+        at = dir_start + 15 * boku2.CRC_ENTRY + 8          # namemsg.msg → system.msg
+        raw[at:at + boku2.CRC_ENTRY - 8] = b"\0" * (boku2.CRC_ENTRY - 8)
+        raw[at:at + len(b"system.msg")] = b"system.msg"
+        crc_path = os.path.join(tmp, "dup.crc")
+        with open(crc_path, "wb") as fh:
+            fh.write(raw)
+        make_boku2_sample.damage(folder, "allnames")        # 索引の名前が読めない吸い出し
+        return folder, crc_path
+
+    def test_a_msg_with_a_suffix_is_still_read(self):
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            folder, crc_path = self.sample_with_a_duplicate_name(tmp)
+            out = os.path.join(tmp, "OUT")
+            with contextlib.redirect_stderr(io.StringIO()):
+                boku2.unpack(os.path.join(folder, "BOKU2.IDX"),
+                             os.path.join(folder, "BOKU2.IMG"), out, crc_path)
+            # **材料が弱くないこと**: `~2` の付いた `.msg` が本当にできている
+            self.assertTrue(os.path.exists(os.path.join(out, "system.msg~2")),
+                            f"材料が弱い: {sorted(os.listdir(out))}")
+            picked = [os.path.basename(p) for p in boku2.expand_inputs([out])]
+            self.assertIn("system.msg~2", picked,
+                          f"`~2` の付いた .msg を拾っていない: {sorted(picked)}")
+            rows = boku2.text_rows(os.path.join(out, "system.msg~2"), None)
+            self.assertTrue(rows, "拾っても中身が読めていない")
+
+    def test_the_id_keeps_the_suffix_so_two_files_do_not_share_one(self):
+        """`system.msg` と `system.msg~2` の id がぶつかると、校正で直した行が
+        どちらのファイルのものか分からなくなる."""
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            folder, crc_path = self.sample_with_a_duplicate_name(tmp)
+            out = os.path.join(tmp, "OUT")
+            with contextlib.redirect_stderr(io.StringIO()):
+                boku2.unpack(os.path.join(folder, "BOKU2.IDX"),
+                             os.path.join(folder, "BOKU2.IMG"), out, crc_path)
+            ids = [r[0] for p in boku2.expand_inputs([out])
+                   for r in boku2.text_rows(p, None)]
+            self.assertEqual(len(set(ids)), len(ids),
+                             "id がぶつかっている: "
+                             + str(sorted(i for i in ids if ids.count(i) > 1)))
+            self.assertTrue(any(i.startswith("system~2:") for i in ids), sorted(set(ids))[:8])
+
+    def test_the_page_break_rule_still_applies_to_a_suffixed_name(self):
+        """`item_info.msg~2` で 0x8002 を待ち時間として読むと、**本文が 1 字ずれる**."""
+        import boku2
+        self.assertTrue(boku2.is_alt_break("item_info.msg~2"))
+        self.assertTrue(boku2.is_alt_break("OUT/system/ITEM_INFO.MSG~13"))
+        codes = [0x0005, 0x8002, 0x0006, 0x8000]
+        glyphs = [chr(0x3042 + i) for i in range(16)]
+        self.assertEqual(boku2.decode(codes, glyphs, alt=True),
+                         boku2.decode(codes, glyphs, alt=boku2.is_alt_break("item_info.msg~2")))
+        self.assertNotEqual(boku2.decode(codes, glyphs, alt=True),
+                            boku2.decode(codes, glyphs, alt=False),
+                            "材料が弱い: この符号では 2 つの読み方が同じ答えになる")
+
+    def test_a_container_with_a_suffix_is_still_a_container(self):
+        """`diary.bin~2` を入れ物として拾わないと、`check` が「入れ物はありません」と言う."""
+        import boku2
+        self.assertEqual(boku2.plain_name("OUT/x/DIARY.BIN~2"), "diary.bin")
+        self.assertIn(boku2.plain_name("diary.bin~2"), boku2.TEXT_CONTAINERS)
+
+    def test_only_a_trailing_suffix_is_stripped(self):
+        """実物には `~saveload` のように**先頭に `~` が付く**フォルダがある
+        (公開ソースの SJIS_FILES = `system\\~saveload\\2.bin`)。そこを削ってはいけない."""
+        import boku2
+        self.assertEqual(boku2.plain_name("system/~saveload/2.bin"), "2.bin")
+        self.assertEqual(boku2.plain_name("~saveload"), "~saveload")
+        self.assertEqual(boku2.plain_name("a~2b.msg"), "a~2b.msg")
+        self.assertEqual(boku2.plain_name("x.msg~"), "x.msg~")
+        self.assertEqual(boku2.plain_name("x.msg~12"), "x.msg")
+
+    def test_a_name_that_matches_the_index_is_not_treated_as_a_clash(self):
+        """**いちばん普通の形**: 索引の名前も読めて、検査値ファイルの名前と一致する。
+        自分の名前を「ぶつかった」と数えると**全ファイルに `~2` が付き**、
+        その全部が `.msg` として拾われなくなる (#247)."""
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            out = os.path.join(tmp, "OUT")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                n, _u, _d, paths = boku2.unpack(
+                    os.path.join(folder, "BOKU2.IDX"), os.path.join(folder, "BOKU2.IMG"),
+                    out, os.path.join(folder, "BOKU2.CRC"))
+            # **材料が弱くないこと**: 検査値の名前を本当に全部当てている
+            self.assertIn(f"検査値ファイルの名前を {n} 件当てました", err.getvalue())
+            bumped = [p for p in paths if re.search(r"~\d+$", p)]
+            self.assertFalse(bumped, f"自分と同じ名前を当てただけで `~2` が付いた: {bumped}")
+            self.assertIn("system/system.msg", paths,
+                          f"フォルダ付きの名前が消えている: {paths[:6]}")
+            self.assertNotIn("`~2` を付けました", err.getvalue(), err.getvalue())
+
+    def test_it_does_not_say_it_matched_and_matched_nothing_at_once(self):
+        """「N 件当てました」と「1 件も当たりませんでした」を同時に言わない (#247)."""
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                boku2.unpack(os.path.join(folder, "BOKU2.IDX"),
+                             os.path.join(folder, "BOKU2.IMG"),
+                             os.path.join(tmp, "OUT"), os.path.join(folder, "BOKU2.CRC"))
+            said = err.getvalue()
+            self.assertIn("件当てました", said)
+            self.assertNotIn("1 件も当たりませんでした", said,
+                             f"言っていることが食い違っている:\n{said}")
+
+    def test_the_two_sides_strip_the_same_way(self):
+        """画面と一括処理で同じ名前を同じに畳むこと (片側だけ直すと答えが割れる)."""
+        import json
+        import shutil
+        import subprocess
+        import boku2
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        i = app.find("function plainName(")
+        self.assertGreater(i, 0, "app.js に plainName が無い")
+        src = app[i:app.index("\n}\n", i) + 3]
+        names = ["system.msg", "system.msg~2", "OUT/a/DIARY.BIN~13", "~saveload",
+                 "system/~saveload/2.bin", "a~2b.msg", "x.msg~", "1.bin", "#12", "",
+                 "a\\b\\item_info.MSG~2"]
+        res = subprocess.run(
+            [node, "-e", src + f"console.log(JSON.stringify({json.dumps(names)}.map(plainName)));"],
+            capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout), [boku2.plain_name(n) for n in names])
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
@@ -9724,6 +9885,11 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             fh.write(_cimg)
         out += [
             run(tool("boku2.py"), "unpack", at("clash.idx"), at("clash.img"), at("OUTclash")),
+            # **索引の名前も検査値の名前も読めて、一致する形** (#247)。いちばん普通の
+            # 形なのに、この道でしか出ない知らせがある
+            run(tool("boku2.py"), "unpack", os.path.join(sample, "BOKU2.IDX"),
+                os.path.join(sample, "BOKU2.IMG"), at("OUTcrc0"),
+                "--names-from-crc", os.path.join(sample, "BOKU2.CRC")),
             run(tool("boku2.py"), "check", at("void")),
             run(tool("boku2.py"), "unpack", os.path.join(sample, "BOKU2.IDX"),
                 os.path.join(sample, "BOKU2.IMG"), at("OUT")),

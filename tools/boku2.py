@@ -572,6 +572,12 @@ def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int, int]:
     seen = {e["path"] for e in entries}
     for i, e in enumerate(entries):
         keep = e["path"]
+        # **自分の枠は先に空ける** (#247)。索引の名前が読めていて検査値の名前と
+        # 同じなら、当てた名前は自分の名前そのもの。それを「ぶつかった」と数えると
+        # **全ファイルに `~2` が付く** —— いちばん普通の (両方読めて一致する) 形で、
+        # 名前が全部変になっていた。しかも `~2` が付くと `.msg` として拾われないので、
+        # 本文が丸ごと落ちる (#247 の本題)
+        seen.discard(keep)
         if i < len(crc["names"]) and crc["names"][i]:
             slot = crc["slots"][i] if i < len(crc["slots"]) else i
             if slot < len(crc["crcs"]):
@@ -586,8 +592,8 @@ def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int, int]:
                             n += 1
                         keep = f"{keep}~{n}"
                         bumped += 1
-                    seen.add(keep)
                     hit += 1
+        seen.add(keep)                     # 名前を使わなかったときも枠は戻す
         named.append(dict(e, path=keep))
     return named, hit, bumped
 
@@ -597,6 +603,9 @@ def unpack(idx_path: str, img_path: str, out_dir: str, crc_path: str | None = No
         idx = fh.read()
     size = os.path.getsize(img_path)
     entries = read_dfi(idx, size)
+    # **索引そのものの重なりは、名前を当てる前に数える** (#247)。あとで数えると、
+    # 検査値ファイルから当てて付いた `~2` まで混ざって、同じことを 2 回言う
+    dupes = sum(1 for e in entries if re.search(r"~\d+$", os.path.basename(e["path"])))
     # **索引の名前が読めないときの逃げ道** (#240)。社長の実物では名前が付かず
     # `#0 #1 …` のままだった (#1・#3)。名前は検査値ファイルにも入っていて、
     # そこは索引とは別の場所なので、片方が読めなくてももう片方から出ることがある
@@ -609,20 +618,22 @@ def unpack(idx_path: str, img_path: str, out_dir: str, crc_path: str | None = No
         else:
             with open(img_path, "rb") as img:
                 entries, hit, bumped = names_from_crc(crc, entries, img)
+            # **「当てました」と「1 件も当たりませんでした」を同時に言わない** (#247)。
+            # 後者は `if bumped:` の else に付いていたので、**全部当たって 1 件も
+            # ぶつからなかったとき** —— いちばん良い形 —— に 2 行が食い違っていた
             if hit:
                 print(f"検査値ファイルの名前を {hit} 件当てました "
                       f"(その項目の先頭 {CRC_HEAD} バイトの検査値が合ったものだけ)",
                       file=sys.stderr)
-            if bumped:
-                # **理由が違うので、索引の名前がぶつかったときとは別に言う** (#245)
-                print(f"注意: そのうち {bumped} 件は名前がぶつかったので `~2` を付けました。"
-                      "検査値ファイルの名前には**フォルダが付かない**ので、"
-                      "別のフォルダの同じ名前が重なります", file=sys.stderr)
+                if bumped:
+                    # **理由が違うので、索引の名前がぶつかったときとは別に言う** (#245)
+                    print(f"注意: そのうち {bumped} 件は名前がぶつかったので `~2` を付けました。"
+                          "検査値ファイルの名前には**フォルダが付かない**ので、"
+                          "別のフォルダの同じ名前が重なります", file=sys.stderr)
             else:
                 print("注意: 検査値ファイルの名前は 1 件も当たりませんでした "
                       "(並び順が索引と違うようです)。名前は索引のものを使います",
                       file=sys.stderr)
-    dupes = sum(1 for e in entries if "~" in os.path.basename(e["path"]))
     if dupes:
         print(f"注意: 同じ名前が {dupes} 件あり `~2` を付けて区別しました。"
               "フォルダの入れ子の規則が実物と違うかもしれません", file=sys.stderr)
@@ -991,8 +1002,29 @@ ALT_BREAK_FILES = {"turi_info.msg", "phot_info.msg", "okan_info.msg", "item_info
                    "insect_menu.msg", "fishing.msg", "fish_info.msg"}
 
 
+def plain_name(path: str) -> str:
+    """名前で決まる規則を引くための名前 —— **道具が付けた `~2` を外した**小文字の名前 (#247).
+
+    `unpack` は名前がぶつかると `~2` を付ける。検査値ファイルから名前を当てると
+    フォルダが付かないので、実物 (116 フォルダに 1951 件) では**必ず何件も付く**。
+    ところが「名前で決まる規則」—— `.msg` かどうか / 0x8002 の読み方 / 文言の
+    入れ物かどうか —— は付いたままの名前で引いていた。だから `system.msg~2` は
+    `.msg` として拾われず、`text` は**黙って読み飛ばして「全部読めました」と
+    言っていた**。数が減ったことも言わない。
+
+    外すのは**末尾の `~数字` だけ**。実物には `~saveload` のように**先頭に `~` が
+    付く**フォルダがある (公開ソースの SJIS_FILES = `system\\~saveload\\2.bin`) ので、
+    先頭や途中の `~` は触らない。
+
+    区切りは `/` と `\\` の両方で切る。索引の名前は 0x21〜0x7E なら何でも通るので
+    `\\` が入り得るし (公開ソースの道は `system\\namemsg\\namemsg.msg` の形)、
+    `os.path.basename` の答えが Windows と Linux で変わるのも避けたい。
+    """
+    return re.sub(r"~\d+$", "", re.split(r"[\\/]", path)[-1]).lower()
+
+
 def is_alt_break(name: str) -> bool:
-    return os.path.basename(name).lower() in ALT_BREAK_FILES
+    return plain_name(name) in ALT_BREAK_FILES
 
 
 def decode(codes: list[int], glyphs: list[str] | None, tags: bool = True, alt: bool = False) -> str:
@@ -1270,10 +1302,15 @@ def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> 
     音声の番号 (8 桁の数字) の項目は文章ではないので、既定では省く (校正の対象にならない)."""
     with open(path, "rb") as fh:
         b = fh.read()
-    stem = os.path.splitext(os.path.basename(path))[0]
+    # **`~2` は id に残す** (#247)。拡張子を落とすと `system.msg` と `system.msg~2` が
+    # どちらも `system` になり、**校正用 TSV の id がぶつかる** (下のマップの部品と同じ罠)。
+    # 名前で決まる規則を引くときだけ外して、人に見せる id には残す
+    base = os.path.basename(path)
+    tail = re.search(r"~\d+$", base)
+    stem = os.path.splitext(base[:tail.start()] if tail else base)[0] + (tail.group(0) if tail else "")
     # マップの部品 (OUT/maps/M_A01000/1.bin) はどれも 1.bin なので、id が全部 "1:…" で
     # ぶつかる。親フォルダの名前 (マップ名) を使う
-    if os.path.basename(path).lower() == "1.bin":
+    if plain_name(path) == "1.bin":
         parent = os.path.basename(os.path.dirname(os.path.abspath(path)))
         if parent:
             stem = parent
@@ -1410,8 +1447,8 @@ def expand_inputs(paths: list[str]) -> list[str]:
         for root, dirs, files in os.walk(p):
             dirs.sort()
             for f in sorted(files):
-                low = f.lower()
-                if low.endswith(".msg") or f == "1.bin" or low in TEXT_CONTAINERS:
+                low = plain_name(f)
+                if low.endswith(".msg") or low == "1.bin" or low in TEXT_CONTAINERS:
                     out.append(os.path.join(root, f))
     return out
 
@@ -1543,7 +1580,7 @@ DEEP_HUNT_FILES = 20
 
 def worth_a_deep_look(path: str) -> bool:
     """文字表の続きが入っていそうな**名前**か (深く読む価値があるか)."""
-    low = os.path.basename(path).lower()
+    low = plain_name(path)
     return "font" in low or low.endswith(".tms")
 #: **フォント自身**のファイルから読む上限 (#171)。ここを 64KB にしていたのが誤りだった。
 #: 実物の頁 1 枚は 512×1024 ドットの 8bit 索引で **51 万バイト**あり、2 枚目は 0x7D508
@@ -1866,10 +1903,10 @@ def compare_crc_names(crc: dict, entries: list) -> tuple[int, int, tuple | None]
     for i, e in enumerate(entries):
         if i >= len(crc["names"]) or not crc["names"][i]:
             continue
-        ours = re.sub(r"~\d+$", "", os.path.basename(e["path"]))
+        ours = plain_name(e["path"])
         if ours.startswith("#"):
             continue
-        if ours.lower() == crc["names"][i].lower():
+        if ours == crc["names"][i].lower():
             same += 1
         else:
             diff += 1
@@ -2130,8 +2167,8 @@ def check(folder: str, out=sys.stdout) -> int:
             "ゲーム自身の検査値で確かめられます)")
         skipped.append("検査値との突き合わせ (BOKU2.CRC が無い)")
 
-    msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
-    bases = {os.path.basename(e["path"]).lower() for e in entries}
+    msgs = [e for e in entries if plain_name(e["path"]).endswith(".msg")]
+    bases = {plain_name(e["path"]) for e in entries}
     found = [n for n in TEXT_CONTAINERS if n in bases]
     missing = [n for n in TEXT_CONTAINERS if n not in bases]
 
@@ -2233,7 +2270,7 @@ def check(folder: str, out=sys.stdout) -> int:
         # 名前で拾えたときは `.msg` に入らないので、そのままだと丸ごと落ちていた
         # (皮肉なことに、名前が読めない吸い出しのほうが多く読めていた)
         box_used: set[int] = set()
-        boxes = ([e for e in entries if os.path.basename(e["path"]).lower() in TEXT_CONTAINERS]
+        boxes = ([e for e in entries if plain_name(e["path"]) in TEXT_CONTAINERS]
                  or shaped_containers)
         for e in boxes[:MSG_CHECK_FILES]:
             img.seek(e["at"])
