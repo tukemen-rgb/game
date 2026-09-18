@@ -1800,6 +1800,37 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
         lines.append(f"→ 検査値ファイルは {crc['n']:,} 件、索引から数えたファイルは "
                      f"{len(entries):,} 件で**合いません** (索引のレコードは {rec_count:,} 件)。"
                      "索引の読み方かこの数え方のどちらかが違います。この行ごと報告してください")
+    # **名前も突き合わせる** (#241)。索引の名前が読めているなら、検査値ファイルの
+    # 名前と 1 件ずつ比べられる。**同じものが 2 か所に書いてある**ので、食い違えば
+    # どちらかの読み方が違う。大文字小文字は読み方の間違いではないので区別しない。
+    # 索引側の `~2` (同じ名前を見分けるためにこちらが付けた印) は外してから比べる
+    if not names_missing and any(crc["names"]):
+        same = diff = 0
+        first_diff = None
+        for i, e in enumerate(entries):
+            if i >= len(crc["names"]) or not crc["names"][i]:
+                continue
+            ours = re.sub(r"~\d+$", "", os.path.basename(e["path"]))
+            if ours.startswith("#"):
+                continue                      # こちらが名前を読めていない項目は比べない
+            if ours.lower() == crc["names"][i].lower():
+                same += 1
+            else:
+                diff += 1
+                if first_diff is None:
+                    first_diff = (ours, crc["names"][i])
+        if same or diff:
+            if not diff:
+                lines.append(f"  名前も {same:,} 件そろっています "
+                             "(索引と検査値ファイルの 2 か所が同じことを言っています)")
+            else:
+                problems += 1
+                lines.append(f"→ 索引の名前と検査値ファイルの名前が {diff:,} 件食い違います "
+                             f"(そろった {same:,} 件)。例: 索引は {first_diff[0]}、"
+                             f"検査値ファイルは {first_diff[1]}。"
+                             "**同じものが 2 か所に書いてあるので、どちらかの読み方が違います**。"
+                             "この行ごと報告してください")
+
     # **中身まで確かめる。** 切り分けた先頭 0x80 バイトの CRC が、向こうの値と合うか
     ok = ng = 0
     first_bad = None

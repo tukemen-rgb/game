@@ -342,6 +342,8 @@ DAMAGE = {
     "bignum": "system.msg の文字番号を 1 つ、文字表の字数より大きくする",
     # 切り分けた位置がずれている形 (#239)。BOKU2.CRC の検査値だけが気づける
     "crc": "BOKU2.CRC の検査値を 1 つ変える (切り分けと食い違う)",
+    # 2 か所に書いてある名前が食い違う形 (#241)
+    "crcname": "BOKU2.CRC の名前を 1 つ変える (索引の名前と食い違う)",
 }
 
 
@@ -392,6 +394,21 @@ def damage(out_dir: str, kind: str) -> str:
             fh.seek(e["at"] + (0 if kind == "msg" else 0x80))
             fh.write(b"\xee" * 16)
         return f"BOKU2.IMG の {want} の先頭 16 バイト{'' if kind == 'msg' else ' (TIM2 の位置)'}を EE で埋めた"
+    if kind == "crcname":
+        # **同じものが 2 か所に書いてある**のに食い違う形。索引も本体も検査値も
+        # 読めるので、名前を突き合わせないと気づけない
+        crc_path = os.path.join(out_dir, "BOKU2.CRC")
+        with open(crc_path, "rb") as fh:
+            raw = bytearray(fh.read())
+        dir_start = struct.unpack_from("<5I", raw, 0)[1]
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import boku2
+        at = dir_start + 8                     # 1 件目の名前
+        end = raw.find(b"\0", at, dir_start + boku2.CRC_ENTRY)
+        raw[at:end] = b"X" * (end - at)
+        with open(crc_path, "wb") as fh:
+            fh.write(raw)
+        return "BOKU2.CRC の 1 件目の名前を XXX… にした (索引の名前と食い違う)"
     if kind == "crc":
         # **ゲーム自身の検査値と食い違う形**。索引も本体も読めるので、
         # ここまでの段は全部緑のまま通る。検査値の突き合わせだけが気づく

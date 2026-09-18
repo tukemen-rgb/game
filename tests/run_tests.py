@@ -7272,6 +7272,72 @@ class TestCrcFileCrossCheck(unittest.TestCase):
             self.assertTrue("--names-from-crc" in got,
                             f"打つべきコマンドを出していない:\n{got[-600:]}")
 
+    def test_the_two_name_lists_are_compared(self):
+        """**同じものが 2 か所に書いてある**ので、突き合わせること (#241).
+
+        索引にも検査値ファイルにも名前が入っています。両方読めたなら、
+        食い違いはどちらかの読み方が違うということ。索引も本体も検査値も
+        読めてしまうので、**名前を比べなければ誰も気づけません**。
+        """
+        import io
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            got = out.getvalue()
+            self.assertTrue("名前も 20 件そろっています" in got,
+                            f"そろっていると言っていない:\n{got[-500:]}")
+
+            make_boku2_sample.damage(folder, "crcname")
+            out = io.StringIO()
+            rc = boku2.check(folder, out=out)
+            got = out.getvalue()
+            self.assertEqual(rc, 1, f"名前が食い違うのに問題なしで終わった:\n{got[-500:]}")
+            self.assertTrue("名前が 1 件食い違います" in got, f"食い違いを言っていない:\n{got[-500:]}")
+            # **どちらが何と言っているか**まで出すこと (報告の材料になる)
+            self.assertTrue("索引は diary.bin" in got, f"索引側の名前を出していない:\n{got[-500:]}")
+            self.assertTrue("検査値ファイルは XXX" in got,
+                            f"検査値ファイル側の名前を出していない:\n{got[-500:]}")
+
+    def test_the_name_check_is_not_fooled_by_case_or_our_own_marks(self):
+        """**読み方の間違いでないものを、食い違いに数えない** (#241).
+
+        大文字小文字の違いと、同じ名前を見分けるためにこちらが付けた `~2` は、
+        どちらも索引の読み方が外れている証拠ではありません。ここで鳴ると、
+        本当の食い違いが埋もれます。
+        """
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            with open(os.path.join(folder, "BOKU2.CRC"), "rb") as fh:
+                crc = boku2.read_crc_file(fh.read())
+            with open(os.path.join(folder, "BOKU2.IDX"), "rb") as fh:
+                idx = fh.read()
+            img_path = os.path.join(folder, "BOKU2.IMG")
+            entries = boku2.read_dfi(idx, os.path.getsize(img_path))
+
+            # 1. 大文字にしても食い違いに数えない
+            crc["names"] = [n.upper() for n in crc["names"]]
+            with open(img_path, "rb") as img:
+                lines, problems = boku2.crc_report(crc, entries, img, len(entries))
+            got = "\n".join(lines)
+            self.assertEqual(problems, 0, f"大文字小文字で鳴っている:\n{got}")
+            self.assertTrue("名前も" in got and "そろっています" in got, got)
+
+            # 2. こちらが付けた `~2` も外して比べる
+            marked = [dict(e) for e in entries]
+            marked[0]["path"] = marked[0]["path"] + "~2"
+            with open(img_path, "rb") as img:
+                lines, problems = boku2.crc_report(crc, marked, img, len(entries))
+            self.assertEqual(problems, 0, f"`~2` で鳴っている:\n" + "\n".join(lines))
+
     def test_it_says_when_there_is_none(self):
         """無いときは「無い」と言い、**診ていない段**に数えること (#175)."""
         import io
@@ -7419,6 +7485,8 @@ class TestDamageDrill(unittest.TestCase):
         "bignum": "この作品の文字表 1656 字",
         # 切り分けとゲーム自身の検査値が食い違う形 (#239)
         "crc": "検査値が 1 件合いません",
+        # 2 か所に書いてある名前が食い違う形 (#241)
+        "crcname": "名前が 1 件食い違います",
     }
 
     def test_each_damage_kind_is_diagnosed(self):
