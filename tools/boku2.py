@@ -1020,8 +1020,13 @@ def ansi_damage_note(bad: list[int]) -> str:
             "校正では「半角文字が混ざっています」と出ます")
 
 
-def glyph_range_note(top: int) -> str:
+def glyph_range_note(top: int, unseen: str = "") -> str:
     """**使われている文字番号の最大**が何を意味するか、1 行で言う (#230).
+
+    `unseen` は「まだ診ていない所」の名前 (MAP の会話など)。そこがあるなら
+    **これは本文ぜんぶの最大ではない**ので、頁の判定は出さない (#234)。
+    ただし `FONT_GLYPHS` 以上という判定だけは、一部しか見ていなくても動かない
+    —— 1 つでも収まらない番号が出た時点で、読み方が違うと決まる。
 
     数字だけ出すのは、出さないより悪い (#96)。この 1 つの数で 3 つ決まる:
 
@@ -1037,6 +1042,10 @@ def glyph_range_note(top: int) -> str:
                 f"{FONT_GLYPHS} 字 (1 行 {FONT_COLS} 字 × {FONT_GLYPHS // FONT_COLS} 行) に"
                 "収まりません。字数の見込みか、2 バイトを 1 字の番号として読む"
                 "読み方そのものが違います。この行ごと報告してください")
+    if unseen:
+        return (f"  使われている文字番号の最大は {top} —— ただし**{unseen}を診ていない**ので、"
+                "本文ぜんぶの数ではありません。文字表の 2 枚目が要るかどうかは、"
+                "ここでは決まりません")
     if top < FONT_PAGE1_GLYPHS:
         return (f"  使われている文字番号の最大は {top}。文字表 {FONT_GLYPHS} 字のうち"
                 f"**1 枚目 ({FONT_PAGE1_GLYPHS} 字) の範囲に収まる**ので、"
@@ -1843,6 +1852,7 @@ def check(folder: str, out=sys.stdout) -> int:
                 f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探しました。"
                 "この行ごと報告してください")
         ok_msg, first_bad = 0, None
+        looked_msgs = min(MSG_CHECK_FILES, len(msgs))
         msg_used: set[int] = set()
         len_ok, len_ng = 0, 0            # 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が合うか
         for e in msgs[:MSG_CHECK_FILES]:
@@ -1860,7 +1870,7 @@ def check(folder: str, out=sys.stdout) -> int:
             elif first_bad is None:
                 first_bad = (e, b[:16], b)
         if msgs:
-            looked = min(MSG_CHECK_FILES, len(msgs))
+            looked = looked_msgs
             if msg_by_shape:
                 # **形で拾ったときは、この数に意味が無い** (#197)。選び方そのものが
                 # 「読めたか」なので、答えは必ず「全部読めた」になる。
@@ -1908,6 +1918,16 @@ def check(folder: str, out=sys.stdout) -> int:
             box_used |= used_numbers_of(img.read(e["len"]), e["path"])
         map_used = m["used"] if m else set()
         used_here = msg_used | box_used | map_used
+        # **診ていない所があるなら、いちばん大きい番号は本文ぜんぶの数ではない** (#234)。
+        # #232 で `used` に足したのと同じ断り。ここで黙ると「2 枚目は要りません」を
+        # 本文の一部だけで言い切ることになる
+        unseen = []
+        if not (m and m["files"]):
+            unseen.append("MAP の会話")
+        if len(msgs) > looked_msgs:
+            unseen.append(f"本文 {len(msgs) - looked_msgs} 件")
+        if len(boxes) > MSG_CHECK_FILES:
+            unseen.append(f"入れ物 {len(boxes) - MSG_CHECK_FILES} 件")
         # MAP が無い / 空のときは、0 種と書かずに**診ていない**と言う。0 は
         # 「見た結果 0」に読めるが、ここは「見ていない」。数の意味が違う
         used_by = [f".msg {len(msg_used)}", f"入れ物 {len(box_used)}",
@@ -1916,7 +1936,7 @@ def check(folder: str, out=sys.stdout) -> int:
         # **使われている文字番号の最大**は、実物で最初に出る大事な数 (#230)。
         # 数字だけ出さず、文字表づくりの段取りが決まる所まで言う
         if used_here:
-            say(glyph_range_note(max(used_here)))
+            say(glyph_range_note(max(used_here), "と".join(unseen)))
             if max(used_here) >= FONT_GLYPHS:
                 problems += 1
         font_txt = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "font.txt"), None)

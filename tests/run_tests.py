@@ -1537,6 +1537,49 @@ console.log(JSON.stringify(out));
         self.assertTrue("読み方そのものが違います" in over, over)
         self.assertTrue("報告してください" in over, over)
 
+    def test_a_partly_read_dump_does_not_get_a_page_verdict(self):
+        """**診ていない所があるなら、頁の判定を出さない** (#234).
+
+        `check` は「いちばん大きい番号は 165 なので 2 枚目の画像は要りません」と
+        言い切っていました。ところが MAP フォルダが渡されていなければ、
+        **物語の会話を 1 行も読んでいない**。この作品の本文の大半がそこにあるので、
+        本当の最大はもっと大きいかもしれず、頁の判定はひっくり返り得ます。
+        #232 で `used` に足したのと同じ断りを、`check` にも入れます。
+
+        ただし **1656 以上**という判定だけは一部しか見ていなくても動きません。
+        1 つでも収まらない番号が出た時点で、読み方が違うと決まるからです。
+        """
+        import io
+        import shutil
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            whole = out.getvalue()
+            self.assertTrue("2 枚目の画像は要りません" in whole,
+                            f"ぜんぶ診たのに判定を出していない:\n{whole[-600:]}")
+
+            shutil.rmtree(os.path.join(folder, "MAP"))
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            part = out.getvalue()
+            self.assertTrue("MAP の会話を診ていない" in part,
+                            f"何を診ていないか言っていない:\n{part[-600:]}")
+            self.assertFalse("2 枚目の画像は要りません" in part,
+                             f"本文の一部だけで頁の判定を言い切っている:\n{part[-600:]}")
+            self.assertTrue("ここでは決まりません" in part,
+                            f"決まらないと言っていない:\n{part[-600:]}")
+
+        # 1656 以上は、一部しか見ていなくても言い切ること (読み方そのものの合図)
+        over = boku2.glyph_range_note(boku2.FONT_GLYPHS + 1, "MAP の会話")
+        self.assertTrue(over.startswith("→"), f"一部でも言い切るべき所を弱めた: {over}")
+        self.assertTrue("読み方そのものが違います" in over, over)
+
     def test_the_two_sides_judge_the_biggest_number_the_same_way(self):
         """画面と一括処理が、同じ番号に同じことを言う (#230)."""
         import re
@@ -1558,22 +1601,27 @@ console.log(JSON.stringify(out));
         self.assertEqual(len(consts), 3, f"app.js から定数を {len(consts)} 件しか拾えない")
         tops = [0, 1, boku2.FONT_PAGE1_GLYPHS - 1, boku2.FONT_PAGE1_GLYPHS,
                 boku2.FONT_GLYPHS - 1, boku2.FONT_GLYPHS, boku2.FONT_GLYPHS + 100, 40000]
+        #: 診ていない所の有無も突き合わせる (#234)。片側だけ断りを忘れたら落ちる
+        unseens = ["", "MAP の会話", "MAP の会話と本文 601 件"]
         with tempfile.TemporaryDirectory() as tmp:
             script = os.path.join(tmp, "range.mjs")
             with open(script, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(consts) + "\n" + app[i:j]
                          + "\nconsole.log(JSON.stringify("
-                         "JSON.parse(process.argv[2]).map(glyphRangeNote)));\n")
-            res = subprocess.run([node, script, json.dumps(tops)],
+                         "JSON.parse(process.argv[2]).map(([t, u]) => glyphRangeNote(t, u))));\n")
+            cases = [[t, u] for t in tops for u in unseens]
+            res = subprocess.run([node, script, json.dumps(cases)],
                                  capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr[-2000:])
         got = json.loads(res.stdout)
-        for k, n in enumerate(tops):
-            self.assertEqual(boku2.glyph_range_note(n), got[k],
-                             f"番号 {n} で言うことが違う:\n  CLI: {boku2.glyph_range_note(n)}"
-                             f"\n  画面: {got[k]}")
-        # 3 通りとも材料に入っていること (同じ文ばかり比べても一致してしまう)
-        for want in ("2 枚目の画像は要りません", "2 枚目の画像が要ります", "収まりません"):
+        for k, (n, u) in enumerate(cases):
+            want = boku2.glyph_range_note(n, u)
+            self.assertEqual(want, got[k],
+                             f"番号 {n} / 診ていない {u!r} で言うことが違う:"
+                             f"\n  CLI: {want}\n  画面: {got[k]}")
+        # 4 通りとも材料に入っていること (同じ文ばかり比べても一致してしまう)
+        for want in ("2 枚目の画像は要りません", "2 枚目の画像が要ります", "収まりません",
+                     "ここでは決まりません"):
             self.assertTrue(any(want in g for g in got),
                             f"「{want}」を出す材料が入っていない")
 

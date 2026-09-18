@@ -3746,13 +3746,20 @@ function ansiDamageNote(bad) {
  *
  * 数字だけ出すのは、出さないより悪い (#96)。この 1 つの数で 3 つ決まる:
  * 文字表 1656 字という見込みが崩れるか / 2 枚目を探さずに済むか / 何字ぶん要るか。
+ * `unseen` (まだ診ていない所の名前) があるなら、頁の判定は出さない (#234)。
  */
-function glyphRangeNote(top) {
+function glyphRangeNote(top, unseen) {
   if (top >= FONT_GLYPHS) {
     return `→ 使われている文字番号の最大が ${top} で、この作品の文字表 `
       + `${FONT_GLYPHS} 字 (1 行 ${FONT_COLS} 字 × ${FONT_GLYPHS / FONT_COLS} 行) に`
       + "収まりません。字数の見込みか、2 バイトを 1 字の番号として読む"
       + "読み方そのものが違います。この行ごと報告してください";
+  }
+  if (unseen) {
+    /* **診ていない所があるなら、本文ぜんぶの最大ではない** (#234)。
+       ここで黙ると「2 枚目は要りません」を本文の一部だけで言い切ることになる */
+    return `  使われている文字番号の最大は ${top} —— ただし**${unseen}を診ていない**ので、`
+      + "本文ぜんぶの数ではありません。文字表の 2 枚目が要るかどうかは、ここでは決まりません";
   }
   if (top < FONT_PAGE1_GLYPHS) {
     return `  使われている文字番号の最大は ${top}。文字表 ${FONT_GLYPHS} 字のうち`
@@ -4215,7 +4222,14 @@ async function buildIdxReport() {
      数字だけ出さず、文字表づくりの段取りが決まる所まで言う (CLI の check と同じ言葉) */
   if (usedHere.size) {
     const top = Math.max(...usedHere);
-    lines.push(glyphRangeNote(top));
+    /* **診ていない所**を数えて渡す (#234)。CLI の check と同じ並び・同じ言葉 */
+    const unseen = [];
+    if (!maps.length) unseen.push("MAP の会話");
+    if (msgs.length > Math.min(MSG_CHECK_FILES, msgs.length)) {
+      unseen.push(`本文 ${msgs.length - Math.min(MSG_CHECK_FILES, msgs.length)} 件`);
+    }
+    if (boxes.length > MSG_CHECK_FILES) unseen.push(`入れ物 ${boxes.length - MSG_CHECK_FILES} 件`);
+    lines.push(glyphRangeNote(top, unseen.join("と")));
     if (top >= FONT_GLYPHS) problems++;
   }
   /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
