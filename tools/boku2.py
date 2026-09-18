@@ -2337,11 +2337,18 @@ def check(folder: str, out=sys.stdout) -> int:
         # 名前で拾えたときは `.msg` に入らないので、そのままだと丸ごと落ちていた
         # (皮肉なことに、名前が読めない吸い出しのほうが多く読めていた)
         box_used: set[int] = set()
+        box_bad = 0
         boxes = ([e for e in entries if plain_name(e["path"]) in TEXT_CONTAINERS]
                  or shaped_containers)
         for e in boxes[:MSG_CHECK_FILES]:
             img.seek(e["at"])
-            box_used |= used_numbers_of(img.read(e["len"]), e["path"])
+            raw = img.read(e["len"])
+            # **開いたが読めなかった**のか、**読めたが文字番号が無い**のかを分ける (#251)。
+            # `saveload.bin` は中身が Shift-JIS なので、読めていても番号は 0 になる。
+            # 「番号が 0」で数えると、そろっている吸い出しでも毎回断ることになる
+            if parse_map(raw) is None:
+                box_bad += 1
+            box_used |= used_numbers_of(raw, e["path"])
         map_used = m["used"] if m else set()
         used_here = msg_used | box_used | map_used
         # **診ていない所があるなら、いちばん大きい番号は本文ぜんぶの数ではない** (#234)。
@@ -2354,6 +2361,14 @@ def check(folder: str, out=sys.stdout) -> int:
             unseen.append(f"本文 {len(msgs) - looked_msgs} 件")
         if len(boxes) > MSG_CHECK_FILES:
             unseen.append(f"入れ物 {len(boxes) - MSG_CHECK_FILES} 件")
+        # **「開いたが読めなかった」を「見た結果 0」に混ぜない** (#251)。吸い出しが
+        # 途中で切れた形 (`--break empty`) では `.msg` 4 件が全部ゼロ埋めで、
+        # 番号は MAP からしか出ていないのに「2 枚目の画像は要りません」と
+        # **言い切って**いた。本文の大半を見ないまま出す太鼓判になる
+        if msgs and looked_msgs - ok_msg > 0:
+            unseen.append(f"読めなかった本文 {looked_msgs - ok_msg} 件")
+        if box_bad:
+            unseen.append(f"読めなかった入れ物 {box_bad} 件")
         # MAP が無い / 空のときは、0 種と書かずに**診ていない**と言う。0 は
         # 「見た結果 0」に読めるが、ここは「見ていない」。数の意味が違う
         used_by = [f".msg {len(msg_used)}", f"入れ物 {len(box_used)}",

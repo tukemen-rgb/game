@@ -4359,11 +4359,15 @@ async function buildIdxReport() {
      名前が読めない吸い出しのほうが多く読めていた)。`.msg` が 1 件も無くても
      ここは診られるので、`.msg` の段の外に置く (CLI の check と同じ) */
   const boxUsed = new Set();
+  let boxBad = 0;
   const boxes = found.length
     ? items.filter((it) => CONTAINERS.includes(plainName(it.base || it.name)))
     : shapedContainers;
   for (const it of boxes.slice(0, MSG_CHECK_FILES)) {
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, it.len);
+    /* **開いたが読めなかった**のか、**読めたが文字番号が無い**のかを分ける (#251)。
+       saveload.bin は中身が Shift-JIS なので、読めていても番号は 0 になる */
+    if (!parseBokuMap(bytes)) boxBad++;
     for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) boxUsed.add(c);
   }
   const usedHere = new Set([...msgUsed, ...boxUsed, ...mapScan.used]);
@@ -4385,6 +4389,13 @@ async function buildIdxReport() {
       unseen.push(`本文 ${msgs.length - Math.min(MSG_CHECK_FILES, msgs.length)} 件`);
     }
     if (boxes.length > MSG_CHECK_FILES) unseen.push(`入れ物 ${boxes.length - MSG_CHECK_FILES} 件`);
+    /* **「開いたが読めなかった」を「見た結果 0」に混ぜない** (#251)。吸い出しが
+       途中で切れた形では .msg が全部ゼロ埋めで、番号は MAP からしか出ていないのに
+       「2 枚目の画像は要りません」と言い切っていた (CLI の check と同じ言葉) */
+    const lookedMsgs = Math.min(MSG_CHECK_FILES, msgs.length);
+    if (msgs.length && lookedMsgs - okMsg > 0) unseen.push(`読めなかった本文 ${lookedMsgs - okMsg} 件`);
+    if (boxBad) unseen.push(`読めなかった入れ物 ${boxBad} 件`);
+
     lines.push(glyphRangeNote(top, unseen.join("と")));
     if (top >= FONT_GLYPHS) problems++;
   }

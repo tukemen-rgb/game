@@ -6964,6 +6964,182 @@ class TestTheSecondFontPageIsCountedAsNotChecked(unittest.TestCase):
         self.assertTrue(lines[0].startswith(boku2.FONT_HUNT_NONE), lines[0])
 
 
+class TestOpeningAFileIsNotTheSameAsReadingIt(unittest.TestCase):
+    """**「開いたが読めなかった」を「見た結果 0」に混ぜない** (#251).
+
+    吸い出しが途中で切れた形 (`--break empty`) では `.msg` 4 件と入れ物 4 件が
+    全部ゼロ埋めで、文字番号は MAP からしか出ていない。それなのに `check` は
+
+        使われている文字番号の最大は 156。… **2 枚目の画像は要りません**
+
+    と**言い切って**いた。本文の大半を見ないまま出す太鼓判で、#234 で直したはずの
+    形が別の入口から戻っていた (向こうは「上限で打ち切った」分だけを数えていた)。
+    """
+
+    @staticmethod
+    def check(folder: str) -> str:
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                            "check", folder], capture_output=True, text=True, cwd=REPO)
+        return r.stdout + r.stderr
+
+    @staticmethod
+    def glyph_line(out: str) -> str:
+        return next((l for l in out.splitlines() if "使われている文字番号の最大" in l), "")
+
+    def test_a_hollowed_out_dump_does_not_get_the_page_verdict(self):
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            make_boku2_sample.damage(folder, "empty")
+            out = self.check(folder)
+            # **材料が弱くないこと**: `.msg` は本当に 1 件も読めていない
+            self.assertIn("先頭 4 件のうち読めた形: 0 件", out, out[-600:])
+            line = self.glyph_line(out)
+            self.assertTrue(line, f"最大の番号を言っていない:\n{out[-600:]}")
+            self.assertIn("読めなかった本文 4 件", line, line)
+            self.assertIn("読めなかった入れ物 4 件", line, line)
+            self.assertNotIn("2 枚目の画像は要りません", line,
+                             f"本文の大半を見ないまま太鼓判を押している: {line}")
+
+    def test_a_healthy_dump_still_gets_the_verdict(self):
+        """**材料が弱くないこと**: いつも断るなら、断る意味が無い."""
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            line = self.glyph_line(self.check(folder))
+            self.assertIn("2 枚目の画像は要りません", line, line)
+            self.assertNotIn("読めなかった本文", line, line)
+            self.assertNotIn("読めなかった入れ物", line, line)
+
+    def test_the_two_sides_count_the_same_things(self):
+        """画面も同じ 2 つを数えること (片側だけだと、同じ吸い出しで答えが割れる)."""
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            pushed = [l for l in fh.read().splitlines() if "unseen.push(" in l]
+        self.assertTrue(any("読めなかった本文" in l for l in pushed),
+                        f"画面が「読めなかった本文」を数えていない: {pushed}")
+        self.assertTrue(any("読めなかった入れ物" in l for l in pushed),
+                        f"画面が「読めなかった入れ物」を数えていない: {pushed}")
+
+
+class TestEveryAskToReportIsCounted(unittest.TestCase):
+    """**「報告してください」と書いてある行は、必ず数に入っていること** (#251).
+
+    #97 (→ と言いながら数えない) と #250 (報告と言いながら「問題なし」) は、
+    どちらも**同じ形**を別の段で踏んだもの。一覧を持つと必ず古くなるので、
+    練習データの壊し方**全通り**で `check` を回して、出た文字から機械的に見る。
+
+    見るのは 3 つ:
+      A. `→` の行が 1 本でもあれば、締めは「確認事項 N 件」
+      B. `→` が 1 本も無ければ、締めは「問題なし」 (要らない心配をさせない)
+      C. `→` でも `→` の続きでもない「報告」の依頼は、**診ていない段**で
+         受け止められていること (数 ≤ 診ていない段の件数)
+    """
+
+    #: 締めの行と、すでに数えられている行を指す言い方は C から外す。
+    #: 前者は数え方そのもの、後者は「上の → の行も一緒に」という案内
+    NOT_AN_ASK = ("== 結果:", "その行も報告してください")
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil
+        import subprocess
+        import make_boku2_sample
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.out = {}
+        folders = {}
+        base = os.path.join(cls.tmp.name, "OK")
+        make_boku2_sample.build_sample(base)
+        folders["ok"] = base
+        for kind in sorted(make_boku2_sample.DAMAGE):
+            d = os.path.join(cls.tmp.name, "D_" + kind)
+            make_boku2_sample.build_sample(d)
+            make_boku2_sample.damage(d, kind)
+            folders[kind] = d
+        nomap = os.path.join(cls.tmp.name, "NOMAP")
+        make_boku2_sample.build_sample(nomap)
+        shutil.rmtree(os.path.join(nomap, "MAP"))
+        folders["nomap"] = nomap
+        for name, folder in folders.items():
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                                "check", folder], capture_output=True, text=True, cwd=REPO)
+            cls.out[name] = r.stdout + r.stderr
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @staticmethod
+    def arrows(out: str) -> list[str]:
+        return [l for l in out.splitlines() if l.lstrip().startswith("→")]
+
+    @staticmethod
+    def skipped_count(out: str) -> int:
+        got = re.search(r"^診ていない段: (\d+) 件", out, re.M)
+        return int(got.group(1)) if got else 0
+
+    @classmethod
+    def orphan_asks(cls, out: str) -> list[str]:
+        """`→` にも `→` の続きにも属さない「報告」の依頼."""
+        orphans, under_arrow = [], False
+        for line in out.splitlines():
+            if not line.strip():
+                under_arrow = False
+                continue
+            if line.lstrip().startswith("→"):
+                under_arrow = True
+                continue
+            if not line.startswith(" "):
+                under_arrow = False
+            if "報告" in line and not under_arrow \
+                    and not any(k in line for k in cls.NOT_AN_ASK):
+                orphans.append(line.strip())
+        return orphans
+
+    def test_the_corpus_really_ran(self):
+        """前提の確認: 壊し方が全通り回っていて、→ が出ている回もあること."""
+        import make_boku2_sample
+        self.assertEqual(len(self.out), len(make_boku2_sample.DAMAGE) + 2, sorted(self.out))
+        self.assertTrue(all("== 結果:" in o for o in self.out.values()))
+        self.assertGreater(sum(1 for o in self.out.values() if self.arrows(o)), 5,
+                           "→ が出た回が少なすぎる (材料が弱い)")
+
+    def test_an_arrow_always_ends_as_a_finding(self):
+        for name, out in self.out.items():
+            with self.subTest(case=name):
+                if self.arrows(out):
+                    self.assertIn("確認事項", out.splitlines()[-1],
+                                  f"{name}: → が {len(self.arrows(out))} 本あるのに"
+                                  f"締めが違う: {out.splitlines()[-1]}")
+
+    def test_no_arrow_means_no_worry(self):
+        for name, out in self.out.items():
+            with self.subTest(case=name):
+                if not self.arrows(out):
+                    self.assertIn("問題なし", out.splitlines()[-1],
+                                  f"{name}: → が無いのに締めが違う: {out.splitlines()[-1]}")
+
+    def test_every_loose_ask_is_taken_up_by_the_not_checked_line(self):
+        for name, out in self.out.items():
+            with self.subTest(case=name):
+                orphans = self.orphan_asks(out)
+                self.assertLessEqual(
+                    len(orphans), self.skipped_count(out),
+                    f"{name}: 「報告してください」と言いながら数に入っていない行が"
+                    f" {len(orphans)} 本、診ていない段は {self.skipped_count(out)} 件:\n  "
+                    + "\n  ".join(o[:100] for o in orphans))
+
+    def test_this_watcher_would_notice(self):
+        """検査そのものが効くこと: 数えられていない依頼を混ぜたら見つける."""
+        faked = "[索引] あり\n  ほげが変です。この行ごと報告してください\n\n== 結果: 問題なし"
+        self.assertEqual(len(self.orphan_asks(faked)), 1, self.orphan_asks(faked))
+        # → の続きなら数えない (すでに数えられている)
+        under = "→ だめです\n   くわしくはこの行ごと報告してください\n\n== 結果: 確認事項 1 件"
+        self.assertEqual(self.orphan_asks(under), [], self.orphan_asks(under))
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
