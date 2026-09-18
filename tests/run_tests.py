@@ -2909,6 +2909,38 @@ class TestTheRowsCanSlipByOne(unittest.TestCase):
         self.assertIn("すぐ上の行の原文", out, out[-700:])
         self.assertIn("r1", out, f"最初の例を言っていない:\n{out[-700:]}")
 
+    def test_the_slip_says_where_it_starts(self):
+        """**どこから始まったか**を言うこと (#228).
+
+        実物は 1 万行を超える見込みです。「ずれています」だけでは、社長が
+        目で探すことになります。表計算で直すのに要るのは
+        「この id から下を 1 つ上げる」という一言なので、そこまで出す。
+        途中から始まるずれ (表の真ん中でセルを挿入した形) で確かめます。
+        """
+        text = self.lines(20)
+        rows = []
+        for i in range(len(text)):
+            tr = f"やくぶん{i}" if i < 8 else text[i - 1]   # r8 から下だけずれている
+            rows.append([f"r{i}", text[i], tr])
+        out = self.run_on(rows)
+        self.assertIn("1 行ずれている疑い", out, out[-700:])
+        self.assertIn("r8 から", out, f"始まりを言い当てていない:\n{out[-700:]}")
+        self.assertIn("最後の行まで", out, f"どこまで続くかを言っていない:\n{out[-700:]}")
+        self.assertIn("訳文の列だけを 1 つ上げる", out, f"直し方を言っていない:\n{out[-700:]}")
+        # **始まりが先頭だと言わない** (途中から始まったのに r0 と言えば探す所が違う)
+        self.assertNotIn("r0 から", out, f"始まりを取り違えている:\n{out[-700:]}")
+
+    def test_a_slip_that_stops_partway_is_not_called_endless(self):
+        """途中で終わるずれを「最後の行まで」と言わないこと."""
+        text = self.lines(20)
+        rows = []
+        for i in range(len(text)):
+            tr = text[i - 1] if 3 <= i < 12 else f"やくぶん{i}"
+            rows.append([f"r{i}", text[i], tr])
+        out = self.run_on(rows)
+        self.assertIn("1 行ずれている疑い", out, out[-700:])
+        self.assertNotIn("最後の行まで", out, f"途中で終わるのに最後までと言っている:\n{out[-700:]}")
+
     def test_a_slip_the_other_way_is_named_as_such(self):
         text = self.lines(12)
         rows = [[f"r{i}", text[i], text[i + 1] if i + 1 < len(text) else text[i]]

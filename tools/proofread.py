@@ -324,10 +324,16 @@ def rows_shifted_by_one(rows: list[dict]) -> tuple[int, int, str]:
     `placeholder` も `number` も鳴りません。**気づくのは実機に入れてから**です。
 
     見るのは「訳文が、すぐ上 (または下) の行の原文と同じ」。写しから始まる形なので、
-    ずれていれば**大量に**当たります。戻り値は (上にずれ, 下にずれ, 最初の例の id)。
+    ずれていれば**大量に**当たります。
+
+    **どこから始まって、どこまで続くか**も返します (#228)。実物は 1 万行を超える
+    見込みで、「ずれています」だけでは社長が目で探すことになります。表計算で
+    直すのに要るのは「この id から下を 1 つ上げる」という一言なので、そこまで出す。
+
+    戻り値は (上にずれ, 下にずれ, 最初の id, 最後の id, 最後の行まで続くか)。
     """
     up = down = 0
-    first = ""
+    hits: dict[str, list[int]] = {"up": [], "down": []}
     orig = [(r.get("original") or "").strip() for r in rows]
     for i, row in enumerate(rows):
         text = (row.get("translation") or "").strip()
@@ -340,8 +346,13 @@ def rows_shifted_by_one(rows: list[dict]) -> tuple[int, int, str]:
                     up += 1
                 else:
                     down += 1
-                first = first or row.get("id", "?")
-    return up, down, first
+                hits[hit].append(i)
+    side = hits["up"] if up >= down else hits["down"]
+    if not side:
+        return up, down, "", "", False
+    first = rows[side[0]].get("id", "?")
+    last = rows[side[-1]].get("id", "?")
+    return up, down, first, last, side[-1] >= len(rows) - 2
 
 
 def check_consistency(rows: list[dict], lineno_of) -> list[Finding]:
@@ -859,15 +870,20 @@ def main() -> int:
 
     # **訳文が 1 行ずれていないか** (#224)。1 行ずつ見るかぎり全部普通に見えるので、
     # ここで数えないと実機に入れるまで誰も気づかない
-    up, down, first = rows_shifted_by_one(rows)
+    up, down, first, last, to_end = rows_shifted_by_one(rows)
     worst = max(up, down)
     if worst >= 3 and worst >= len(rows) * 0.2:
         where = "すぐ上" if up >= down else "すぐ下"
+        move = "1 つ上げる" if up >= down else "1 つ下げる"
+        span = f"{first} から {last} まで" + (" (最後の行まで)" if to_end else "")
         print(f"\n注意: **訳文が 1 行ずれている疑い**があります。{worst} 行で、"
-              f"訳文が**{where}の行の原文**と同じです (最初の例: {first})。"
+              f"訳文が**{where}の行の原文**と同じです ({span})。"
               "表計算で行を挿入・削除したまま訳し始めると、この形になります。"
               "**1 行ずつ見ても分かりません** —— id の欄を頼りに、"
               "取り出した TSV と並べて確かめてください")
+        print(f"  直し方: `id` が {first} の行から下で、**訳文の列だけを {move}** "
+              "(id と原文の列は動かさない)。直したらもう一度かけて、"
+              "この注意が消えることを確かめてください")
 
     if args.report:
         with open(args.report, "w", encoding="utf-8", newline="\n") as fh:
