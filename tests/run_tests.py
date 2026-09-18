@@ -2800,6 +2800,9 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         # 一覧にして返す助けの関数 (`glyph_table_trouble`) の → も同じ (#229)。
         # 一覧にした瞬間、上の 2 つの形では拾えなくなる —— #179 と同じ穴
         cli |= {head(h) for h in re.findall(r'notes\.append\(\s*f?"→ ([^"{]+)', self.cli)}
+        # 行を**その場で並べて返す**助けの関数 (`crc_report`) の → も同じ (#239)。
+        # 形が 1 つ増えるたびに見張りから漏れる —— 出る言葉のほうを見る
+        cli |= {head(h) for h in re.findall(r'lines\.append\(\s*f?"→ ([^"{]+)', self.cli)}
         ui = {head(h) for h in re.findall(r'lines\.push\([`"]→ ([^`"$]+)', self.ui)}
         # 知らせの文を組み立てる助けの関数 (`ansiDamageNote`) に移すと `lines.push` の
         # 形では見つからない。**出る言葉のほうを見る** (CLI 側で #178 に直したのと同じ)
@@ -6442,7 +6445,11 @@ class TestBoku2Sample(unittest.TestCase):
             self.assertEqual(res.returncode, 1)
             self.assertIn("M_A01000.BIN: FF FF", res.stdout)
             self.assertIn("→ 読めない .msg の例: system/system.msg 先頭 16 バイト EE EE", res.stdout)
-            self.assertIn("確認事項 2 件", res.stdout)
+            # **中身を書き換えたので、ゲーム自身の検査値とも食い違う** (#239)。
+            # 3 件目はそれ。読めない形だと言う前に「中身が変わっている」と分かる
+            self.assertIn("検査値が 1 件合いません", res.stdout)
+            self.assertIn("system/system.msg はこちら 0x", res.stdout)
+            self.assertIn("確認事項 3 件", res.stdout)
             res = run("check", tmp)                            # 索引が無いフォルダ
             self.assertEqual(res.returncode, 1)
             self.assertIn("揃っていません", res.stdout)
@@ -6522,7 +6529,8 @@ class TestDocs(unittest.TestCase):
         # 知らせの文を組み立てる助けの関数 (`dropped_note`) に移すと、`say(` の形では
         # 見つからず、**新しい → が説明の無いまま増える**。見張りは道具の書き方に
         # 合わせるのではなく、出る言葉のほうを見る
-        arrows = re.findall(r'(?:say\(|return \(|print\(|^\s+)f?"→ ([^"{]+)', src, re.M)
+        arrows = re.findall(r'(?:say\(|return \(|print\(|lines\.append\(|^\s+)f?"→ ([^"{]+)',
+                            src, re.M)
         self.assertGreaterEqual(len(arrows), 8, arrows)
         keys = set()
         for head in arrows:
@@ -6646,8 +6654,9 @@ class TestDocs(unittest.TestCase):
         for tool in ("boku2.py", "proofread.py", "compare_tsv.py"):
             with open(os.path.join(REPO, "tools", tool), encoding="utf-8") as fh:
                 src = fh.read()
-            for m in re.finditer(r'(?:say\(|return \(|print\(|^\s+)(?=f?"(?:\\n)?→ )',
-                                 src, re.M):
+            for m in re.finditer(
+                    r'(?:say\(|return \(|print\(|lines\.append\(|^\s+)(?=f?"(?:\\n)?→ )',
+                    src, re.M):
                 pos, parts = m.end(), []
                 while True:
                     s = one.match(src, pos)
@@ -7067,6 +7076,132 @@ class TestCheckFontTable(unittest.TestCase):
             self.assertEqual(rc, 0)                         # 文字表の有無は「問題」には数えない
 
 
+class TestCrcFileCrossCheck(unittest.TestCase):
+    """`BOKU2.CRC` で、切り分けを**ゲーム自身の検査値**と突き合わせること (#239).
+
+    実物には索引 (`BOKU2.IDX`) とは別に `BOKU2.CRC` があり、公開ソース
+    (UNPACK.py の `getCRCdict`) が実際に読んでいます。中身は
+
+      見出し 20 バイト: 項目数 / 名前の並びの位置 / 長さ / 検査値の並びの位置 / 長さ
+      名前の並び: 1 項目 0x20 バイト (u16 ? / u16 検査値の番号 / u16 種別 / u16 番号 / 名前)
+      検査値: 各ファイルの**先頭 0x80 バイト**の CRC-16 (CCITT-FALSE)
+
+    これで 2 つのことが外から確かめられます: **ファイルの数**(索引とは別の出どころ)
+    と、**切り分けた位置と中身**。実物が届いた日にいちばん強い裏付けになります。
+    """
+
+    def test_the_crc_matches_the_known_check_value(self):
+        """CRC-16 の実装が世の中の値と合っていること (ここが違えば全部無意味)."""
+        import boku2
+
+        # CRC-16/CCITT-FALSE の決まった確かめ方 ("123456789" → 0x29B1)
+        self.assertEqual(boku2.crc16_ccitt(b"123456789"), 0x29B1)
+        self.assertEqual(boku2.crc16_ccitt(b""), 0xFFFF)
+
+    def test_a_file_that_is_not_that_shape_is_not_read(self):
+        """形が合わないものを**当てずっぽうで読まない** (別の版・別の作品)."""
+        import boku2
+
+        import struct
+
+        for bad in (b"", b"\x00" * 8, b"\xff" * 64, bytes(range(64))):
+            self.assertIsNone(boku2.read_crc_file(bad), f"読めないはずのものを読んだ: {bad[:8]!r}")
+
+        # **長さだけ見ていては足りない。** 中の数がおかしいものも断ること
+        body = b"\0" * 200
+        cases = {
+            "項目 0 件": struct.pack("<5I", 0, 20, 32, 52, 4) + body,
+            "項目が多すぎる": struct.pack("<5I", 10 ** 6, 20, 32, 52, 4) + body,
+            "名前の置き場が見出しの中": struct.pack("<5I", 1, 4, 32, 52, 4) + body,
+            "検査値の長さが奇数": struct.pack("<5I", 1, 20, 32, 52, 5) + body,
+            "名前の並びが項目数に足りない": struct.pack("<5I", 4, 20, 32, 52, 4) + body,
+        }
+        for why, raw in cases.items():
+            self.assertIsNone(boku2.read_crc_file(raw), f"{why}: 読めないはずのものを読んだ")
+        # **読めるものは読めること** (全部断るだけなら上の検査は意味が無い)
+        ok = struct.pack("<5I", 1, 20, boku2.CRC_ENTRY, 20 + boku2.CRC_ENTRY, 2) + body
+        self.assertIsNotNone(boku2.read_crc_file(ok), "正しい形を読めていない")
+
+    def test_check_uses_it_and_says_both_things(self):
+        """`check` が**数**と**中身**の両方を突き合わせて言うこと."""
+        import io
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            crc_path = os.path.join(folder, "BOKU2.CRC")
+            self.assertTrue(os.path.exists(crc_path), "練習データに BOKU2.CRC が無い")
+
+            out = io.StringIO()
+            rc = boku2.check(folder, out=out)
+            got = out.getvalue()
+            self.assertEqual(rc, 0, f"無事な練習データが問題ありになった:\n{got[-500:]}")
+            self.assertTrue("[検査値] BOKU2.CRC:" in got, f"検査値の行が無い:\n{got[-500:]}")
+            self.assertTrue("同じ数" in got, f"数を突き合わせていない:\n{got[-500:]}")
+            self.assertTrue("件すべて合いました" in got, f"中身を突き合わせていない:\n{got[-500:]}")
+
+            # **1 つずらしたら気づくこと。** 索引も本体もそのままなので、
+            # ここまでの段は全部通る。検査値だけが食い違いを見つける
+            make_boku2_sample.damage(folder, "crc")
+            out = io.StringIO()
+            rc = boku2.check(folder, out=out)
+            got = out.getvalue()
+            self.assertEqual(rc, 1, f"検査値が食い違うのに問題なしで終わった:\n{got[-500:]}")
+            self.assertTrue("検査値が 1 件合いません" in got, f"食い違いを言っていない:\n{got[-500:]}")
+            # **どのファイルで、どちらの値か**まで言うこと (報告の材料になる)
+            self.assertTrue("はこちら 0x" in got and "検査値ファイル 0x" in got,
+                            f"両方の値を出していない:\n{got[-500:]}")
+
+    def test_a_count_that_disagrees_is_said(self):
+        """**数が合わないときに言うこと** (中身が全部合っていても言う).
+
+        項目数はこちらの切り分けとは別の所から出る数です。合わないなら、
+        索引の読み方かこの数え方のどちらかが外れているということで、
+        中身の検査値がたまたま合っていても、そこは別の話になります。
+        """
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            with open(os.path.join(folder, "BOKU2.CRC"), "rb") as fh:
+                crc = boku2.read_crc_file(fh.read())
+            with open(os.path.join(folder, "BOKU2.IDX"), "rb") as fh:
+                idx = fh.read()
+            img_path = os.path.join(folder, "BOKU2.IMG")
+            entries = boku2.read_dfi(idx, os.path.getsize(img_path))
+            self.assertEqual(crc["n"], len(entries), "材料が弱い: もともと数が合っていない")
+            with open(img_path, "rb") as img:
+                # 1 件少なく数えた形 (索引の読み方が違えば普通に起きる)
+                lines, problems = boku2.crc_report(crc, entries[:-1], img, len(entries))
+            got = "\n".join(lines)
+            self.assertGreaterEqual(problems, 1, f"数が合わないのに問題に数えていない:\n{got}")
+            self.assertTrue("合いません" in got, f"合わないと言っていない:\n{got}")
+            self.assertTrue(str(crc["n"]) in got and str(len(entries) - 1) in got,
+                            f"両方の数を出していない:\n{got}")
+
+    def test_it_says_when_there_is_none(self):
+        """無いときは「無い」と言い、**診ていない段**に数えること (#175)."""
+        import io
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            os.remove(os.path.join(folder, "BOKU2.CRC"))
+            out = io.StringIO()
+            rc = boku2.check(folder, out=out)
+            got = out.getvalue()
+            self.assertEqual(rc, 0, "BOKU2.CRC が無いのは「問題」ではない")
+            self.assertTrue("[検査値] BOKU2.CRC は無い" in got, f"無いと言っていない:\n{got[-400:]}")
+            self.assertTrue("検査値との突き合わせ (BOKU2.CRC が無い)" in got,
+                            f"診ていない段に数えていない:\n{got[-400:]}")
+
+
 class TestEverySharedJudgementIsReached(unittest.TestCase):
     """両側にある判定が、**実際に呼ばれる所まで**検査を通っていること (#236).
 
@@ -7193,6 +7328,8 @@ class TestDamageDrill(unittest.TestCase):
         "empty": "本体の中身がほとんど空です",
         # 文字番号が文字表 1656 字に収まらない形 (#230)。読み方そのものが違う合図
         "bignum": "この作品の文字表 1656 字",
+        # 切り分けとゲーム自身の検査値が食い違う形 (#239)
+        "crc": "検査値が 1 件合いません",
     }
 
     def test_each_damage_kind_is_diagnosed(self):

@@ -175,6 +175,40 @@ MAPS = {
 }
 
 
+def build_crc(idx: bytes, img: bytes) -> bytes:
+    """`BOKU2.CRC` を作る (実物と同じ形。公開ソース UNPACK.py の `getCRCdict` が読む形).
+
+    実物にはこのファイルがあり、**索引とは別に**「項目数」「ファイル名の一覧」
+    「各ファイルの先頭 0x80 バイトの CRC-16」を持っている。つまり切り分けが
+    合っているかを、**ゲーム自身の検査値**で確かめられる (#239)。練習データにも
+    同じ形で置いておかないと、その道を一度も試さないまま実物に当たることになる。
+
+    見出し 20 バイト (u32 × 5) / 名前の並び (1 項目 0x20 バイト) / 検査値の並び (u16)。
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import boku2
+
+    entries = boku2.read_dfi(idx, len(img))
+    dir_start = 20
+    dir_size = len(entries) * boku2.CRC_ENTRY
+    crc_at = dir_start + dir_size
+    out = bytearray(struct.pack("<5I", len(entries), dir_start, dir_size,
+                                crc_at, len(entries) * 2))
+    crcs = []
+    for i, e in enumerate(entries):
+        name = os.path.basename(e["path"]).encode("ascii", "replace")[:boku2.CRC_ENTRY - 9]
+        item = bytearray(boku2.CRC_ENTRY)
+        struct.pack_into("<4H", item, 0, 0, i, 0, i)
+        item[8:8 + len(name)] = name
+        out += item
+        # **ファイルの長さを超えて読まない。** 公開ソースの `crcFile` は取り出した
+        # ファイルを開いて `min(len, 0x80)` バイトを見る。ここで隣のファイルまで
+        # 混ぜると、短いファイルだけ検査値が合わなくなる (最初それで 8 件落ちた)
+        crcs.append(boku2.crc16_ccitt(img[e["at"]:e["at"] + min(e["len"], boku2.CRC_HEAD)]))
+    out += struct.pack(f"<{len(crcs)}H", *crcs)
+    return bytes(out)
+
+
 def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
     """一式を out_dir に書き、答え (ファイルごとの id と本文) を返す."""
     glyphs = glyph_table()
@@ -268,6 +302,8 @@ def build_sample(out_dir: str) -> dict[str, list[tuple[str, str]]]:
         fh.write(idx)
     with open(os.path.join(out_dir, "BOKU2.IMG"), "wb") as fh:
         fh.write(img)
+    with open(os.path.join(out_dir, "BOKU2.CRC"), "wb") as fh:
+        fh.write(build_crc(idx, img))
 
     for stem, tables in MAPS.items():
         talk = build_tables([[encode(t, glyphs) for t in table] for table in tables])
@@ -304,6 +340,8 @@ DAMAGE = {
     "empty": "本体の中身をゼロで埋める (索引は読めるのに中身が空)",
     # 文字番号が文字表の字数に収まらない形 (#230)。読み方そのものが違うときに出る
     "bignum": "system.msg の文字番号を 1 つ、文字表の字数より大きくする",
+    # 切り分けた位置がずれている形 (#239)。BOKU2.CRC の検査値だけが気づける
+    "crc": "BOKU2.CRC の検査値を 1 つ変える (切り分けと食い違う)",
 }
 
 
@@ -354,6 +392,18 @@ def damage(out_dir: str, kind: str) -> str:
             fh.seek(e["at"] + (0 if kind == "msg" else 0x80))
             fh.write(b"\xee" * 16)
         return f"BOKU2.IMG の {want} の先頭 16 バイト{'' if kind == 'msg' else ' (TIM2 の位置)'}を EE で埋めた"
+    if kind == "crc":
+        # **ゲーム自身の検査値と食い違う形**。索引も本体も読めるので、
+        # ここまでの段は全部緑のまま通る。検査値の突き合わせだけが気づく
+        crc_path = os.path.join(out_dir, "BOKU2.CRC")
+        with open(crc_path, "rb") as fh:
+            raw = bytearray(fh.read())
+        head = struct.unpack_from("<5I", raw, 0)
+        at = head[3]                       # 検査値の並びの先頭
+        struct.pack_into("<H", raw, at, (struct.unpack_from("<H", raw, at)[0] ^ 0xFFFF))
+        with open(crc_path, "wb") as fh:
+            fh.write(raw)
+        return "BOKU2.CRC の 1 つ目の検査値を反転させた (切り分けと食い違う)"
     if kind == "bignum":
         # **2 バイトを 1 字の番号として読む**という読み方が外れていると、実物では
         # 文字表の字数 (1656) に収まらない番号が出る。数として出るだけなので、

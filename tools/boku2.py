@@ -48,6 +48,10 @@ FONT_CELL = 22
 #: 無く、残り 598 字は別の画像にある (向こうの font2.txt の字数がちょうど 598 で合う)
 FONT_GLYPHS = 1656
 
+#: `BOKU2.CRC` と突き合わせるファイル数。実物は 1951 件あるので、全部かけると
+#: 診断が重くなる。先頭から数えて、合わない所があれば必ずこの範囲に出る
+CRC_CHECK_FILES = 2000
+
 #: 文字表の **1 枚目**に入る字数 (#211/#230)。公開ソースの `font1.txt` が 1058 字で、
 #: 512×1024 ドットの頁を 22 ドット刻みで割ると 23 × 46 = 1058 マス。差の 598 字が
 #: 2 枚目 (向こうの `font2.txt` の字数と一致する)
@@ -1624,6 +1628,67 @@ def find_map_dir(folder: str, depth: int = 2) -> str | None:
     return None
 
 
+#: `BOKU2.CRC` の 1 項目の大きさ (公開ソース UNPACK.py の `getCRCdict`: `x * 0x20 + dir_start`)
+CRC_ENTRY = 0x20
+
+#: CRC をかける範囲。公開ソースの `crcFile` は**各ファイルの先頭 0x80 バイト**だけを見る
+CRC_HEAD = 0x80
+
+
+def crc16_ccitt(b: bytes) -> int:
+    """CRC-16/CCITT-FALSE (初期値 0xFFFF / 多項式 0x1021)。公開ソースの `crc16` と同じ.
+
+    この作品の `BOKU2.CRC` に並んでいる値がこれ。**切り分けが合っているかを、
+    ゲーム自身の検査値で確かめられる**ので、こちらの読み方の裏付けになる (#239)。
+    """
+    crc = 0xFFFF
+    for v in b:
+        crc ^= v << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) if crc & 0x8000 else (crc << 1)
+    return crc & 0xFFFF
+
+
+def read_crc_file(b: bytes) -> dict | None:
+    """`BOKU2.CRC` を読む (公開ソース UNPACK.py の `getCRCdict` と同じ読み方).
+
+    見出し 20 バイト (すべて u32):
+      +0  項目数 / +4 名前の並びの位置 / +8 名前の並びの長さ /
+      +12 検査値の並びの位置 / +16 検査値の並びのバイト長
+
+    名前の並びは 1 項目 0x20 バイト: u16 ? / **u16 検査値の番号** / u16 種別 /
+    u16 番号 / そのあと 0 で終わる名前。検査値は u16 の並びで、
+    **各ファイルの先頭 0x80 バイトの CRC-16**。
+
+    形が合わなければ None (別の版や別の作品かもしれないので、当てずっぽうで読まない)。
+    """
+    if len(b) < 20:
+        return None
+    n, dir_start, dir_size, crc_at, crc_len = struct.unpack_from("<5I", b, 0)
+    if not (1 <= n <= 100000) or dir_start < 20 or crc_len % 2:
+        return None
+    if dir_start + dir_size > len(b) or crc_at + crc_len > len(b):
+        return None
+    if dir_size < n * CRC_ENTRY:
+        return None
+    names: list[str] = []
+    slots: list[int] = []
+    for i in range(n):
+        at = dir_start + i * CRC_ENTRY
+        slot = struct.unpack_from("<H", b, at + 2)[0]
+        end = b.find(b"\0", at + 8, at + CRC_ENTRY)
+        raw = b[at + 8:end if end >= 0 else at + CRC_ENTRY]
+        try:
+            names.append(raw.decode("ascii"))
+        except UnicodeDecodeError:
+            names.append(raw.decode("cp932", "replace"))
+        slots.append(slot)
+    crcs = list(struct.unpack_from(f"<{crc_len // 2}H", b, crc_at)) if crc_len else []
+    return {"n": n, "dir_start": dir_start, "dir_size": dir_size,
+            "crc_at": crc_at, "crc_len": crc_len,
+            "names": names, "slots": slots, "crcs": crcs}
+
+
 def scan_map_folder(map_dir: str) -> dict:
     """`MAP/` を一通り読んで、件数・会話の行数・**使われている文字番号**を返す (#231).
 
@@ -1662,6 +1727,60 @@ def used_numbers_of(b: bytes, name: str) -> set:
     for _, _, _, text in text_rows_bytes(b, name, None, alt=is_alt_break(name)):
         used.update(int(x) for x in re.findall(r"\[(\d+)\]", text))
     return used
+
+
+def crc_report(crc: dict, entries: list, img, rec_count: int) -> tuple[list, int]:
+    """`BOKU2.CRC` と、こちらの切り分けを突き合わせた行 (#239).
+
+    実物には索引 (`BOKU2.IDX`) とは**別に**このファイルがあり、項目数・名前・
+    各ファイルの先頭 0x80 バイトの CRC-16 を持っている。つまり
+
+      - 索引から数えたファイル数が合っているか (**外から確かめられる 2 つ目の数**)
+      - 切り分けた位置が合っているか (**ゲーム自身の検査値**で、中身まで)
+
+    の両方が確かめられる。合わなければ索引の読み方が違うということで、
+    実物が届いた日にいちばん早く分かる。
+    """
+    lines = [f"[検査値] BOKU2.CRC: 項目 {crc['n']:,} 件 / 名前 {sum(1 for x in crc['names'] if x):,} 件"
+             f" / 検査値 {len(crc['crcs']):,} 個"]
+    problems = 0
+    if crc["n"] == len(entries):
+        lines.append(f"  索引から数えたファイル {len(entries):,} 件と**同じ数**です "
+                     "(索引とは別の所から出た数なので、読み方の裏付けになります)")
+    else:
+        problems += 1
+        lines.append(f"→ 検査値ファイルは {crc['n']:,} 件、索引から数えたファイルは "
+                     f"{len(entries):,} 件で**合いません** (索引のレコードは {rec_count:,} 件)。"
+                     "索引の読み方かこの数え方のどちらかが違います。この行ごと報告してください")
+    # **中身まで確かめる。** 切り分けた先頭 0x80 バイトの CRC が、向こうの値と合うか
+    ok = ng = 0
+    first_bad = None
+    for i, e in enumerate(entries[:CRC_CHECK_FILES]):
+        slot = crc["slots"][i] if i < len(crc["slots"]) else i
+        if slot >= len(crc["crcs"]):
+            continue
+        img.seek(e["at"])
+        got = crc16_ccitt(img.read(min(e["len"], CRC_HEAD)))
+        if got == crc["crcs"][slot]:
+            ok += 1
+        else:
+            ng += 1
+            if first_bad is None:
+                first_bad = (e["path"], got, crc["crcs"][slot])
+    looked = ok + ng
+    if not looked:
+        lines.append("  検査値と突き合わせられた項目がありません (並びの読み方が違うかもしれません)")
+    elif not ng:
+        lines.append(f"  切り分けた先頭 {CRC_HEAD} バイトの検査値: {ok:,} 件すべて合いました "
+                     "(**位置も中身も合っている**という、いちばん強い裏付けです)")
+    else:
+        problems += 1
+        lines.append(f"→ 切り分けた先頭 {CRC_HEAD} バイトの検査値が {ng:,} 件合いません "
+                     f"(合う {ok:,} 件 / 見た {looked:,} 件)。"
+                     f"例: {first_bad[0]} はこちら 0x{first_bad[1]:04X} / "
+                     f"検査値ファイル 0x{first_bad[2]:04X}。"
+                     "切り分けの位置がずれている疑いがあります。この行ごと報告してください")
+    return lines, problems
 
 
 def check(folder: str, out=sys.stdout) -> int:
@@ -1808,6 +1927,32 @@ def check(folder: str, out=sys.stdout) -> int:
         # 入れ子が無ければ 2 通りは必ず同じ答えを出す。「一致」と書くと裏付けに見える
         say("フォルダの規則: この索引に入れ子が無いので、2 通りの違いは出ません (試せていない)")
         skipped.append("フォルダの閉じ方 (この索引に入れ子が無い)")
+    # **索引とは別の所から出る裏付け** (#239)。実物には BOKU2.CRC があり、
+    # 項目数と、各ファイルの先頭 0x80 バイトの CRC-16 を持っている。
+    # 公開ソース (UNPACK.py の getCRCdict) が実際に読んでいる形
+    crc_path = next((os.path.join(folder, n) for n in os.listdir(folder)
+                     if n.lower() == "boku2.crc"), None)
+    if crc_path:
+        with open(crc_path, "rb") as fh:
+            crc = read_crc_file(fh.read())
+        if crc is None:
+            problems += 1
+            say(f"→ [検査値] BOKU2.CRC がこの形で読めません ({os.path.getsize(crc_path):,} バイト)。"
+                "版が違うかもしれません。この行と先頭 32 バイトを報告してください")
+            with open(crc_path, "rb") as fh:
+                say("   " + fh.read(32).hex(" ").upper())
+            skipped.append("検査値との突き合わせ (BOKU2.CRC が読めない)")
+        else:
+            with open(img_path, "rb") as probe:
+                lines, more = crc_report(crc, entries, probe, rec_count)
+            for line in lines:
+                say(line)
+            problems += more
+    else:
+        say("[検査値] BOKU2.CRC は無い (あれば、切り分けが合っているかを"
+            "ゲーム自身の検査値で確かめられます)")
+        skipped.append("検査値との突き合わせ (BOKU2.CRC が無い)")
+
     msgs = [e for e in entries if e["path"].lower().endswith(".msg")]
     bases = {os.path.basename(e["path"]).lower() for e in entries}
     found = [n for n in TEXT_CONTAINERS if n in bases]

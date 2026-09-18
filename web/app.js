@@ -3771,6 +3771,54 @@ function glyphRangeNote(top, unseen) {
     + "字ぶん)";
 }
 
+/** `BOKU2.CRC` の 1 項目の大きさ。**一括処理 (boku2.py の CRC_ENTRY) と同じ**にすること */
+const CRC_ENTRY = 0x20;
+/** 検査値をかける範囲 (各ファイルの先頭 0x80 バイト)。公開ソースの crcFile と同じ */
+const CRC_HEAD = 0x80;
+/** 突き合わせるファイル数。**一括処理 (CRC_CHECK_FILES) と同じ数字**にしておくこと */
+const CRC_CHECK_FILES = 2000;
+
+/**
+ * CRC-16/CCITT-FALSE (初期値 0xFFFF / 多項式 0x1021)。公開ソースの crc16 と同じ。
+ * 一括処理 (boku2.py の crc16_ccitt) と同じ判定にしておくこと (#239)。
+ */
+function crc16Ccitt(b) {
+  let crc = 0xFFFF;
+  for (let i = 0; i < b.length; i++) {
+    crc ^= b[i] << 8;
+    for (let j = 0; j < 8; j++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+    crc &= 0xFFFF;
+  }
+  return crc & 0xFFFF;
+}
+
+/**
+ * `BOKU2.CRC` を読む (公開ソース UNPACK.py の getCRCdict と同じ読み方)。
+ * 一括処理 (boku2.py の read_crc_file) と同じ判定・同じ返し方にしておくこと (#239)。
+ *
+ * 見出し 20 バイト (u32 × 5): 項目数 / 名前の並びの位置 / 名前の並びの長さ /
+ * 検査値の並びの位置 / 検査値の並びのバイト長。
+ */
+function readCrcFile(b) {
+  if (b.length < 20) return null;
+  const n = u32le(b, 0), dirStart = u32le(b, 4), dirSize = u32le(b, 8);
+  const crcAt = u32le(b, 12), crcLen = u32le(b, 16);
+  if (!(n >= 1 && n <= 100000) || dirStart < 20 || crcLen % 2) return null;
+  if (dirStart + dirSize > b.length || crcAt + crcLen > b.length) return null;
+  if (dirSize < n * CRC_ENTRY) return null;
+  const names = [], slots = [];
+  for (let i = 0; i < n; i++) {
+    const at = dirStart + i * CRC_ENTRY;
+    slots.push(u16le(b, at + 2));
+    let end = at + 8;
+    while (end < at + CRC_ENTRY && b[end]) end++;
+    names.push(new TextDecoder("shift_jis").decode(b.subarray(at + 8, end)));
+  }
+  const crcs = [];
+  for (let y = 0; y < crcLen / 2; y++) crcs.push(u16le(b, crcAt + y * 2));
+  return { n, dirStart, dirSize, crcAt, crcLen, names, slots, crcs };
+}
+
 /**
  * 文字表を**書き写すとき**の事故 (#229)。一括処理 (boku2.py の glyph_table_trouble) と
  * 同じ判定・同じ言葉にしておくこと。
@@ -4103,6 +4151,67 @@ async function buildIdxReport() {
     }
     for (const c of bokuUsedNumbers(bytes, isAltBreak(e.name))) mapScan.used.add(c);
   }
+  /* **索引とは別の所から出る裏付け** (#239)。実物には BOKU2.CRC があり、項目数と
+     各ファイルの先頭 0x80 バイトの検査値を持っている。一括処理 (boku2.py check の
+     [検査値]) と同じ判定・同じ言葉 */
+  const crcEntry = state.entries.find((e) => /boku2\.crc$/i.test(e.name));
+  if (!crcEntry) {
+    lines.push("[検査値] BOKU2.CRC は無い (あれば、切り分けが合っているかを"
+      + "ゲーム自身の検査値で確かめられます)");
+    skipped.push("検査値との突き合わせ (BOKU2.CRC が無い)");
+  } else {
+    const raw = await readRange(crcEntry.file, crcEntry.offset, crcEntry.size);
+    const crc = readCrcFile(raw);
+    if (!crc) {
+      problems++;
+      lines.push(`→ [検査値] BOKU2.CRC がこの形で読めません (${crcEntry.size.toLocaleString()} バイト)。`
+        + "版が違うかもしれません。この行と先頭 32 バイトを報告してください");
+      lines.push("   " + [...raw.subarray(0, 32)].map((v) => hex(v, 2)).join(" "));
+      skipped.push("検査値との突き合わせ (BOKU2.CRC が読めない)");
+    } else {
+      lines.push(`[検査値] BOKU2.CRC: 項目 ${crc.n.toLocaleString()} 件 / `
+        + `名前 ${crc.names.filter((x) => x).length.toLocaleString()} 件 / `
+        + `検査値 ${crc.crcs.length.toLocaleString()} 個`);
+      if (crc.n === items.length) {
+        lines.push(`  索引から数えたファイル ${items.length.toLocaleString()} 件と**同じ数**です `
+          + "(索引とは別の所から出た数なので、読み方の裏付けになります)");
+      } else {
+        problems++;
+        lines.push(`→ 検査値ファイルは ${crc.n.toLocaleString()} 件、索引から数えたファイルは `
+          + `${items.length.toLocaleString()} 件で**合いません** (索引のレコードは ${c.count.toLocaleString()} 件)。`
+          + "索引の読み方かこの数え方のどちらかが違います。この行ごと報告してください");
+      }
+      let crcOk = 0, crcNg = 0, crcBad = null;
+      for (let i = 0; i < Math.min(items.length, CRC_CHECK_FILES); i++) {
+        const slot = i < crc.slots.length ? crc.slots[i] : i;
+        if (slot >= crc.crcs.length) continue;
+        const it = items[i];
+        const head = await readRange(dataEntry.file, dataEntry.offset + it.at,
+                                     Math.min(it.len, CRC_HEAD));
+        const got = crc16Ccitt(head);
+        if (got === crc.crcs[slot]) crcOk++;
+        else {
+          crcNg++;
+          if (!crcBad) crcBad = { name: it.name, got, want: crc.crcs[slot] };
+        }
+      }
+      const looked = crcOk + crcNg;
+      if (!looked) {
+        lines.push("  検査値と突き合わせられた項目がありません (並びの読み方が違うかもしれません)");
+      } else if (!crcNg) {
+        lines.push(`  切り分けた先頭 ${CRC_HEAD} バイトの検査値: ${crcOk.toLocaleString()} 件すべて合いました `
+          + "(**位置も中身も合っている**という、いちばん強い裏付けです)");
+      } else {
+        problems++;
+        lines.push(`→ 切り分けた先頭 ${CRC_HEAD} バイトの検査値が ${crcNg.toLocaleString()} 件合いません `
+          + `(合う ${crcOk.toLocaleString()} 件 / 見た ${looked.toLocaleString()} 件)。`
+          + `例: ${crcBad.name} はこちら 0x${hex(crcBad.got, 4)} / `
+          + `検査値ファイル 0x${hex(crcBad.want, 4)}。`
+          + "切り分けの位置がずれている疑いがあります。この行ごと報告してください");
+      }
+    }
+  }
+
   let msgs = items.filter((it) => /\.msg$/i.test(it.name));
   let msgByShape = false;
   if (!msgs.length) {

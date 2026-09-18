@@ -86,6 +86,9 @@ WRAP = """(names) => {
 async def seen_for(folder: str, names: list, glyphs: str | None, errors: list) -> set:
     """その吸い出しで要約を作り、**呼ばれた関数**の名前を返す."""
     files = [os.path.join(folder, "BOKU2.IDX"), os.path.join(folder, "BOKU2.IMG")]
+    crc = os.path.join(folder, "BOKU2.CRC")      # 検査値の突き合わせ (#239) もここを通る
+    if os.path.exists(crc):
+        files.append(crc)
     mapdir = os.path.join(folder, "MAP")
     if os.path.isdir(mapdir):
         files += [os.path.join(mapdir, n) for n in sorted(os.listdir(mapdir))]

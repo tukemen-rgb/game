@@ -27,6 +27,8 @@ EXPECT = {
     # 文字番号が文字表 1656 字に収まらない形 (#230)。読み方ごと違う合図なので、
     # 画面の要約でも同じ言葉で出ること
     "bignum": "この作品の文字表 1656 字",
+    # 切り分けとゲーム自身の検査値が食い違う形 (#239)
+    "crc": "検査値が 1 件合いません",
 }
 
 #: 画面と CLI で違って当たり前の行。**理由の付いたものだけ**を並べる。
@@ -138,8 +140,12 @@ async def run_kind(b, kind, errors, table=None, folder=None):
     # MAP は**全部**渡す。1 つだけ渡していたので、CLI (フォルダを読む) と
     # [MAP] の件数が食い違い、全部の行を突き合わせられなかった (#104)
     mapdir = os.path.join(folder, "MAP")
+    # BOKU2.CRC も渡す (#239)。CLI はフォルダを読むので必ず見つける。渡さないと
+    # 片側だけ「検査値との突き合わせ」をしていることになり、全行が揃わない
+    crc = os.path.join(folder, "BOKU2.CRC")
     await page.set_input_files("#fileinput",
                                [os.path.join(folder, "BOKU2.IDX"), os.path.join(folder, "BOKU2.IMG")]
+                               + ([crc] if os.path.exists(crc) else [])
                                + [os.path.join(mapdir, f) for f in sorted(os.listdir(mapdir))])
     await page.wait_for_selector("#shell:not([hidden])")
     if table is not None:

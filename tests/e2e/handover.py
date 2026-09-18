@@ -157,8 +157,12 @@ async def main() -> int:
         # (実物もそう)。手順どおりに歩くなら、最初にまとめて読ませる
         maps_dir = os.path.join(SAMPLE, "MAP")
         map_files = [os.path.join(maps_dir, n) for n in sorted(os.listdir(maps_dir))]
+        # BOKU2.CRC も渡す (#239)。CLI はフォルダを読むので必ず見つけるため、
+        # 渡さないと片側だけ「検査値との突き合わせ」をして行数が合わなくなる
+        crc = os.path.join(SAMPLE, "BOKU2.CRC")
         await page.set_input_files("#fileinput", [os.path.join(SAMPLE, "BOKU2.IDX"),
                                                   os.path.join(SAMPLE, "BOKU2.IMG")]
+                                   + ([crc] if os.path.exists(crc) else [])
                                    + map_files)
         await page.wait_for_selector("#shell:not([hidden])")
 
