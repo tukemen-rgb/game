@@ -7250,6 +7250,63 @@ class TestCrcFileCrossCheck(unittest.TestCase):
             self.assertTrue("#0" in res.stdout,
                             f"裏が取れないのに名前を使っている:\n{res.stdout[:300]}")
 
+    def test_two_files_with_the_same_name_are_both_kept(self):
+        """**名前がぶつかっても、ファイルを 1 つも落とさない** (#245).
+
+        検査値ファイルの名前は**フォルダの付かないファイル名だけ**です。実物は
+        116 のフォルダに 1951 件あるので、別のフォルダの同名ファイルが必ず
+        重なります。そのまま使うと `unpack` が**後の 1 件で前の 1 件を黙って
+        上書き**します (20 件を切り分けたのに 19 個しか落ちなかった)。
+        索引の名前を読むときと同じ `~2` を付けて、両方残します。
+        """
+        import struct
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            crc_path = os.path.join(folder, "BOKU2.CRC")
+            with open(crc_path, "rb") as fh:
+                raw = bytearray(fh.read())
+            dir_start = struct.unpack_from("<5I", raw, 0)[1]
+            for i in (1, 2):                       # 2 件を同じ名前にする
+                at = dir_start + i * boku2.CRC_ENTRY + 8
+                raw[at:at + boku2.CRC_ENTRY - 8] = b"\0" * (boku2.CRC_ENTRY - 8)
+                raw[at:at + len(b"same.bin")] = b"same.bin"
+            with open(crc_path, "wb") as fh:
+                fh.write(raw)
+            make_boku2_sample.damage(folder, "allnames")
+
+            out = os.path.join(tmp, "OUT")
+            n, unnamed, dropped, paths = boku2.unpack(
+                os.path.join(folder, "BOKU2.IDX"), os.path.join(folder, "BOKU2.IMG"),
+                out, crc_path)
+            landed = [f for f in os.listdir(out) if os.path.isfile(os.path.join(out, f))]
+            # **切り分けた数と、落ちたファイルの数が合うこと**
+            self.assertEqual(len(landed), n,
+                             f"{n} 個に切り分けたのに {len(landed)} 個しか落ちていない "
+                             f"(名前がぶつかって上書きされた): {sorted(landed)}")
+            self.assertTrue("same.bin" in landed and "same.bin~2" in landed,
+                            f"ぶつかった 2 件が両方残っていない: {sorted(landed)}")
+            # **材料が弱くないこと**: 本当に同じ名前を 2 件作れている
+            self.assertEqual(sum(1 for p in paths if p.startswith("same.bin")), 2,
+                             f"材料が弱い: 同じ名前が 2 件になっていない: {paths[:5]}")
+
+            # **黙って名前を変えないこと。** 理由まで言う (索引の名前がぶつかった
+            # ときとは原因が違う —— こちらは「フォルダが付かない」から)
+            import subprocess
+            res = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "boku2.py"), "unpack",
+                 os.path.join(folder, "BOKU2.IDX"), os.path.join(folder, "BOKU2.IMG"),
+                 os.path.join(tmp, "OUT2"), "--names-from-crc", crc_path],
+                capture_output=True, text=True, cwd=REPO)
+            said = res.stdout + res.stderr
+            self.assertTrue("名前がぶつかったので" in said,
+                            f"名前を変えたことを言っていない:\n{said[:500]}")
+            self.assertTrue("フォルダが付かない" in said,
+                            f"なぜぶつかるのかを言っていない:\n{said[:500]}")
+
     def test_check_points_at_that_way_out(self):
         """名前が読めないときに、`check` がその道を**教える**こと (#240)."""
         import io
@@ -9488,6 +9545,16 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             _struct.pack_into("<H", _raw, _p, _struct.unpack_from("<H", _raw, _p)[0] ^ 0xFFFF)
         with open(at("flipped.crc"), "wb") as fh:
             fh.write(_raw)
+        # 名前を 2 件そろえた表 (フォルダが付かないので実物では必ずぶつかる)
+        with open(os.path.join(sample, "BOKU2.CRC"), "rb") as fh:
+            _dup = bytearray(fh.read())
+        _dir = _struct.unpack_from("<5I", _dup, 0)[1]
+        for _i in (1, 2):
+            _p = _dir + _i * boku2.CRC_ENTRY + 8
+            _dup[_p:_p + boku2.CRC_ENTRY - 8] = b"\0" * (boku2.CRC_ENTRY - 8)
+            _dup[_p:_p + len(b"same.bin")] = b"same.bin"
+        with open(at("samename.crc"), "wb") as fh:
+            fh.write(_dup)
         out += [
             run(tool("boku2.py"), "check", at("void")),
             run(tool("boku2.py"), "unpack", os.path.join(sample, "BOKU2.IDX"),
@@ -9506,6 +9573,10 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             run(tool("boku2.py"), "unpack", at("BRname", "BOKU2.IDX"),
                 at("BRname", "BOKU2.IMG"), at("OUTcrc2"),
                 "--names-from-crc", at("flipped.crc")),
+            # 名前がぶつかる表 (#245)。実物はフォルダが 116 あるので必ず起きる
+            run(tool("boku2.py"), "unpack", at("BRname", "BOKU2.IDX"),
+                at("BRname", "BOKU2.IMG"), at("OUTcrc3"),
+                "--names-from-crc", at("samename.crc")),
             run(tool("boku2.py"), "maps", at("void"), "-o", at("m0")),
             run(tool("boku2.py"), "maps", at("nosuch") + "/*.BIN", "-o", at("m2")),
         ]

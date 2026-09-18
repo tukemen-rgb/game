@@ -5145,12 +5145,13 @@ async function addParts(dataEntry, items, how) {
      合わなければ番号のまま —— 当てずっぽうでは名前を付けない。
      社長の実物は名前が付かない吸い出しだった (docs/09 の #1・#3) ので、
      CLI にだけ逃げ道があって画面に無い、という形にはしない */
-  let crcNamed = 0;
+  let crcNamed = 0, crcBumped = 0;
   if (kids.filter((k) => k.bare).length > kids.length * 0.1) {
     const crcEntry = state.entries.find((e) => /boku2\.crc$/i.test(e.name));
     if (crcEntry) {
       const crc = readCrcFile(await readRange(crcEntry.file, crcEntry.offset, crcEntry.size));
       if (crc) {
+        const taken = new Set(kids.map((k) => k.name));
         for (let i = 0; i < kids.length; i++) {
           const k = kids[i];
           if (!k.bare || i >= crc.names.length || !crc.names[i]) continue;
@@ -5158,8 +5159,19 @@ async function addParts(dataEntry, items, how) {
           if (slot >= crc.crcs.length) continue;
           const head = await readRange(k.file, k.offset, Math.min(k.size, CRC_HEAD));
           if (crc16Ccitt(head) !== crc.crcs[slot]) continue;
-          k.name = crc.names[i];
-          k.path = prefix + crc.names[i];
+          /* **同じ名前がぶつかったら `~2` を付ける** (#245)。検査値ファイルの名前は
+             フォルダの付かないファイル名だけなので、別のフォルダの同名ファイルが
+             重なる。一括処理ではそのまま**上書き**していた (20 件が 19 件になった) */
+          let want = crc.names[i];
+          if (taken.has(want)) {
+            let n = 2;
+            while (taken.has(`${want}~${n}`)) n++;
+            want = `${want}~${n}`;
+            crcBumped++;
+          }
+          taken.add(want);
+          k.name = want;
+          k.path = prefix + want;
           k.bare = false;
           crcNamed++;
         }
@@ -5197,6 +5209,8 @@ async function addParts(dataEntry, items, how) {
       + `。中身の見当: ${sniffSummary(kinds)}。`
       + (crcNamed ? `検査値ファイルの名前を ${crcNamed} 件当てました `
                     + `(その項目の先頭 ${CRC_HEAD} バイトの検査値が合ったものだけ)。` : "")
+      + (crcBumped ? `そのうち ${crcBumped} 件は名前がぶつかったので \`~2\` を付けました `
+                     + "(検査値ファイルの名前にはフォルダが付かないため)。" : "")
       + (bareCount ? `名前が無い ${bareCount} 件は種類を末尾に付けました。` : "")
       + (packed ? `圧縮らしい ${packed} 件 (packed) の中にテキストがある見込みです。`
                   + "上の絞り込みに packed と入れると並びます。" : "");

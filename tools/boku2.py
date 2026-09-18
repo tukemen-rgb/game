@@ -511,7 +511,7 @@ def body_looks_empty(img, entries: list[dict]) -> tuple[int, int]:
     return checked, zero
 
 
-def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int]:
+def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int, int]:
     """検査値ファイルの名前を、切り分けた項目に当てる (#240).
 
     名前の並びと索引の並びが同じ順かどうかは、実物でしか決まらない。だから
@@ -522,7 +522,13 @@ def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int]:
     1 件も合わなければ並びが違う (名前は使えない) と分かる。
     """
     named: list = []
-    hit = 0
+    hit = bumped = 0
+    # **同じ名前がぶつかったら `~2` を付ける** (#245)。検査値ファイルの名前は
+    # フォルダの付かない**ファイル名だけ**なので、実物のように 116 のフォルダに
+    # 1951 件あると、別のフォルダの同名ファイルが必ずぶつかる。そのまま使うと
+    # `unpack` が**後の 1 件で前の 1 件を黙って上書きする** (20 件が 19 件になった)。
+    # 索引の名前を読むとき (`read_dfi`) と同じ付け方にそろえる
+    seen = {e["path"] for e in entries}
     for i, e in enumerate(entries):
         keep = e["path"]
         if i < len(crc["names"]) and crc["names"][i]:
@@ -533,9 +539,16 @@ def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int]:
                     base = crc["names"][i]
                     folder = os.path.dirname(e["path"])
                     keep = f"{folder}/{base}" if folder else base
+                    if keep in seen:
+                        n = 2
+                        while f"{keep}~{n}" in seen:
+                            n += 1
+                        keep = f"{keep}~{n}"
+                        bumped += 1
+                    seen.add(keep)
                     hit += 1
         named.append(dict(e, path=keep))
-    return named, hit
+    return named, hit, bumped
 
 
 def unpack(idx_path: str, img_path: str, out_dir: str, crc_path: str | None = None) -> int:
@@ -554,11 +567,16 @@ def unpack(idx_path: str, img_path: str, out_dir: str, crc_path: str | None = No
                   "名前は索引のものを使います", file=sys.stderr)
         else:
             with open(img_path, "rb") as img:
-                entries, hit = names_from_crc(crc, entries, img)
+                entries, hit, bumped = names_from_crc(crc, entries, img)
             if hit:
                 print(f"検査値ファイルの名前を {hit} 件当てました "
                       f"(その項目の先頭 {CRC_HEAD} バイトの検査値が合ったものだけ)",
                       file=sys.stderr)
+            if bumped:
+                # **理由が違うので、索引の名前がぶつかったときとは別に言う** (#245)
+                print(f"注意: そのうち {bumped} 件は名前がぶつかったので `~2` を付けました。"
+                      "検査値ファイルの名前には**フォルダが付かない**ので、"
+                      "別のフォルダの同じ名前が重なります", file=sys.stderr)
             else:
                 print("注意: 検査値ファイルの名前は 1 件も当たりませんでした "
                       "(並び順が索引と違うようです)。名前は索引のものを使います",
