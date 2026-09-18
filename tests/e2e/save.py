@@ -4,7 +4,7 @@
 メモ帳や Excel で「ANSI (cp932)」を選んで保存すると、その 4 字が黙って `?` に
 化ける。道具は後から気づけるようにしたが、**そもそも手で貼らせるから起きる**。
 
-そこで画面に「ファイルに保存」を付けた。ここで見るのは 4 つ:
+そこで画面に「ファイルに保存」を付けた。ここで見るのは 5 つ:
 
 1. 落ちたファイルが **UTF-8 のまま**で、cp932 に無い字が生きていること
 2. 文字表には **BOM を付けない** (1 文字ずつが番号なので、1 つ増えると全部ずれる)
@@ -14,6 +14,8 @@
 4. 保存した文字表の**行幅が揃っていなければ、その場で何行目かを言う**こと (#229)。
    1 行だけ 22 字になると、そこから下の番号が全部ずれる。ずれても全部の番号に
    字は当たるので、保存した瞬間に言わないと、もう誰も気づけない
+5. **報告用の要約からも、文字表の警告が出る**こと (#235)。判定の関数は両側で
+   突き合わせているのに、**呼び出し側**を見ている検査がどこにも無かった
 """
 import asyncio
 import os
@@ -115,6 +117,30 @@ async def main():
         for want in ("2 行目", str(len(rows[0]))):
             if want not in (note2 or ""):
                 errors.append(f"書き写しのずれで「{want}」を言っていない: {note2!r}")
+
+        # 5. **報告用の要約からも、同じ 2 つが出ること** (#235)。
+        #    判定の関数は画面と一括処理で突き合わせているが、**呼び出し側**は
+        #    どこも見ていなかった。要約が文字表の欄を渡し忘れても、#234 まで
+        #    どの検査も落ちなかった —— 社長がいちばん頼りにする 1 通から、
+        #    文字表の警告が 2 つとも静かに消える形
+        broken = list(slipped)
+        broken[-1] = broken[-1] + "??"            # ANSI で潰れた跡 (半角 ? が 2 つ)
+        await page.fill("#msgglyphs", "\n".join(broken))
+        await page.click("#msgparse")             # 要約は「貼ってある文字表」を見る
+        await page.wait_for_timeout(300)
+        await page.click('[data-tab="index"]')
+        await page.click("#idxreport")
+        await page.wait_for_function(
+            "document.querySelector('#idxreporttext').value.includes('== 結果')", timeout=30000)
+        report = await page.input_value("#idxreporttext")
+        print("report 文字表:", " | ".join(ln.strip()[:90] for ln in report.split("\n")
+                                          if "文字表" in ln)[:400])
+        for want, why in (("ANSI", "ANSI で潰れた疑い"),
+                          ("2 行目", "書き写しのずれ")):
+            if want not in report:
+                errors.append(f"報告用の要約に{why}が出ていない (「{want}」が無い)")
+        if "== 結果: 問題なし" in report:
+            errors.append("文字表が 2 通りに壊れているのに「問題なし」で締めている")
         await browser.close()
 
     # --- 落ちた中身を見る ---

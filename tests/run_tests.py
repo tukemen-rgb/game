@@ -1727,6 +1727,54 @@ console.log(JSON.stringify(out));
         self.assertEqual(boku2.glyph_table_trouble(pairs), [],
                          "対応表の書き方に、幅の話をしている")
 
+    def test_check_really_says_both_font_table_warnings(self):
+        """**呼び出し側まで見る** (#235).
+
+        文字表の警告は 2 つ (ANSI で潰れた / 書き写しが 1 行ずれた)。どちらも
+        判定の関数は画面と一括処理で 1 字まで突き合わせているのに、
+        **その関数に何を渡しているか**を見ている検査がありませんでした。
+        #229 で足した検査も `boku2.py` の字面に呼び出しがあるかを見るだけで、
+        渡す引数を取り違えても落ちません。ここは実際に `check` を走らせて、
+        壊した文字表で 2 つとも出ることと、締めが「問題なし」にならないことを見ます。
+        """
+        import io
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            table = os.path.join(folder, "font.txt")
+            with open(table, encoding="utf-8") as fh:
+                rows = [ln for ln in fh.read().replace("\r", "").split("\n") if ln]
+            self.assertGreater(len(rows), 3, "材料が弱い: 練習データの文字表が短すぎる")
+
+            # まず無事な文字表では何も言わないこと (毎回出たら誰も読まない)
+            out = io.StringIO()
+            rc = boku2.check(folder, out=out)
+            clean = out.getvalue()
+            self.assertEqual(rc, 0, f"無事な練習データが問題ありになった:\n{clean[-400:]}")
+            for word in ("ANSI", "行目だけ"):
+                self.assertFalse(word in clean,
+                                 f"無事な文字表に「{word}」と言っている:\n{clean[-400:]}")
+
+            # 2 通りまとめて壊す: 2 行目を 1 字減らす + 半角 ? を 2 つ混ぜる
+            broken = list(rows)
+            broken[1] = broken[1][:-1]
+            broken[-1] = broken[-1] + "??"
+            with open(table, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(broken) + "\n")
+
+            out = io.StringIO()
+            rc = boku2.check(folder, out=out)
+            got = out.getvalue()
+            self.assertTrue("ANSI" in got, f"ANSI で潰れた疑いを言っていない:\n{got[-600:]}")
+            self.assertTrue("2 行目だけ" in got,
+                            f"書き写しのずれを言っていない:\n{got[-600:]}")
+            self.assertEqual(rc, 1, f"2 通り壊れているのに問題なしで終わった:\n{got[-600:]}")
+            self.assertFalse("== 結果: 問題なし" in got,
+                             f"締めが「問題なし」になっている:\n{got[-600:]}")
+
     def test_the_two_sides_judge_the_table_the_same_way(self):
         """**画面と一括処理が、同じ表に同じことを言う** (#229).
 
@@ -1808,12 +1856,7 @@ console.log(JSON.stringify(out));
                 res = self.run(os.path.join(REPO, "tools", "boku2.py"), *cmd)
                 out = res.stdout + res.stderr
                 self.assertIn("11 行目", out, f"{cmd[0]} が書き写しのずれを言っていない:\n{out}")
-        # `check` からも出ること (呼び出しを外したら落ちる)
-        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
-            cli = fh.read()
-        self.assertTrue("font_trouble(font_txt)" in cli,
-                        "check が文字表の書き写しを診ていない (boku2.py の check に"
-                        " font_trouble の呼び出しが無い)")
+        # `check` からも出ること。**書いてあるか**ではなく、**出るか**で見る (#235)
 
     def test_where_the_names_stopped_is_pointed_at(self):
         """**名前の読み取りが止まった所を指すこと** (#202).
