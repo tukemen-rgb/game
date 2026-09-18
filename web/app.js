@@ -30,6 +30,10 @@ const FONT_CELL = 22;       /* 文字の刻み (ドット) */
    1 枚の画像には収まりきらない: 512×1024 ドットの頁で 23 × 46 = 1058 マスしかなく、
    残り 598 字は別の画像にある (向こうの font2.txt の字数がちょうど 598) */
 const FONT_GLYPHS = 1656;
+/* 文字表の 1 枚目に入る字数 (#211/#230)。512×1024 ドットの頁を 22 ドット刻みで
+   割ると 23 × 46 = 1058 マスで、公開ソースの font1.txt の字数と一致する。
+   **一括処理 (boku2.py の FONT_PAGE1_GLYPHS) と同じ数字**にしておくこと */
+const FONT_PAGE1_GLYPHS = 1058;
 
 const TIM2_PIXEL_KIND = {
   1: "1 画素 16 ビットの直接色",
@@ -3725,6 +3729,30 @@ function ansiDamageNote(bad) {
 }
 
 /**
+ * **使われている文字番号の最大**が何を意味するか、1 行で言う (#230)。
+ * 一括処理 (boku2.py の glyph_range_note) と同じ判定・同じ言葉にしておくこと。
+ *
+ * 数字だけ出すのは、出さないより悪い (#96)。この 1 つの数で 3 つ決まる:
+ * 文字表 1656 字という見込みが崩れるか / 2 枚目を探さずに済むか / 何字ぶん要るか。
+ */
+function glyphRangeNote(top) {
+  if (top >= FONT_GLYPHS) {
+    return `→ 使われている文字番号の最大が ${top} で、この作品の文字表 `
+      + `${FONT_GLYPHS} 字 (1 行 ${FONT_COLS} 字 × ${FONT_GLYPHS / FONT_COLS} 行) に`
+      + "収まりません。字数の見込みか、2 バイトを 1 字の番号として読む"
+      + "読み方そのものが違います。この行ごと報告してください";
+  }
+  if (top < FONT_PAGE1_GLYPHS) {
+    return `  使われている文字番号の最大は ${top}。文字表 ${FONT_GLYPHS} 字のうち`
+      + `**1 枚目 (${FONT_PAGE1_GLYPHS} 字) の範囲に収まる**ので、`
+      + "この本文を読むだけなら 2 枚目の画像は要りません";
+  }
+  return `  使われている文字番号の最大は ${top}。**1 枚目 (${FONT_PAGE1_GLYPHS} 字) を`
+    + `超える**ので、2 枚目の画像が要ります (その先頭から ${top - FONT_PAGE1_GLYPHS + 1} `
+    + "字ぶん)";
+}
+
+/**
  * 文字表を**書き写すとき**の事故 (#229)。一括処理 (boku2.py の glyph_table_trouble) と
  * 同じ判定・同じ言葉にしておくこと。
  *
@@ -4076,8 +4104,9 @@ async function buildIdxReport() {
       okMsg++;
       if (r.lenField === "ok") lenOk++;
       else if (r.lenField === "ng") lenNg++;
-      const list = r.items ? r.items.filter((x) => x.codes && x.codes.length) : [];
-      for (const c of bokuMsgUsed(list, isAltBreak(it.name))) usedHere.add(c);
+      /* **入れ物なら中まで降りる** (#230)。平らな .msg として読むと、部品の
+         位置表が文字番号に見えてしまう (CLI の text_rows_bytes と同じ道を通る) */
+      for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) usedHere.add(c);
     } else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16), body: bytes };
   }
   if (msgs.length) {
@@ -4118,6 +4147,13 @@ async function buildIdxReport() {
       lines.push(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト `
         + [...badMsg.head].map((v) => hex(v, 2)).join(" ")
         + guessKindNote(badMsg.head, badMsg.body));
+    }
+    /* **使われている文字番号の最大**は、実物で最初に出る大事な数 (#230)。
+       数字だけ出さず、文字表づくりの段取りが決まる所まで言う (CLI の check と同じ言葉) */
+    if (usedHere.size) {
+      const top = Math.max(...usedHere);
+      lines.push(glyphRangeNote(top));
+      if (top >= FONT_GLYPHS) problems++;
     }
     /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
     const glyphText = $("msgglyphs").value;
@@ -6166,6 +6202,59 @@ function bokuMsgUsed(items, alt) {
 }
 
 /**
+ * 1 つの塊から、本文が使っている文字番号だけを集める (#230)。
+ * **一括処理 (boku2.py の `_rows_of`) と同じ順**で試すこと: 表の一覧 → 単体 →
+ * 見出しの無い並び。Shift-JIS の並びは文字番号を使わないので何も足さない。
+ */
+function bokuUsedInPart(bytes, alt, allowRaw) {
+  const used = new Set();
+  const t = parseBokuMsgTables(bytes);
+  if (t) {
+    for (const tb of t.tables) {
+      if (!tb.msg || !tb.msg.items) continue;
+      for (const c of bokuMsgUsed(tb.msg.items.filter((x) => x.codes && x.codes.length), alt)) used.add(c);
+    }
+    return used;
+  }
+  const m = detectBokuMsg(bytes) || (allowRaw ? parseBokuMsgRaw(bytes) : null);
+  if (m && m.items) {
+    for (const c of bokuMsgUsed(m.items.filter((x) => x.codes && x.codes.length), alt)) used.add(c);
+  }
+  return used;
+}
+
+/**
+ * 入れ物なら中の部品まで降りて、使っている文字番号を集める (#230)。
+ * **一括処理 (boku2.py の `text_rows_bytes`) と同じ道**を通る。
+ *
+ * 入れ物 (`diary.bin` など) を平らな `.msg` として読むと、部品の位置表が
+ * そのまま文字番号に見える。名前の付かない吸い出し (社長の実物がそうだった)
+ * では中身の形でファイルを選ぶので、**入れ物が必ず混ざる**。画面はここを
+ * 降りていなかったため、使われている番号に 32767 のような数が入り、
+ * 「文字表に無い番号」として出ていた。
+ */
+function bokuUsedNumbers(bytes, alt, depth = 0) {
+  const map = parseBokuMap(bytes);
+  if (!map) return bokuUsedInPart(bytes, alt, true);
+  const used = new Set();
+  for (const it of map.items) {
+    if (!it.len) continue;
+    const part = bytes.subarray(it.at, it.at + it.len);
+    const inner = parseBokuMap(part);
+    let got;
+    if (inner && inner.items.filter((x) => x.len).length >= 2) {
+      /* 部品がさらに入れ物のことがある。2 段まで降りる (CLI と同じ) */
+      got = depth < 2 ? bokuUsedNumbers(part, alt, depth + 1) : new Set();
+    } else {
+      /* 刻み 8 の 0 番は命令列なので、見出しの無い並びとしては読まない */
+      got = bokuUsedInPart(part, alt, map.rec === 12 || it.i !== 0);
+    }
+    for (const c of got) used.add(c);
+  }
+  return used;
+}
+
+/**
  * 読めた行を校正ツール向けの TSV にする (docs/04 の exercises/qa_target.tsv と同じ列)。
  * translation の列は original の写し。ここを直したものが校正の対象になる
  */
@@ -6329,7 +6418,11 @@ $("msgparse").addEventListener("click", () => {
   const missing = glyphs ? used.filter((c) => glyphs[c] === undefined || glyphs[c] === null) : [];
   state.missingGlyphs = new Set(missing);
   note.textContent = tablesInfo + `${r.count} 件` + (r.stride ? ` (位置表は ${r.stride} バイト刻み)` : "") + ` · 本文あり ${filled.length} 件`
-    + ` · 文字番号の最大 ${maxCode} · 使われている番号 ${used.length} 種`
+    + ` · 文字番号の最大 ${maxCode}`
+    /* 数字だけ出すのは、出さないより悪い (#96)。**文字表に収まらない**ときだけは、
+       ここでも言い切る —— 読み方そのものが違う合図で、見落とすと全部が無駄になる */
+    + (maxCode >= FONT_GLYPHS ? " " + glyphRangeNote(maxCode).trim() : "")
+    + ` · 使われている番号 ${used.length} 種`
     + {
       none: " · 文字表なし (番号のまま表示)",
       untested: ` · 文字表 ${glyphCount} 字 · この範囲は文字番号を使っていないので、文字表は試せていない`,

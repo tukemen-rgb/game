@@ -315,7 +315,7 @@ python3 tools/compare_tsv.py work/all.tsv work/BOKU2SAMPLE/answer.tsv
 
 実物では、練習データのように「問題なし」とは限らない。`check` が `→` の行を出したとき、
 それが索引・本体・.msg・フォント・入れ物のどの段で外れたかを読めるようになる練習。
-壊し方は 7 通り (`--break` の選択肢)。
+壊し方は 8 通り (`--break` の選択肢)。
 
 ```text
 python3 tools/make_boku2_sample.py --break idx  --out work/BROKEN   # 索引の先頭 (DFI ではなくなる)
@@ -325,10 +325,11 @@ python3 tools/make_boku2_sample.py --break font --out work/BROKEN   # bk_font.tm
 python3 tools/make_boku2_sample.py --break map  --out work/BROKEN   # MAP の入れ物の先頭
 python3 tools/make_boku2_sample.py --break allnames --out work/BROKEN  # 索引の名前を最後まで
 python3 tools/make_boku2_sample.py --break empty --out work/BROKEN  # 本体の中身をゼロで埋める
+python3 tools/make_boku2_sample.py --break bignum --out work/BROKEN # 文字番号を文字表の字数より大きく
 python3 tools/boku2.py check work/BROKEN                            # 終了コードは 1 (問題あり)
 ```
 
-やること (7 通りそれぞれで):
+やること (8 通りそれぞれで):
 
 1. `check` の出力から `→` の行を書き出す。「先頭 16 バイト …」のような手がかりが
    付いていれば、それも一緒に
@@ -340,7 +341,7 @@ python3 tools/boku2.py check work/BROKEN                            # 終了コ�
 3. 構造探査台にも同じ `work/BROKEN` を読ませ、「報告用の要約」に **同じ行** が出る
    ことを確かめる (ブラウザと一括処理は同じ診断を出す)
 
-**確認:** 7 通りとも `→` の行が 1 つ以上出て、`== 結果` が「確認事項 N 件」になる
+**確認:** 8 通りとも `→` の行が 1 つ以上出て、`== 結果` が「確認事項 N 件」になる
 (「問題なし」にならない)。`idx` だけは索引が読めないので、そこで診断が止まる (それが正しい)。
 
 要点: 実物で最初に貼るのはこの出力 ([10-僕夏2の手順.md](../docs/10-僕夏2の手順.md) の

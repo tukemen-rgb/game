@@ -1505,6 +1505,78 @@ console.log(JSON.stringify(out));
             return False
         return True
 
+    # ---- 使われている文字番号の最大を、意味まで付けて言う (#230) ----------
+
+    def test_the_biggest_glyph_number_is_judged_not_just_printed(self):
+        """**この 1 つの数で 3 つ決まる**ので、数字だけ出さない (#230/#96).
+
+        実物が届いた日にいちばん早く出る数です。1656 に収まらなければ
+        「2 バイトを 1 字の番号として読む」という読み方ごと外れている合図で、
+        収まるなら**文字表の 2 枚目を探す必要があるか**がその場で決まります。
+        (2 枚目がどのファイルにあるかは、まだ分かっていない —— docs/09)
+        """
+        import boku2
+
+        one = boku2.FONT_PAGE1_GLYPHS
+        self.assertEqual(one + 598, boku2.FONT_GLYPHS,
+                         "1 枚目 + 2 枚目が文字表ぜんぶにならない (前提が崩れた)")
+        # 1. 1 枚目に収まる → 2 枚目は要らない、と言い切る
+        low = boku2.glyph_range_note(one - 1)
+        self.assertTrue("2 枚目の画像は要りません" in low, low)
+        self.assertFalse(low.startswith("→"), f"問題でないのに → を付けている: {low}")
+        # 2. 1 枚目を超える → **何字ぶん**要るかまで言う
+        mid = boku2.glyph_range_note(one)
+        self.assertTrue("2 枚目の画像が要ります" in mid, mid)
+        self.assertTrue("その先頭から 1 字ぶん" in mid, f"何字ぶんかを言っていない: {mid}")
+        top = boku2.glyph_range_note(boku2.FONT_GLYPHS - 1)
+        self.assertTrue(f"その先頭から {598} 字ぶん" in top,
+                        f"2 枚目ぴったりの字数になっていない: {top}")
+        # 3. 文字表に収まらない → **読み方ごと違う**と言い、報告を促す
+        over = boku2.glyph_range_note(boku2.FONT_GLYPHS)
+        self.assertTrue(over.startswith("→"), f"問題として出していない: {over}")
+        self.assertTrue("読み方そのものが違います" in over, over)
+        self.assertTrue("報告してください" in over, over)
+
+    def test_the_two_sides_judge_the_biggest_number_the_same_way(self):
+        """画面と一括処理が、同じ番号に同じことを言う (#230)."""
+        import re
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        import boku2
+
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        i = app.find("function glyphRangeNote(")
+        self.assertGreater(i, 0, "app.js に glyphRangeNote が無い")
+        j = app.index("\n}\n", i) + 3
+        consts = re.findall(r"^const (?:FONT_COLS|FONT_GLYPHS|FONT_PAGE1_GLYPHS) = \d+;",
+                            app, re.M)
+        self.assertEqual(len(consts), 3, f"app.js から定数を {len(consts)} 件しか拾えない")
+        tops = [0, 1, boku2.FONT_PAGE1_GLYPHS - 1, boku2.FONT_PAGE1_GLYPHS,
+                boku2.FONT_GLYPHS - 1, boku2.FONT_GLYPHS, boku2.FONT_GLYPHS + 100, 40000]
+        with tempfile.TemporaryDirectory() as tmp:
+            script = os.path.join(tmp, "range.mjs")
+            with open(script, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(consts) + "\n" + app[i:j]
+                         + "\nconsole.log(JSON.stringify("
+                         "JSON.parse(process.argv[2]).map(glyphRangeNote)));\n")
+            res = subprocess.run([node, script, json.dumps(tops)],
+                                 capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr[-2000:])
+        got = json.loads(res.stdout)
+        for k, n in enumerate(tops):
+            self.assertEqual(boku2.glyph_range_note(n), got[k],
+                             f"番号 {n} で言うことが違う:\n  CLI: {boku2.glyph_range_note(n)}"
+                             f"\n  画面: {got[k]}")
+        # 3 通りとも材料に入っていること (同じ文ばかり比べても一致してしまう)
+        for want in ("2 枚目の画像は要りません", "2 枚目の画像が要ります", "収まりません"):
+            self.assertTrue(any(want in g for g in got),
+                            f"「{want}」を出す材料が入っていない")
+
     # ---- 文字表の書き写しで 1 行ぶんずれる事故 (#229) ----------------------
 
     def _public_table_lines(self, name: str) -> list[str]:
@@ -6827,6 +6899,8 @@ class TestDamageDrill(unittest.TestCase):
         # 索引だけ正しくて中身が空の吸い出し (#218)。形式の話をする前に、
         # **中身が無いこと**を言えているか
         "empty": "本体の中身がほとんど空です",
+        # 文字番号が文字表 1656 字に収まらない形 (#230)。読み方そのものが違う合図
+        "bignum": "この作品の文字表 1656 字",
     }
 
     def test_each_damage_kind_is_diagnosed(self):

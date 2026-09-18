@@ -48,6 +48,11 @@ FONT_CELL = 22
 #: 無く、残り 598 字は別の画像にある (向こうの font2.txt の字数がちょうど 598 で合う)
 FONT_GLYPHS = 1656
 
+#: 文字表の **1 枚目**に入る字数 (#211/#230)。公開ソースの `font1.txt` が 1058 字で、
+#: 512×1024 ドットの頁を 22 ドット刻みで割ると 23 × 46 = 1058 マス。差の 598 字が
+#: 2 枚目 (向こうの `font2.txt` の字数と一致する)
+FONT_PAGE1_GLYPHS = 1058
+
 #: TIM2 の「画素の種類」を素人向けに言い換える (make_tim2.build_tim2 の書き出しと対)。
 #: 番号のままだと意味が伝わらないので、1 画素に何が入っているかで言う
 TIM2_PIXEL_KIND = {
@@ -1015,6 +1020,32 @@ def ansi_damage_note(bad: list[int]) -> str:
             "校正では「半角文字が混ざっています」と出ます")
 
 
+def glyph_range_note(top: int) -> str:
+    """**使われている文字番号の最大**が何を意味するか、1 行で言う (#230).
+
+    数字だけ出すのは、出さないより悪い (#96)。この 1 つの数で 3 つ決まる:
+
+    - `FONT_GLYPHS` 以上 → 文字表が 1656 字という見込みごと崩れる。
+      2 バイト番号としての読み方が違うか、この作品の字数が違う。**報告する所**
+    - 1 枚目に収まる → 2 枚目を探さなくても、この本文は全部読める
+    - それ以外 → 2 枚目が要る。**何字ぶん**要るかまで分かる
+
+    実物が届いた日にいちばん早く出る数で、文字表づくりの段取りがここで決まる。
+    """
+    if top >= FONT_GLYPHS:
+        return (f"→ 使われている文字番号の最大が {top} で、この作品の文字表 "
+                f"{FONT_GLYPHS} 字 (1 行 {FONT_COLS} 字 × {FONT_GLYPHS // FONT_COLS} 行) に"
+                "収まりません。字数の見込みか、2 バイトを 1 字の番号として読む"
+                "読み方そのものが違います。この行ごと報告してください")
+    if top < FONT_PAGE1_GLYPHS:
+        return (f"  使われている文字番号の最大は {top}。文字表 {FONT_GLYPHS} 字のうち"
+                f"**1 枚目 ({FONT_PAGE1_GLYPHS} 字) の範囲に収まる**ので、"
+                "この本文を読むだけなら 2 枚目の画像は要りません")
+    return (f"  使われている文字番号の最大は {top}。**1 枚目 ({FONT_PAGE1_GLYPHS} 字) を"
+            f"超える**ので、2 枚目の画像が要ります (その先頭から {top - FONT_PAGE1_GLYPHS + 1} "
+            "字ぶん)")
+
+
 def glyph_table_trouble(text: str) -> list[str]:
     """文字表を**書き写すとき**の事故を見つける (#229).
 
@@ -1816,6 +1847,12 @@ def check(folder: str, out=sys.stdout) -> int:
                 say(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト "
                     f"{head.hex(' ').upper()}{guess_kind_note(head, body)}")
         # 文字表 (font.txt) がこのフォルダにあれば、その出来具合も診る (docs/10 の手順 3 の途中経過)
+        # **使われている文字番号の最大**は、実物で最初に出る大事な数 (#230)。
+        # 数字だけ出さず、文字表づくりの段取りが決まる所まで言う
+        if used_here:
+            say(glyph_range_note(max(used_here)))
+            if max(used_here) >= FONT_GLYPHS:
+                problems += 1
         font_txt = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "font.txt"), None)
         if font_txt:
             glyphs = load_font(font_txt) or []
@@ -2262,6 +2299,7 @@ def run(args) -> int:
             return 1
         print(" ".join(str(u) for u in used))
         print(f"# {len(used)} 種 (最大 {used[-1]})。フォント画像のこの番号だけ書き出せば本文は読める", file=sys.stderr)
+        print(glyph_range_note(used[-1]).strip(), file=sys.stderr)
     elif args.cmd == "table":
         glyphs = load_font(args.font) or []
         mapping = glyph_table_mapping(glyphs)

@@ -302,6 +302,8 @@ DAMAGE = {
     "map":  "MAP の 1 つを壊す (入れ物として読めない)",
     # 索引はそのまま、**中身だけ**をゼロにする。吸い出しが途中で切れた形 (#218)
     "empty": "本体の中身をゼロで埋める (索引は読めるのに中身が空)",
+    # 文字番号が文字表の字数に収まらない形 (#230)。読み方そのものが違うときに出る
+    "bignum": "system.msg の文字番号を 1 つ、文字表の字数より大きくする",
 }
 
 
@@ -352,6 +354,20 @@ def damage(out_dir: str, kind: str) -> str:
             fh.seek(e["at"] + (0 if kind == "msg" else 0x80))
             fh.write(b"\xee" * 16)
         return f"BOKU2.IMG の {want} の先頭 16 バイト{'' if kind == 'msg' else ' (TIM2 の位置)'}を EE で埋めた"
+    if kind == "bignum":
+        # **2 バイトを 1 字の番号として読む**という読み方が外れていると、実物では
+        # 文字表の字数 (1656) に収まらない番号が出る。数として出るだけなので、
+        # 診断がそこを判定していなければ、そのまま最後まで緑で進んでしまう
+        e = next(x for x in entries if x["path"] == "system/system.msg")
+        with open(img_path, "r+b") as fh:
+            fh.seek(e["at"])
+            body = fh.read(e["len"])
+            items = boku2.pick_msg(body) or []
+            it = next(x for x in items if x["codes"])
+            big = boku2.FONT_GLYPHS + 100
+            fh.seek(e["at"] + it["at"])
+            fh.write(struct.pack("<H", big))
+        return f"BOKU2.IMG の system/system.msg の文字番号を 1 つ {big} にした"
     if kind == "map":
         name = sorted(os.listdir(os.path.join(out_dir, "MAP")))[0]
         with open(os.path.join(out_dir, "MAP", name), "r+b") as fh:
