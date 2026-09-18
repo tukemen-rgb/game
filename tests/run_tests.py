@@ -7338,6 +7338,51 @@ class TestCrcFileCrossCheck(unittest.TestCase):
                 lines, problems = boku2.crc_report(crc, marked, img, len(entries))
             self.assertEqual(problems, 0, f"`~2` で鳴っている:\n" + "\n".join(lines))
 
+    def test_names_are_not_compared_when_the_order_is_wrong(self):
+        """**並び順が違うときに、名前の食い違いで騒がない** (#242).
+
+        並びが違えば名前が食い違うのは当たり前で、原因は 1 つ上の行 (検査値が
+        合わない) にあります。実物は 1951 件あるので、ここで鳴らすと何千件もの
+        「食い違い」が出て、**本当の手がかりが埋もれます**。
+        """
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            with open(os.path.join(folder, "BOKU2.CRC"), "rb") as fh:
+                crc = boku2.read_crc_file(fh.read())
+            with open(os.path.join(folder, "BOKU2.IDX"), "rb") as fh:
+                idx = fh.read()
+            img_path = os.path.join(folder, "BOKU2.IMG")
+            entries = boku2.read_dfi(idx, os.path.getsize(img_path))
+
+            # 名前を全部ずらす (並び順が 1 つずれた形)
+            shifted = dict(crc)
+            shifted["names"] = crc["names"][1:] + crc["names"][:1]
+            # **材料が弱くないこと**: ずらせば名前は本当に食い違う
+            _, diff, _ = boku2.compare_crc_names(shifted, entries)
+            self.assertGreater(diff, 0, "材料が弱い: ずらしても名前が食い違わない")
+
+            # 1. 検査値が合っているうちは、名前の食い違いをちゃんと言う
+            with open(img_path, "rb") as img:
+                lines, problems = boku2.crc_report(shifted, entries, img, len(entries))
+            got = "\n".join(lines)
+            self.assertGreaterEqual(problems, 1, f"名前の食い違いを言っていない:\n{got}")
+            self.assertTrue("名前が" in got and "食い違います" in got, got)
+
+            # 2. 検査値が合わないなら、名前の話はしない (原因は 1 つ上にある)
+            broken = dict(shifted)
+            broken["crcs"] = [v ^ 0xFFFF for v in crc["crcs"]]
+            with open(img_path, "rb") as img:
+                lines, problems = boku2.crc_report(broken, entries, img, len(entries))
+            got = "\n".join(lines)
+            self.assertTrue("検査値が" in got and "合いません" in got,
+                            f"検査値の食い違いを言っていない:\n{got}")
+            self.assertFalse("名前が" in got and "食い違います" in got,
+                             f"並びが違うのに名前の食い違いでも騒いでいる:\n{got}")
+
     def test_it_says_when_there_is_none(self):
         """無いときは「無い」と言い、**診ていない段**に数えること (#175)."""
         import io
@@ -13550,6 +13595,12 @@ class TestWhatIsConfirmedHasOneAnswer(unittest.TestCase):
         assert start != -1, f"docs/09 に「{cls.SECTION}」が無い"
         cls.start = start
         end = cls.log.find("\n## ", start + 1)
+        # **この節の最初の表だけを見る。** 下に `###` で別の表を足したので
+        # (#242 の「実物が届いた日に決まること」)、そこまでで切らないと
+        # 関係の無い表の行を「確かめたかどうかが書いていない」と言ってしまう
+        sub = cls.log.find("\n### ", start + 1)
+        if sub != -1 and (end == -1 or sub < end):
+            end = sub
         cls.table = [line for line in cls.log[start:end].splitlines()
                      if line.startswith("|")]
 

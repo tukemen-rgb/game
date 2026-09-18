@@ -1776,6 +1776,30 @@ def used_numbers_of(b: bytes, name: str) -> set:
     return used
 
 
+def compare_crc_names(crc: dict, entries: list) -> tuple[int, int, tuple | None]:
+    """索引の名前と検査値ファイルの名前を 1 件ずつ比べる (#241).
+
+    **読み方の間違いでないものは数えない**: 大文字小文字の違いと、同じ名前を
+    見分けるためにこちらが付けた `~2` の印。ここで鳴ると本当の食い違いが埋もれる。
+    こちらが名前を読めていない項目 (`#12`) も比べない。
+    """
+    same = diff = 0
+    first_diff = None
+    for i, e in enumerate(entries):
+        if i >= len(crc["names"]) or not crc["names"][i]:
+            continue
+        ours = re.sub(r"~\d+$", "", os.path.basename(e["path"]))
+        if ours.startswith("#"):
+            continue
+        if ours.lower() == crc["names"][i].lower():
+            same += 1
+        else:
+            diff += 1
+            if first_diff is None:
+                first_diff = (ours, crc["names"][i])
+    return same, diff, first_diff
+
+
 def crc_report(crc: dict, entries: list, img, rec_count: int,
                names_missing: bool = False) -> tuple[list, int]:
     """`BOKU2.CRC` と、こちらの切り分けを突き合わせた行 (#239).
@@ -1800,37 +1824,6 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
         lines.append(f"→ 検査値ファイルは {crc['n']:,} 件、索引から数えたファイルは "
                      f"{len(entries):,} 件で**合いません** (索引のレコードは {rec_count:,} 件)。"
                      "索引の読み方かこの数え方のどちらかが違います。この行ごと報告してください")
-    # **名前も突き合わせる** (#241)。索引の名前が読めているなら、検査値ファイルの
-    # 名前と 1 件ずつ比べられる。**同じものが 2 か所に書いてある**ので、食い違えば
-    # どちらかの読み方が違う。大文字小文字は読み方の間違いではないので区別しない。
-    # 索引側の `~2` (同じ名前を見分けるためにこちらが付けた印) は外してから比べる
-    if not names_missing and any(crc["names"]):
-        same = diff = 0
-        first_diff = None
-        for i, e in enumerate(entries):
-            if i >= len(crc["names"]) or not crc["names"][i]:
-                continue
-            ours = re.sub(r"~\d+$", "", os.path.basename(e["path"]))
-            if ours.startswith("#"):
-                continue                      # こちらが名前を読めていない項目は比べない
-            if ours.lower() == crc["names"][i].lower():
-                same += 1
-            else:
-                diff += 1
-                if first_diff is None:
-                    first_diff = (ours, crc["names"][i])
-        if same or diff:
-            if not diff:
-                lines.append(f"  名前も {same:,} 件そろっています "
-                             "(索引と検査値ファイルの 2 か所が同じことを言っています)")
-            else:
-                problems += 1
-                lines.append(f"→ 索引の名前と検査値ファイルの名前が {diff:,} 件食い違います "
-                             f"(そろった {same:,} 件)。例: 索引は {first_diff[0]}、"
-                             f"検査値ファイルは {first_diff[1]}。"
-                             "**同じものが 2 か所に書いてあるので、どちらかの読み方が違います**。"
-                             "この行ごと報告してください")
-
     # **中身まで確かめる。** 切り分けた先頭 0x80 バイトの CRC が、向こうの値と合うか
     ok = ng = 0
     first_bad = None
@@ -1852,6 +1845,23 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
     elif not ng:
         lines.append(f"  切り分けた先頭 {CRC_HEAD} バイトの検査値: {ok:,} 件すべて合いました "
                      "(**位置も中身も合っている**という、いちばん強い裏付けです)")
+        # **名前も突き合わせる** (#241)。同じものが 2 か所に書いてあるので、
+        # 食い違えばどちらかの読み方が違う。**ただし検査値が全部合ったときだけ**
+        # 比べる (#242) —— 並び順が違うなら、名前が食い違うのは当たり前で、
+        # 原因は 1 つ上の行にある。実物は 1951 件あるので、ここで鳴らすと
+        # 何千件もの「食い違い」が出て、本当の手がかりが埋もれる
+        if not names_missing and any(crc["names"]):
+            same, diff, first_diff = compare_crc_names(crc, entries)
+            if not diff and same:
+                lines.append(f"  名前も {same:,} 件そろっています "
+                             "(索引と検査値ファイルの 2 か所が同じことを言っています)")
+            elif diff:
+                problems += 1
+                lines.append(f"→ 索引の名前と検査値ファイルの名前が {diff:,} 件食い違います "
+                             f"(そろった {same:,} 件)。例: 索引は {first_diff[0]}、"
+                             f"検査値ファイルは {first_diff[1]}。"
+                             "**同じものが 2 か所に書いてあるので、どちらかの読み方が違います**。"
+                             "この行ごと報告してください")
         # **索引の名前が読めないときの逃げ道** (#240)。検査値が全部合っているなら、
         # 名前の並びも索引と同じ順とみてよい (1 件ずつ検査値で裏が取れる)
         if names_missing and any(crc["names"]):

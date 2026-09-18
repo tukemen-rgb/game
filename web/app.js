@@ -4181,36 +4181,7 @@ async function buildIdxReport() {
           + `${items.length.toLocaleString()} 件で**合いません** (索引のレコードは ${c.count.toLocaleString()} 件)。`
           + "索引の読み方かこの数え方のどちらかが違います。この行ごと報告してください");
       }
-      /* **名前も突き合わせる** (#241)。索引の名前が読めているなら、検査値ファイルの
-         名前と 1 件ずつ比べられる。同じものが 2 か所に書いてあるので、食い違えば
-         どちらかの読み方が違う。一括処理 (boku2.py の crc_report) と同じ判定・同じ言葉 */
       const idxNamesOk = (c.named_ok ?? items.length) >= items.length * 0.9;
-      if (idxNamesOk && crc.names.some((x) => x)) {
-        let same = 0, diff = 0, firstDiff = null;
-        for (let i = 0; i < items.length; i++) {
-          if (i >= crc.names.length || !crc.names[i]) continue;
-          const ours = (items[i].base || items[i].name).replace(/~\d+$/, "");
-          if (ours.startsWith("#")) continue;
-          if (ours.toLowerCase() === crc.names[i].toLowerCase()) same++;
-          else {
-            diff++;
-            if (!firstDiff) firstDiff = [ours, crc.names[i]];
-          }
-        }
-        if (same || diff) {
-          if (!diff) {
-            lines.push(`  名前も ${same.toLocaleString()} 件そろっています `
-              + "(索引と検査値ファイルの 2 か所が同じことを言っています)");
-          } else {
-            problems++;
-            lines.push(`→ 索引の名前と検査値ファイルの名前が ${diff.toLocaleString()} 件食い違います `
-              + `(そろった ${same.toLocaleString()} 件)。例: 索引は ${firstDiff[0]}、`
-              + `検査値ファイルは ${firstDiff[1]}。`
-              + "**同じものが 2 か所に書いてあるので、どちらかの読み方が違います**。"
-              + "この行ごと報告してください");
-          }
-        }
-      }
       let crcOk = 0, crcNg = 0, crcBad = null;
       for (let i = 0; i < Math.min(items.length, CRC_CHECK_FILES); i++) {
         const slot = i < crc.slots.length ? crc.slots[i] : i;
@@ -4231,10 +4202,38 @@ async function buildIdxReport() {
       } else if (!crcNg) {
         lines.push(`  切り分けた先頭 ${CRC_HEAD} バイトの検査値: ${crcOk.toLocaleString()} 件すべて合いました `
           + "(**位置も中身も合っている**という、いちばん強い裏付けです)");
+        /* **名前も突き合わせる** (#241)。同じものが 2 か所に書いてあるので、食い違えば
+           どちらかの読み方が違う。**ただし検査値が全部合ったときだけ** 比べる (#242)
+           —— 並び順が違うなら名前が食い違うのは当たり前で、原因は 1 つ上の行にある。
+           一括処理 (boku2.py の compare_crc_names) と同じ判定・同じ言葉 */
+        if (idxNamesOk && crc.names.some((x) => x)) {
+          let same = 0, diff = 0, firstDiff = null;
+          for (let i = 0; i < items.length; i++) {
+            if (i >= crc.names.length || !crc.names[i]) continue;
+            const ours = (items[i].base || items[i].name).replace(/~\d+$/, "");
+            if (ours.startsWith("#")) continue;
+            if (ours.toLowerCase() === crc.names[i].toLowerCase()) same++;
+            else {
+              diff++;
+              if (!firstDiff) firstDiff = [ours, crc.names[i]];
+            }
+          }
+          if (!diff && same) {
+            lines.push(`  名前も ${same.toLocaleString()} 件そろっています `
+              + "(索引と検査値ファイルの 2 か所が同じことを言っています)");
+          } else if (diff) {
+            problems++;
+            lines.push(`→ 索引の名前と検査値ファイルの名前が ${diff.toLocaleString()} 件食い違います `
+              + `(そろった ${same.toLocaleString()} 件)。例: 索引は ${firstDiff[0]}、`
+              + `検査値ファイルは ${firstDiff[1]}。`
+              + "**同じものが 2 か所に書いてあるので、どちらかの読み方が違います**。"
+              + "この行ごと報告してください");
+          }
+        }
         /* **索引の名前が読めないときの逃げ道** (#240)。一括処理 (boku2.py の
            crc_report) と同じ判定・同じ言葉。検査値が全部合っているなら、
            名前の並びも索引と同じ順とみてよい (1 件ずつ検査値で裏が取れる) */
-        const namesMissing = (c.named_ok ?? items.length) < items.length * 0.9;
+        const namesMissing = !idxNamesOk;
         const haveNames = crc.names.filter((x) => x).length;
         if (namesMissing && haveNames) {
           lines.push(`  索引の名前は読めていませんが、**この検査値ファイルに名前が `
