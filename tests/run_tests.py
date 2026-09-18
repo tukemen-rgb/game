@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import codecs
+import contextlib
+import io
 import json
 import os
 import re
@@ -6368,6 +6370,156 @@ class TestBoku2Cli(unittest.TestCase):
                 self.assertEqual(js, py)
 
 
+class TestUnpackLandsEveryFile(unittest.TestCase):
+    """**切り分けた数と、手元にできたファイルの数が合うこと** (#246).
+
+    `read_dfi` と `names_from_crc` は「同じ道筋なら `~2`」をやっているが、
+    見ているのは**索引の名前のまま**の道筋。実際に書くのは `safe_parts` を
+    通した後なので、そこで初めてぶつかる形を 2 つ取りこぼしていた。
+    どちらも「切り分けました」と言いながらファイルが減る / 途中で落ちる。
+    """
+
+    @staticmethod
+    def build(tmp: str, tree: list) -> tuple[str, str]:
+        import make_boku2_sample
+        idx, img, _ = make_boku2_sample.build_dfi(tree)
+        idx_path, img_path = os.path.join(tmp, "T.IDX"), os.path.join(tmp, "T.IMG")
+        with open(idx_path, "wb") as fh:
+            fh.write(idx)
+        with open(img_path, "wb") as fh:
+            fh.write(img)
+        return idx_path, img_path
+
+    @staticmethod
+    def landed(out: str) -> list[str]:
+        return sorted(os.path.relpath(os.path.join(r, f), out)
+                      for r, _d, fs in os.walk(out) for f in fs)
+
+    def test_names_that_become_the_same_after_the_underscore_are_both_kept(self):
+        """`sys/a:b.bin` と `sys/a_b.bin` —— 使えない字を `_` にしたら同じになる."""
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            idx_path, img_path = self.build(tmp, [
+                (True, 1, "/", None),
+                (True, 1, "sys", None),
+                (False, 1, "a:b.bin", b"A" * 32),
+                (False, 0, "a_b.bin", b"B" * 32),
+                (False, 0, "tail.bin", b"C" * 32),
+            ])
+            out = os.path.join(tmp, "OUT")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                n, _unnamed, _dropped, paths = boku2.unpack(idx_path, img_path, out)
+            got = self.landed(out)
+            # **材料が弱くないこと**: 索引では 2 件が違う名前になっている
+            self.assertEqual(sorted(paths)[:2], ["sys/a:b.bin", "sys/a_b.bin"], paths)
+            self.assertEqual(len(got), n,
+                             f"{n} 個に切り分けたのに {len(got)} 個しか落ちていない: {got}")
+            # 中身も入れ替わっていない
+            with open(os.path.join(out, "sys", "a_b.bin"), "rb") as fh:
+                self.assertEqual(fh.read(), b"A" * 32)
+            with open(os.path.join(out, "sys", "a_b.bin~2"), "rb") as fh:
+                self.assertEqual(fh.read(), b"B" * 32)
+            # **黙って名前を変えない。** 使えない字とは原因が違うので別に言う
+            self.assertIn("別のファイルと同じ名前になったので `~2`", err.getvalue())
+            self.assertIn("sys/a_b.bin → sys/a_b.bin~2", err.getvalue())
+
+    def test_a_name_used_for_both_a_file_and_a_folder_does_not_stop_the_unpack(self):
+        """`sys` というファイルと `sys` というフォルダ —— 前は FileExistsError で落ちた."""
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            idx_path, img_path = self.build(tmp, [
+                (True, 1, "/", None),
+                (False, 1, "sys", b"A" * 32),
+                (True, 1, "sys", None),
+                (False, 0, "x.bin", b"B" * 32),
+                (False, 0, "tail.bin", b"C" * 32),
+            ])
+            out = os.path.join(tmp, "OUT")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                n, _unnamed, _dropped, paths = boku2.unpack(idx_path, img_path, out)
+            got = self.landed(out)
+            # **材料が弱くないこと**: 同じ名前がファイルにもフォルダにも使われている
+            self.assertIn("sys", paths)
+            self.assertIn("sys/x.bin", paths)
+            self.assertEqual(len(got), n,
+                             f"{n} 個に切り分けたのに {len(got)} 個しか落ちていない: {got}")
+            self.assertIn(os.path.join("sys", "x.bin"), got)
+            self.assertIn("sys~2", got)
+            self.assertIn("フォルダと同じ名前だったので `~2`", err.getvalue())
+
+    def test_the_folder_wins_whichever_order_it_comes_in(self):
+        """フォルダが先でもファイルが先でも、結果は同じ。逆順だと `open` が
+        IsADirectoryError で落ちる形だった."""
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            idx_path, img_path = self.build(tmp, [
+                (True, 1, "/", None),
+                (True, 1, "sys", None),
+                (False, 0, "x.bin", b"B" * 32),       # ここで sys を閉じて根に戻る
+                (False, 1, "sys", b"A" * 32),
+                (False, 0, "tail.bin", b"C" * 32),
+            ])
+            out = os.path.join(tmp, "OUT")
+            with contextlib.redirect_stderr(io.StringIO()):
+                n, _unnamed, _dropped, _paths = boku2.unpack(idx_path, img_path, out)
+            got = self.landed(out)
+            self.assertEqual(len(got), n, f"落ちたのは {got}")
+            self.assertIn(os.path.join("sys", "x.bin"), got)
+            self.assertIn("sys~2", got)
+
+    def test_the_notice_only_counts_names_that_really_had_a_bad_letter(self):
+        """`~2` を付けただけの件を「使えない字があった」に混ぜない (#96 の「数だけ出すな」)."""
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            idx_path, img_path = self.build(tmp, [
+                (True, 1, "/", None),
+                (False, 1, "sys", b"A" * 32),
+                (True, 1, "sys", None),
+                (False, 0, "x.bin", b"B" * 32),
+                (False, 0, "tail.bin", b"C" * 32),
+            ])
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                boku2.unpack(idx_path, img_path, os.path.join(tmp, "OUT"))
+            self.assertNotIn("使えない字", err.getvalue(),
+                             f"使えない字は 1 つも無いのに言っている: {err.getvalue()}")
+
+    def test_the_place_to_write_is_decided_for_the_whole_list_at_once(self):
+        """`out_paths` そのもの: 同じ場所を 2 度返さない."""
+        import boku2
+        dests, why = boku2.out_paths(
+            ["sys/a:b.bin", "sys/a_b.bin", "sys/a?b.bin", "sys", "sys/x.bin", "tail.bin"])
+        self.assertEqual(len(set(dests)), len(dests), dests)
+        self.assertEqual(why, ["", "collide", "collide", "folder", "", ""], dests)
+        # フォルダとして使われている場所を、ファイルが横取りしない
+        self.assertNotIn("sys", dests)
+
+    def test_the_practice_data_lands_every_file(self):
+        """練習用データでも数が合うこと (壊し方を全部かけても)."""
+        import boku2
+        import make_boku2_sample
+        for kind in [None] + sorted(make_boku2_sample.DAMAGE):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                folder = os.path.join(tmp, "S")
+                make_boku2_sample.build_sample(folder)
+                if kind:
+                    make_boku2_sample.damage(folder, kind)
+                out = os.path.join(tmp, "OUT")
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        n, _u, _d, _p = boku2.unpack(
+                            os.path.join(folder, "BOKU2.IDX"),
+                            os.path.join(folder, "BOKU2.IMG"), out,
+                            os.path.join(folder, "BOKU2.CRC"))
+                except ValueError:
+                    continue                      # 索引そのものが読めない壊し方 (idx)
+                got = self.landed(out)
+                self.assertEqual(len(got), n,
+                                 f"{kind}: {n} 個に切り分けたのに {len(got)} 個")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
@@ -9555,7 +9707,23 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             _dup[_p:_p + len(b"same.bin")] = b"same.bin"
         with open(at("samename.crc"), "wb") as fh:
             fh.write(_dup)
+        # 置き換えた後で初めてぶつかる 2 通り (#246)。`a:b.bin` は `_` にすると
+        # `a_b.bin` と同じになり、`sys` はフォルダにもファイルにも使われている
+        import make_boku2_sample as _mk
+        _cidx, _cimg, _ = _mk.build_dfi([
+            (True, 1, "/", None),
+            (True, 1, "sys", None),
+            (False, 1, "a:b.bin", b"A" * 32),
+            (False, 0, "a_b.bin", b"B" * 32),       # ここで sys を閉じて根に戻る
+            (False, 1, "sys", b"C" * 32),
+            (False, 0, "tail.bin", b"D" * 32),
+        ])
+        with open(at("clash.idx"), "wb") as fh:
+            fh.write(_cidx)
+        with open(at("clash.img"), "wb") as fh:
+            fh.write(_cimg)
         out += [
+            run(tool("boku2.py"), "unpack", at("clash.idx"), at("clash.img"), at("OUTclash")),
             run(tool("boku2.py"), "check", at("void")),
             run(tool("boku2.py"), "unpack", os.path.join(sample, "BOKU2.IDX"),
                 os.path.join(sample, "BOKU2.IMG"), at("OUT")),

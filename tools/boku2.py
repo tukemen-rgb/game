@@ -387,6 +387,47 @@ def safe_parts(path: str) -> list[str]:
     return parts or ["_"]
 
 
+def out_paths(paths: list[str]) -> tuple[list[str], int, int]:
+    """索引の名前 → **実際に書き出す場所**。1 件も上書きしない (#246).
+
+    `read_dfi` と `names_from_crc` は「同じ道筋なら `~2`」をやっているが、
+    見ているのは**索引の名前のまま**の道筋だった。実際に書くのは `safe_parts` を
+    通した後の名前なので、そこで初めてぶつかる 2 通りを取りこぼしていた:
+
+      - `sys/a:b.bin` と `sys/a_b.bin` —— 使えない字を `_` にしたら同じになる。
+        3 件に切り分けて 2 個しか落ちなかった (#245 と同じ「黙って上書き」)
+      - `sys` というファイルと `sys` というフォルダ —— `os.makedirs` が
+        FileExistsError で落ち、途中まで書いた出力だけが残る
+
+    どちらも `~2` を付けて避ける。**フォルダを優先**する (フォルダ名にぶつかった
+    ファイルの方をずらす) ので、「親が先にファイルになっていて書けない」形は起きない。
+
+    @returns (書き出す場所の一覧, ずらした理由の一覧)。理由は "" (ずらしていない) /
+             "collide" (別のファイルと同じ名前) / "folder" (フォルダと同じ名前)
+    """
+    dirs: set[str] = set()
+    for p in paths:
+        parts = safe_parts(p)
+        for i in range(1, len(parts)):
+            dirs.add("/".join(parts[:i]))
+    dests: list[str] = []
+    why: list[str] = []
+    taken: set[str] = set()
+    for p in paths:
+        dest = "/".join(safe_parts(p))
+        reason = ""
+        if dest in taken or dest in dirs:
+            reason = "collide" if dest in taken else "folder"
+            n = 2
+            while f"{dest}~{n}" in taken or f"{dest}~{n}" in dirs:
+                n += 1
+            dest = f"{dest}~{n}"
+        taken.add(dest)
+        dests.append(dest)
+        why.append(reason)
+    return dests, why
+
+
 def dfi_dropped(idx: bytes, data_size: int, rule: str = "flag") -> dict:
     """索引が名乗っているファイル数と、**実際に取り出せる数**の差 (#178).
 
@@ -588,16 +629,35 @@ def unpack(idx_path: str, img_path: str, out_dir: str, crc_path: str | None = No
     # **名前を変えたら、変えたと言う** (#202)。`:` `?` `*` や空白は Windows の
     # ファイル名に使えないので `_` にしているが、黙って変えると、索引に出ている
     # 名前と手元のファイル名が食い違う。20 個のうち 3 個だけ違っていても気づけない
-    renamed = [(e["path"], "/".join(safe_parts(e["path"])))
-               for e in entries if "/".join(safe_parts(e["path"])) != e["path"]]
+    # **書き出す場所を先に全部決める** (#246)。ここで初めてぶつかる名前があるので、
+    # 1 件ずつ書きながら決めると黙って上書きしてしまう
+    dests, why = out_paths([e["path"] for e in entries])
+
+    def _shown(pairs: list[tuple[str, str]]) -> str:
+        return (", ".join(f"{a} → {b}" for a, b in pairs[:3])
+                + (" …" if len(pairs) > 3 else ""))
+
+    # 3 つの注意は**原因が違う**ので分けて言う。直し方が違うため (#246)。
+    # 使えない字は Windows の都合、あとの 2 つは索引の中身の都合
+    renamed = [(e["path"], d) for e, d in zip(entries, dests)
+               if "/".join(safe_parts(e["path"])) != e["path"]]
     if renamed:
-        shown = ", ".join(f"{a} → {b}" for a, b in renamed[:3])
         print(f"注意: ファイル名に使えない字があった {len(renamed)} 個を `_` にしました "
-              f"({shown}{' …' if len(renamed) > 3 else ''})。"
+              f"({_shown(renamed)})。"
               "索引に出ている名前と手元のファイル名が違います", file=sys.stderr)
+    collided = [(e["path"], d) for e, d, w in zip(entries, dests, why) if w == "collide"]
+    if collided:
+        print(f"注意: {len(collided)} 個は `_` にしたら別のファイルと同じ名前に"
+              f"なったので `~2` を付けました ({_shown(collided)})。"
+              "索引では違う名前でも、手元では同じ名前になります", file=sys.stderr)
+    asfolder = [(e["path"], d) for e, d, w in zip(entries, dests, why) if w == "folder"]
+    if asfolder:
+        print(f"注意: {len(asfolder)} 個はフォルダと同じ名前だったので `~2` を"
+              f"付けました ({_shown(asfolder)})。"
+              "索引が同じ名前をフォルダにもファイルにも使っています", file=sys.stderr)
     with open(img_path, "rb") as img:
-        for e in entries:
-            dest = os.path.join(out_dir, *safe_parts(e["path"]))
+        for e, d in zip(entries, dests):
+            dest = os.path.join(out_dir, *d.split("/"))
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             img.seek(e["at"])
             with open(dest, "wb") as fo:
