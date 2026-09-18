@@ -6778,6 +6778,88 @@ class TestWhenNothingIsPickedTheAdviceFitsTheCause(unittest.TestCase):
             self.assertEqual((total, numbered), (2, 2))
 
 
+class TestMapsSaysWhichKindOfZeroItIs(unittest.TestCase):
+    """**`maps` の 0 も、3 通りの意味に潰れていた** (#249。#248 と同じ形).
+
+    今までは、どの 0 でも「指定した場所に MAP のファイルがありません。
+    吸い出したフォルダの `MAP/` を指定してください」と言っていた。ファイルが
+    そこにある 2 通りでは**それが嘘**で、しかも直し方が違う。
+    """
+
+    @staticmethod
+    def run_maps(folder: str, out: str) -> str:
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                            "maps", folder, "-o", out], capture_output=True, text=True, cwd=REPO)
+        return r.stdout + r.stderr
+
+    def test_an_empty_place_says_point_at_the_map_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            place = os.path.join(tmp, "EMPTY")
+            os.makedirs(place)
+            said = self.run_maps(place, os.path.join(tmp, "OUT"))
+            self.assertIn("指定した場所に MAP のファイルがありません", said, said)
+
+    def test_files_that_are_not_containers_are_not_called_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            place = os.path.join(tmp, "JUNK")
+            os.makedirs(place)
+            for n in ("A.BIN", "B.BIN"):
+                with open(os.path.join(place, n), "wb") as fh:
+                    fh.write(bytes(range(256)) * 8)
+            said = self.run_maps(place, os.path.join(tmp, "OUT"))
+            # **材料が弱くないこと**: ファイルは本当にそこにある
+            self.assertIn("見たファイル 2 個", said, said)
+            self.assertIn("どれも入れ物として読めませんでした", said, said)
+            self.assertIn("A.BIN", said, said)
+            self.assertNotIn("指定した場所に MAP のファイルがありません", said,
+                             f"2 個あるのに「ありません」と言っている:\n{said}")
+
+    def test_a_container_whose_parts_are_all_empty_says_so(self):
+        """入れ物としては読めたのに部品が 0 個。**「入れ物が見つかりません」ではない**."""
+        import struct
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            place = os.path.join(tmp, "HOLLOW")
+            os.makedirs(place)
+            body = struct.pack("<I", 2) + struct.pack("<II", 0x20, 0) * 2 + b"\0" * 64
+            with open(os.path.join(place, "H.BIN"), "wb") as fh:
+                fh.write(body)
+            # **材料が弱くないこと**: 本当に入れ物として読めて、部品が 0 個
+            items = boku2.parse_map(body)
+            self.assertIsNotNone(items, "材料が弱い: 入れ物として読めていない")
+            self.assertEqual(sum(1 for it in items if it["len"]), 0,
+                             f"材料が弱い: 中身のある部品がある: {items}")
+            said = self.run_maps(place, os.path.join(tmp, "OUT"))
+            self.assertIn("部品が 1 つも取り出せませんでした", said, said)
+            self.assertIn("全部 長さ 0", said, said)
+            self.assertNotIn("入れ物が 1 つも見つかりませんでした", said,
+                             f"入れ物は 1 個読めているのに「見つかりません」:\n{said}")
+            self.assertNotIn("指定した場所に MAP のファイルがありません", said, said)
+
+    def test_the_three_answers_are_all_different(self):
+        """3 通りが同じ言葉にならないこと (同じに見えると分ける意味が無い)."""
+        import struct
+        with tempfile.TemporaryDirectory() as tmp:
+            said = []
+            empty = os.path.join(tmp, "E")
+            os.makedirs(empty)
+            said.append(self.run_maps(empty, os.path.join(tmp, "O1")))
+            junk = os.path.join(tmp, "J")
+            os.makedirs(junk)
+            with open(os.path.join(junk, "A.BIN"), "wb") as fh:
+                fh.write(bytes(range(256)) * 8)
+            said.append(self.run_maps(junk, os.path.join(tmp, "O2")))
+            hollow = os.path.join(tmp, "H")
+            os.makedirs(hollow)
+            with open(os.path.join(hollow, "H.BIN"), "wb") as fh:
+                fh.write(struct.pack("<I", 2) + struct.pack("<II", 0x20, 0) * 2 + b"\0" * 64)
+            said.append(self.run_maps(hollow, os.path.join(tmp, "O3")))
+            heads = [s.split("\n")[0] for s in said]
+            self.assertEqual(len(set(heads)) + len(set(said)), 3 + 3,
+                             "3 通りが同じ言葉になっている:\n" + "\n".join(heads))
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
@@ -9980,6 +10062,10 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
             fh.write(_cidx)
         with open(at("clash.img"), "wb") as fh:
             fh.write(_cimg)
+        # 入れ物としては読める (先頭の数と位置の並びが揃う) が、部品が全部 長さ 0 (#249)
+        os.makedirs(at("hollow"), exist_ok=True)
+        with open(at("hollow", "H.BIN"), "wb") as fh:
+            fh.write(_struct.pack("<I", 2) + _struct.pack("<II", 0x20, 0) * 2 + b"\0" * 64)
         out += [
             run(tool("boku2.py"), "unpack", at("clash.idx"), at("clash.img"), at("OUTclash")),
             # **索引の名前も検査値の名前も読めて、一致する形** (#247)。いちばん普通の
@@ -10009,6 +10095,8 @@ class TestEveryQuotedOutputInTheDocsIsReal(unittest.TestCase):
                 at("BRname", "BOKU2.IMG"), at("OUTcrc3"),
                 "--names-from-crc", at("samename.crc")),
             run(tool("boku2.py"), "maps", at("void"), "-o", at("m0")),
+            # **入れ物としては読めたのに部品が 0 個** (#249)。この道でしか知らせが出ない
+            run(tool("boku2.py"), "maps", at("hollow"), "-o", at("m3")),
             run(tool("boku2.py"), "maps", at("nosuch") + "/*.BIN", "-o", at("m2")),
         ]
         with open(at("void", "X.BIN"), "wb") as fh:            # 入れ物でないファイル

@@ -2659,6 +2659,18 @@ def run(args) -> int:
         if not total:
             # 0 個を「0 個の入れ物から 0 個の部品」で終わると、手順が進んだように読める。
             # docs/10 の 25 分の行は「0 個でないこと」を人に見張らせていた (#125)
+            #
+            # **0 は 3 通りの意味に潰れていた** (#249。#248 と同じ形)。今までは
+            # どれであっても「指定した場所に MAP のファイルがありません」と言って
+            # いたが、ファイルがそこにある 2 通りでは**それが嘘**で、直し方も違う
+            if boxes:
+                print(f"→ 部品が 1 つも取り出せませんでした "
+                      f"(入れ物として読めたファイルは {boxes} 個あります)", file=sys.stderr)
+                print("   入れ物の形は読めたのに、中の部品が**全部 長さ 0** です。"
+                      "吸い出しが途中で切れているか、位置と長さの読み方が違います。"
+                      "python3 tools/boku2.py check 実物/ の [MAP] の行ごと報告してください",
+                      file=sys.stderr)
+                return 1
             print(f"→ 入れ物が 1 つも見つかりませんでした (見たファイル {len(files)} 個)",
                   file=sys.stderr)
             if skipped:
@@ -2666,6 +2678,12 @@ def run(args) -> int:
                 names = ", ".join(os.path.basename(f) for f in skipped[:5])
                 print(f"   入れ物ではありません: {names}"
                       f"{' …' if len(skipped) > 5 else ''}", file=sys.stderr)
+                print(f"   ファイルは {len(files)} 個ありましたが、**どれも入れ物として"
+                      "読めませんでした**。場所が違う (`MAP/` 以外を指した) か、"
+                      "入れ物の読み方 (先頭 u32 + 位置と長さの対) がこの作品では違います。"
+                      "python3 tools/boku2.py check 実物/ の [MAP] の行を先に見て、"
+                      "この出力ごと報告してください", file=sys.stderr)
+                return 1
             print("   指定した場所に MAP のファイルがありません。"
                   "吸い出したフォルダの MAP/ を指定してください:", file=sys.stderr)
             print("     python3 tools/boku2.py maps 実物/MAP -o OUT/maps", file=sys.stderr)
