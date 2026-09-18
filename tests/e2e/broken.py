@@ -36,14 +36,22 @@ EXPECT = {
 BY_DESIGN = (
     ("== 診断", "CLI はフォルダ名、画面は選んだ 2 ファイル名を書く"),
     ("BOKU2.IDX: あり", "CLI だけがフォルダの中身を確かめる (画面はファイルを選ばせる)"),
-    ("[文字表]", "CLI はフォルダの font.txt を読む。画面は貼ってある文字表を見る"),
+)
+
+#: **文字表を貼っていないときだけ**、違って当たり前になる行 (#238)。
+#: 同じ `font.txt` を貼れば中身は揃うので、貼った回では突き合わせる
+BY_DESIGN_NO_TABLE = (
+    ("[文字表]", "CLI はフォルダの font.txt を読む。画面は貼っていない"),
     # 上の「[文字表]」の非対称が、そのまま数に出る (#175)。中身が違うのではなく、
     # **見ているものが違うから件数が違う**。締めの行そのものは今までどおり突き合わせる
     ("診ていない段:", "「[文字表]」の非対称が、そのまま診ていない段の数に出る"),
 )
 
+#: 貼った回で、**言い方だけ**違う所。中身は同じなので揃えてから比べる (#238)
+SAME_THING_SAID_DIFFERENTLY = (("[文字表] 貼ってある文字表:", "[文字表] font.txt:"),)
 
-def report_parity(kind, report, errors):
+
+def report_parity(kind, report, errors, table=False, folder=None):
     """画面の要約と `boku2.py check` の出力を、**全部の行**で突き合わせる (#104).
 
     #100 では → の行だけを比べていた。だから → が 1 本も出ない健全なデータでは
@@ -54,16 +62,22 @@ def report_parity(kind, report, errors):
     #99・#100・#103 と 3 回続けて「片側にだけある」を 1 件ずつ見つけていたので、
     ここで一覧にする。違いは**全部**並べて出す。
     """
-    folder = os.path.join(WORK, f"BROKEN_{kind}") if kind != "ok" else os.path.join(WORK, "BOKU2SAMPLE")
+    if folder is None:
+        folder = os.path.join(WORK, f"BROKEN_{kind}") if kind != "ok" else os.path.join(WORK, "BOKU2SAMPLE")
     res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"), "check", folder],
                          capture_output=True, text=True, cwd=REPO)
+
+    skip = BY_DESIGN if table else BY_DESIGN + BY_DESIGN_NO_TABLE
 
     def lines(text):
         out = []
         for raw in text.split("\n"):
             line = raw.strip()
-            if not line or any(line.startswith(p) for p, _ in BY_DESIGN):
+            if not line or any(line.startswith(p) for p, _ in skip):
                 continue
+            for said, same in SAME_THING_SAID_DIFFERENTLY:
+                if line.startswith(said):
+                    line = same + line[len(said):]
             out.append(line)
         return out
 
@@ -73,17 +87,44 @@ def report_parity(kind, report, errors):
     if len(cli) < 4 or len(ui) < 4:
         errors.append(f"{kind}: 比べる行が少なすぎる (CLI {len(cli)} 行 / 画面 {len(ui)} 行)")
         return
+    what = "文字表を貼って" if table else ""
     for line in cli:
         if line not in ui:
-            errors.append(f"{kind}: CLI にしかない行: {line[:100]}")
+            errors.append(f"{kind}: {what}CLI にしかない行: {line[:100]}")
     for line in ui:
         if line not in cli:
-            errors.append(f"{kind}: 画面にしかない行: {line[:100]}")
+            errors.append(f"{kind}: {what}画面にしかない行: {line[:100]}")
+    if table:
+        # **貼った回でしか比べられない行**が、本当に比べられていること。
+        # 揃え方を間違えて両側から落ちると、0 件どうしで緑になる
+        if not any(ln.startswith("[文字表] font.txt:") for ln in cli):
+            errors.append(f"{kind}: 貼った回なのに [文字表] の行を比べていない (CLI 側)")
+        if not any(ln.startswith("[文字表] font.txt:") for ln in ui):
+            errors.append(f"{kind}: 貼った回なのに [文字表] の行を比べていない (画面側)")
 
 
-async def run_kind(b, kind, errors):
+#: 文字表も貼って突き合わせる回 (#238)。全部の壊し方でやると倍の時間がかかるので、
+#: **文字表の行が別の形になる組み合わせ**だけを選ぶ:
+#:
+#:   ("ok", "full")      文字表が足りている  → 「この範囲は全部読める」
+#:   ("bignum", "full")  1 つだけ足りない    → 「文字表に無い 1 種 (例: …)」
+#:   ("ok", "short")     たくさん足りない    → 例の並べ方と「…」の付け方まで比べる
+#:
+#: 3 つ目が無いと**材料が弱い**: 足りない字が 1 つでは、例を何件まで並べるか
+#: (一括処理は 10 件) が両側で違っても差が出ない。実際、最初はそこを見落として
+#: 壊しても素通りした
+WITH_TABLE = (("ok", "full"), ("bignum", "full"), ("ok", "short"))
+
+#: "short" のときに貼る文字表の字数。一括処理が並べる例の数 (10) より
+#: **足りない字がずっと多くなる**ように短くする
+SHORT_TABLE_GLYPHS = 3
+
+
+async def run_kind(b, kind, errors, table=None, folder=None):
     # "ok" は壊していない練習データ。→ が 1 本も出ない道でも突き合わせる (#104)
-    if kind == "ok":
+    if folder is not None:
+        note = "文字表を短くした回 (吸い出しはそのまま)"
+    elif kind == "ok":
         folder = os.path.join(WORK, "BOKU2SAMPLE")
         make_boku2_sample.build_sample(folder)
         note = "壊していない練習データ"
@@ -101,6 +142,12 @@ async def run_kind(b, kind, errors):
                                [os.path.join(folder, "BOKU2.IDX"), os.path.join(folder, "BOKU2.IMG")]
                                + [os.path.join(mapdir, f) for f in sorted(os.listdir(mapdir))])
     await page.wait_for_selector("#shell:not([hidden])")
+    if table is not None:
+        # **CLI と同じ文字表を貼る** (#238)。貼らないと [文字表] の行が比べられず、
+        # そこに出る数 (使われている番号の内訳・足りない字) が両側で食い違っても
+        # 誰も気づかない —— #234 で実際に食い違っていた所
+        await page.click('[data-tab="format"]')
+        await page.fill("#msgglyphs", table)
     await page.click('[data-tab="index"]')
     opts = await page.eval_on_selector_all("#idxsrc option", "els => els.map(e => e.value)")
     await page.select_option("#idxsrc", [o for o in opts if o.endswith("BOKU2.IDX")][0])
@@ -141,7 +188,7 @@ async def run_kind(b, kind, errors):
         want = EXPECT[kind]
         if want not in report or "問題なし" in report or "確認事項" not in report:
             errors.append(f"{kind}: 要約に「{want}」と「確認事項 N 件」が無い (または 問題なし になっている)")
-    report_parity(kind, report, errors)
+    report_parity(kind, report, errors, table=table is not None, folder=folder)
 
 async def main():
     async with async_playwright() as p:
@@ -158,6 +205,24 @@ async def main():
             sys.exit(1)
         for kind in ["ok"] + kinds:
             await run_kind(b, kind, errors)
+        # **文字表を貼った回**も突き合わせる (#238)。貼らない回では
+        # [文字表] の行が両側から落ちていて、そこに出る数を比べていなかった
+        for kind, how in WITH_TABLE:
+            folder = os.path.join(WORK, "BOKU2SAMPLE" if kind == "ok" else f"BROKEN_{kind}")
+            with open(os.path.join(folder, "font.txt"), encoding="utf-8") as fh:
+                table = fh.read()
+            if how == "short":
+                # 先頭だけ残す (改行は番号に効かないので、そのまま切ってよい)。
+                # **一括処理にも同じ短い表を読ませる** —— 別の吸い出しを作って
+                # そこの font.txt を短くする (練習データそのものは触らない)
+                table = "".join(ch for ch in table if ch not in "\r\n")[:SHORT_TABLE_GLYPHS]
+                folder = os.path.join(WORK, "BROKEN_shorttable")
+                make_boku2_sample.build_sample(folder)
+                with open(os.path.join(folder, "font.txt"), "w", encoding="utf-8") as fh:
+                    fh.write(table + "\n")
+            else:
+                folder = None
+            await run_kind(b, kind, errors, table=table, folder=folder)
         await b.close()
         print("errors:", errors)
         print("RESULT", "OK" if not errors else "NG")

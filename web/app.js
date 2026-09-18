@@ -4241,8 +4241,14 @@ async function buildIdxReport() {
     const verdict = bokuGlyphVerdict(true, usedHere.size, missing.length);
     lines.push(`[文字表] 貼ってある文字表: ${glyphs.filter((g) => g !== undefined && g !== null).length} 字 / 本文で使われている番号 `
       + `${usedHere.size} 種 (${usedBy.join(" / ")}) のうち文字表に無い ${missing.length} 種`
+      /* **一括処理 (boku2.py check の [文字表]) と 1 字そろえる** (#238)。要約は
+         「check と同じものを出す」ためのものなので、ここで言い方を変えない。
+         括弧の位置も例の数 (10 件) も向こうに合わせる —— 揃っていなかったので、
+         同じ吸い出しで 2 通りの文が出ていた。目盛りの橙の話は「.msg として読む」の
+         行に残してある (そこは画面にしかない行なので、突き合わせの相手がいない) */
       + { untested: "。文字番号を使っている行が無いので、文字表は試せていない",
-          missing: ` (例: ${missing.slice(0, 8).join(" ")}${missing.length > 8 ? " …" : ""}。フォント画像の目盛りで橙の枠の字を書き足す)`,
+          missing: ` (例: ${missing.slice(0, 10).join(" ")}${missing.length > 10 ? " …" : ""})。`
+            + "フォント画像のこの番号を書き足す (docs/10 の手順 3)",
           ok: "。この範囲は全部読める" }[verdict]);
     /* **保存のときに潰れた疑い**があれば、そう言う (#199)。
        一括処理 (boku2.py の ansi_damage) と同じ判定・同じ言葉 */
