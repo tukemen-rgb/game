@@ -192,13 +192,15 @@ async def run_kind(b, kind, errors, table=None, folder=None):
             errors.append("idx: 診ていない段の行を出している")
         return
     if kind == "ok":
-        # 壊していないので、両方とも「問題なし」で終わること
-        if "問題なし" not in report:
+        # 壊していないので、両方とも確認事項なしで終わること。**言葉そのものは
+        # 待たない** (#268) —— 診ていない段があれば「→ の行はありません。ただし
+        # 診ていない段が N 件…」になる。どちらも「報告するものは無い」という意味
+        if "確認事項" in report:
             errors.append(f"ok: 壊していないのに問題ありと言っている: {report[-200:]!r}")
     else:
         want = EXPECT[kind]
-        if want not in report or "問題なし" in report or "確認事項" not in report:
-            errors.append(f"{kind}: 要約に「{want}」と「確認事項 N 件」が無い (または 問題なし になっている)")
+        if want not in report or "確認事項" not in report:
+            errors.append(f"{kind}: 要約に「{want}」と「確認事項 N 件」が無い")
     report_parity(kind, report, errors, table=table is not None, folder=folder)
 
 async def main():

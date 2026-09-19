@@ -1005,7 +1005,10 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
 
             #: 表の行の頭 → その行を確かめる材料と、出るはずの言葉
             expect = {
-                "〜5 分": (checked, ["問題なし"]),
+                # 締めは「問題なし」か「→ の行はありません…診ていない段が N 件」
+                # (#268)。**どちらでも「報告することは無い」**という意味なので、
+                # 両方に入っている言葉で見る
+                "〜5 分": (checked, ["docs/10 の手順へ"]),
                 # 検査値ファイルの段 (#243)。**数**と**中身**の 2 つが出ること
                 "〜8 分": (checked, ["[検査値]", "同じ数", "件すべて合いました"]),
                 "〜10 分": (checked, ["[MAP]", "入れ物として読めた", "1 番が会話だった"]),
@@ -2721,8 +2724,13 @@ console.log(JSON.stringify(out));
 
     def test_a_healthy_sample_is_still_clean(self):
         res = self.check(self.folder)
-        self.assertEqual(res.returncode, 0, res.stdout)
-        self.assertIn("問題なし", res.stdout)
+        self.assertEqual(res.returncode, 0, res.stdout[-600:])
+        # **「問題なし」という言葉を待たない** (#268)。診ていない段が 1 つでも
+        # あれば、締めは「→ の行はありません。ただし診ていない段が N 件…」に
+        # なる。見るのは**確認事項が無いこと**
+        last = res.stdout.strip().splitlines()[-1]
+        self.assertTrue(last.startswith("== 結果:"), last)
+        self.assertNotIn("確認事項", last, f"健全な吸い出しで確認事項が出た: {last}")
 
     def test_the_threshold_matches_the_browser(self):
         """CLI の基準とブラウザ側の基準が同じ数字であること (2 か所にずれた数字を置かない)."""
@@ -7126,11 +7134,19 @@ class TestEveryAskToReportIsCounted(unittest.TestCase):
                                   f"締めが違う: {out.splitlines()[-1]}")
 
     def test_no_arrow_means_no_worry(self):
+        """→ が 1 本も無いなら、締めは「確認事項」を出さないこと.
+
+        **言葉そのものを待たない** (#268)。診ていない段があれば締めは
+        「→ の行はありません。ただし診ていない段が N 件…」になる —— どちらも
+        「報告することは無い」という意味で、**確認事項が出ないこと**が要点。
+        """
         for name, out in self.out.items():
             with self.subTest(case=name):
                 if not self.arrows(out):
-                    self.assertIn("問題なし", out.splitlines()[-1],
-                                  f"{name}: → が無いのに締めが違う: {out.splitlines()[-1]}")
+                    last = out.splitlines()[-1]
+                    self.assertTrue(last.startswith("== 結果:"), f"{name}: {last}")
+                    self.assertNotIn("確認事項", last,
+                                     f"{name}: → が無いのに締めが違う: {last}")
 
     def test_every_loose_ask_is_taken_up_by_the_not_checked_line(self):
         for name, out in self.out.items():
@@ -8711,6 +8727,106 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestNotCheckedIsNotTheSameAsNoProblem(unittest.TestCase):
+    """**診ていない段があるのに「問題なし」で締めないこと** (#268).
+
+    #174 は「診ていない段があるなら『問題なし』で終わらせない」と決めて、
+    そのつもりで直してありました。**実際に数に入れていたのは MAP の段だけ。**
+    そのほかの段 (文字表の 2 枚目・検査値との突き合わせ・文字表の出来具合) は
+    「診ていない段: 1 件 (…)」と書いた**すぐ次の行**でこうなっていました:
+
+        診ていない段: 1 件 (文字表の 2 枚目 (残り 1449 字。この吸い出しからは見つからなかった))
+
+        == 結果: 問題なし。docs/10 の手順へ
+
+    しかも**壊していない練習データで毎回こうなる。** 社長がいちばんよく見る形で、
+    2 行が正反対のことを言っていました。さらに 1 つ上には
+    「この行ごと報告してください」まであります (#250 はここを直したつもりで、
+    `skipped` に足しただけで締めは「問題なし」のままだった)。
+
+    吸い出しに問題があるわけではないので**終了コードは 0 のまま** (docs/10 へは
+    進んでよい)。変えるのは**言い方**で、「全部を診た」と読ませないこと。
+    """
+
+    @staticmethod
+    def check(folder: str) -> tuple[str, int]:
+        import io
+        import boku2
+        out = io.StringIO()
+        rc = boku2.check(folder, out=out)
+        return out.getvalue(), rc
+
+    def test_the_practice_data_does_not_claim_everything_was_checked(self):
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            said, rc = self.check(folder)
+        rows = said.strip().splitlines()
+        # 前提: 診ていない段が本当にあること (無い材料で試しても意味が無い)
+        self.assertTrue(any(ln.startswith("診ていない段:") for ln in rows),
+                        "診ていない段が無い材料です")
+        last = rows[-1]
+        self.assertEqual(rc, 0, f"吸い出しは無事なのに問題ありにした: {last}")
+        self.assertNotIn("確認事項", last, f"→ が無いのに確認事項が出た: {last}")
+        self.assertNotIn("問題なし", last,
+                         f"診ていない段があるのに「問題なし」で締めています: {last}")
+        self.assertIn("診ていない段があります", last, last)
+        self.assertIn("docs/10 の手順へ", last, f"進んでよいことを言っていない: {last}")
+
+    def test_nothing_skipped_still_says_no_problem(self):
+        """**診ていない段が 1 つも無ければ、今までどおり「問題なし」**と言うこと.
+
+        ここを一律に変えると、本当に全部診た回まで言い方が濁る。
+        練習データに文字表の続きを足して、診ていない段を 0 にして確かめる。
+        """
+        import io
+        import boku2
+        out = io.StringIO()
+        # `check` の締めだけを直に見る。吸い出しを丸ごと作らずに、
+        # **診ていない段が 0 のときの道**が残っていることを確かめる
+        with tempfile.TemporaryDirectory() as tmp:
+            import make_boku2_sample
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            real = boku2.font_page_hunt
+            try:
+                # 続きが見つかった形にすると、診ていない段が 0 になる
+                boku2.font_page_hunt = lambda *a, **k: ["  (続きの候補: 省略)"]
+                rc = boku2.check(folder, out=out)
+            finally:
+                boku2.font_page_hunt = real
+        last = out.getvalue().strip().splitlines()[-1]
+        self.assertEqual(rc, 0, last)
+        self.assertIn("問題なし。docs/10 の手順へ", last,
+                      f"診ていない段が 0 なのに濁しています: {last}")
+
+    def test_the_closing_line_carries_no_count(self):
+        """締めに**数を入れない**こと (画面と CLI で数が違う段があるため).
+
+        #175 が「診ていない段: N 件」を別の行に分けたのと同じ理由。画面は
+        文字表を貼っていないぶん 1 つ多いので、締めに数を入れると
+        **2 つの報告を 1 行ずつ突き合わせられなくなる** (tests/e2e/broken.py)。
+        """
+        import re
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            said, _ = self.check(folder)
+        last = said.strip().splitlines()[-1]
+        self.assertEqual(re.findall(r"\d+ 件", last), [],
+                         f"締めに件数が入っています: {last}")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue("→ の行はありません。ただし**診ていない段があります** (すぐ上の行)。" in ui,
+                        "画面が「問題なし」で締め続けています")
+        self.assertTrue("else if (skipped.length) {" in ui,
+                        "画面に診ていない段のときの道がありません")
+
+
 class TestAShakyIndexReadIsOneCauseToo(unittest.TestCase):
     """**索引の読み方が外れているときも、原因は 1 つと数えること** (#266).
 
@@ -9033,11 +9149,13 @@ class TestBoku2Sample(unittest.TestCase):
                     if not text.startswith("<VOICE:")}
             self.assertEqual(got, want)
 
-            # 診断: 練習データは問題なし。壊したものは → で場所を示す
+            # 診断: 練習データは報告するものなし。壊したものは → で場所を示す
             res = run("check", sample)
-            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertEqual(res.returncode, 0, res.stdout[-600:] + res.stderr[-400:])
             self.assertIn("DFI: 期待どおり", res.stdout)
-            self.assertIn("問題なし", res.stdout)
+            # **「問題なし」という言葉を待たない** (#268)。診ていない段があれば
+            # 締めは「→ の行はありません。ただし診ていない段が N 件…」になる
+            self.assertNotIn("確認事項", res.stdout.strip().splitlines()[-1])
             self.assertIn("[フォント] system/bk_font.tms: TIM2 (位置 0x80)", res.stdout)
             self.assertIn("[入れ物] 文言の入れ物: あり diary.bin, saveload.bin,"
                           " on_mem_event.bin, fish_on_mem.bin", res.stdout)
@@ -10412,7 +10530,10 @@ class TestOtherPythons(unittest.TestCase):
                     res = subprocess.run([exe, os.path.join(REPO, "tools", "boku2.py"), "check", sample],
                                          capture_output=True, text=True, encoding="utf-8", cwd=REPO)
                     self.assertEqual(res.returncode, 0, f"{name}: {res.stderr[-800:]}")
-                    self.assertIn("問題なし", res.stdout, name)
+                    # 締めの言葉は #268 で 2 通りになった。**確認事項が出ないこと**を見る
+                    last = res.stdout.strip().splitlines()[-1]
+                    self.assertTrue(last.startswith("== 結果:") and "確認事項" not in last,
+                                    f"{name}: {last}")
 
 
 class TestWindowsConsole(unittest.TestCase):
@@ -10438,7 +10559,9 @@ class TestWindowsConsole(unittest.TestCase):
             make_boku2_sample.build_sample(sample)
             res = self._run(os.path.join(REPO, "tools", "boku2.py"), "check", sample)
             self.assertEqual(res.returncode, 0, res.stderr.decode("utf-8", "replace"))
-            self.assertIn("問題なし".encode("cp932"), res.stdout)
+            # cp932 で書けること自体が見たいところ。締めの言葉は #268 で 2 通りに
+            # なったので、両方に入っている「docs/10 の手順へ」で見る
+            self.assertIn("docs/10 の手順へ".encode("cp932"), res.stdout)
 
 
 class TestTim2(unittest.TestCase):

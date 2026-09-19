@@ -74,7 +74,10 @@ async def main():
         await page.wait_for_function("document.querySelector('#idxreporttext').value.includes('== 結果')", timeout=20000)
         report = await page.input_value("#idxreporttext")
         print("report:", report.replace("\n", " | ")[:400])
-        if not ("DFI: 期待どおり" in report and "問題なし" in report and "TIM2 (位置 0x80)" in report
+        # 締めの言葉は #268 で 2 通りになった (診ていない段があれば「→ の行は
+        # ありません。ただし…」)。**確認事項が出ないこと**で見る
+        if not ("DFI: 期待どおり" in report and "確認事項" not in report
+                and "TIM2 (位置 0x80)" in report
                 and "[入れ物] 文言の入れ物: あり diary.bin, saveload.bin, on_mem_event.bin, fish_on_mem.bin" in report
                 and "フォルダの規則: 2 通り (stack / flag) で一致" in report
                 and "[MAP] 1 件 / 入れ物として読めた 1 件 / 1 番が会話だった 1 件" in report and "はじめから" not in report):
