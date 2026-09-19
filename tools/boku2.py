@@ -76,6 +76,32 @@ TIM2_PIXEL_KIND = {
 NAME_CLEAN_RATIO = 0.9
 
 
+def dfi_rec_end(idx: bytes) -> int:
+    """レコードの並びが終わる位置 = **名前の置き場の先頭** (#259).
+
+    公開ソースは `FILENAMES_START = 0x8140` と**決め打ち**している。こちらは
+    「種別 (u16) が 0 でも 1 でもなくなった行」で決める —— 実物と同じ形
+    (レコード 2067 件) を合成すると、この数え方はちょうど **0x8140** を出す。
+
+    ただしそれだけだと、**途中に種別が 0/1 でない行が 1 つあるだけで**そこで
+    切れてしまう (500 行目を壊すと 2067 件が 500 件になり、**1567 個の
+    ファイルが黙って消える**)。名前の置き場は**根の `/` で始まる**ので、
+    そこが `/` でなければ 16 バイト刻みで先を探す。見つからなければ元の位置
+    (今までどおり) に戻る。
+    """
+    end = 16
+    while end + 16 <= len(idx) and (idx[end] | (idx[end + 1] << 8)) in (0, 1):
+        end += 16
+    if idx[end:end + 2] == b"/\0":
+        return end
+    probe = end
+    while probe + 16 <= len(idx):
+        probe += 16
+        if idx[probe:probe + 2] == b"/\0":
+            return probe
+    return end
+
+
 def read_dfi_names(idx: bytes, rec_end: int, rec_count: int) -> list[str]:
     """レコードの直後に並ぶ名前を読む (#258).
 
@@ -139,12 +165,7 @@ def read_dfi(idx: bytes, data_size: int, rule: str = "flag") -> list[dict]:
     check は今も両方で道筋を作って突き合わせるので、実物で食い違えばその場で分かる."""
     if idx[:4] != b"DFI\0":
         raise ValueError("先頭が DFI ではありません")
-    rec_end = 16
-    while rec_end + 16 <= len(idx):
-        kind = idx[rec_end] | (idx[rec_end + 1] << 8)
-        if kind not in (0, 1):
-            break
-        rec_end += 16
+    rec_end = dfi_rec_end(idx)
     rec_count = (rec_end - 16) // 16
 
     names = read_dfi_names(idx, rec_end, rec_count)
@@ -232,11 +253,7 @@ def dfi_name_stop(idx: bytes) -> dict | None:
     """
     if idx[:4] != b"DFI\0":
         return None
-    rec_end = 16
-    while rec_end + 16 <= len(idx):
-        if (idx[rec_end] | (idx[rec_end + 1] << 8)) not in (0, 1):
-            break
-        rec_end += 16
+    rec_end = dfi_rec_end(idx)
     rec_count = (rec_end - 16) // 16
     # **変な字は「止まった」ではない** (#258)。0 区切りの枠が壊れたときだけ止まる。
     # 字が変でも枠は壊れないので、そこから先の名前も読める (`read_dfi_names`)
@@ -507,9 +524,7 @@ def dfi_dropped(idx: bytes, data_size: int, rule: str = "flag") -> dict:
     # **`read_dfi` と同じ数え方でレコードの終わりを見つける。** 見出しの +4 の値を
     # そのまま使うと、この索引では 27 件の所を 37 件と数えてしまう
     # (名前の置き場の先頭が、たまたまレコードに見える)
-    rec_end = 16
-    while rec_end + 16 <= len(idx) and (idx[rec_end] | (idx[rec_end + 1] << 8)) in (0, 1):
-        rec_end += 16
+    rec_end = dfi_rec_end(idx)
     rec_count = (rec_end - 16) // 16
     records = outside = 0
     for k in range(rec_count):
@@ -2308,9 +2323,7 @@ def check(folder: str, out=sys.stdout) -> int:
         say("   " + idx[:64].hex(" ").upper())
         say(stopped_here(1, "索引が読めないので"))
         return 1
-    rec_end = 16
-    while rec_end + 16 <= len(idx) and (idx[rec_end] | (idx[rec_end + 1] << 8)) in (0, 1):
-        rec_end += 16
+    rec_end = dfi_rec_end(idx)
     entries = read_dfi(idx, img_size)
     rec_count = (rec_end - 16) // 16
     named = sum(1 for e in entries if not os.path.basename(e["path"]).startswith("#"))

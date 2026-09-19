@@ -4668,14 +4668,28 @@ function nameAt(b, p) {
  */
 /** 名前の読み取りが**途中で止まった**なら、どこでなぜ止まったかを返す (#202)。
  * **一括処理 (boku2.py の dfi_name_stop) と同じ判定・同じ言葉**にしておくこと。 */
+/** レコードの並びが終わる位置 = 名前の置き場の先頭 (#259。tools/boku2.py の
+ *  dfi_rec_end と同じ)。種別が 0/1 でない行 1 つで切れてしまうと、そこから先の
+ *  ファイルが黙って消えるので、名前の置き場が根の `/` で始まっていなければ
+ *  16 バイト刻みで先を探す。 */
+function dfiRecEnd(idx) {
+  let end = 16;
+  while (end + 16 <= idx.length) {
+    const kind = idx[end] | (idx[end + 1] << 8);
+    if (kind !== 0 && kind !== 1) break;
+    end += 16;
+  }
+  const rooted = (at) => idx[at] === 0x2F && idx[at + 1] === 0;
+  if (rooted(end)) return end;
+  for (let probe = end + 16; probe + 16 <= idx.length; probe += 16) {
+    if (rooted(probe)) return probe;
+  }
+  return end;
+}
+
 function dfiNameStop(idx) {
   if (idx.length < 4 || idx[0] !== 0x44 || idx[1] !== 0x46 || idx[2] !== 0x49 || idx[3] !== 0) return null;
-  let recEnd = 16;
-  while (recEnd + 16 <= idx.length) {
-    const kind = idx[recEnd] | (idx[recEnd + 1] << 8);
-    if (kind !== 0 && kind !== 1) break;
-    recEnd += 16;
-  }
+  const recEnd = dfiRecEnd(idx);
   const recCount = (recEnd - 16) / 16;
   /* **変な字は「止まった」ではない** (#258)。0 区切りの枠が壊れたときだけ止まる
      (CLI の dfi_name_stop と同じ判定・同じ言葉) */
@@ -4783,12 +4797,7 @@ function readDfi(idx, dataSize, rule) {
 
      レコードの終わりは、種別 (u16) が 0 でも 1 でもなくなった行。名前の文字が
      そこに来るので、必ずそこで止まります。 */
-  let recEnd = 16;
-  while (recEnd + 16 <= idx.length) {
-    const t = idx[recEnd] | (idx[recEnd + 1] << 8);
-    if (t !== 0 && t !== 1) break;
-    recEnd += 16;
-  }
+  const recEnd = dfiRecEnd(idx);
   const recCount = (recEnd - 16) / 16;
   if (recCount < 8) return null;
 

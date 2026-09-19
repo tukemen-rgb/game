@@ -8034,6 +8034,112 @@ class TestOneOddLetterDoesNotThrowAwayEveryName(unittest.TestCase):
                 self.assertEqual(json.loads(res.stdout), ours)
 
 
+class TestWhereTheRecordsEndMatchesThePublicConstant(unittest.TestCase):
+    """**レコードの終わりの数え方を、公開ソースの決め打ちと突き合わせる** (#259).
+
+    向こうは `FILENAMES_START = 0x8140` と**決め打ち**している (レコード 2067 件)。
+    こちらは「種別が 0 でも 1 でもなくなった行」で決める。実物と同じ形を合成すると
+    ちょうど 0x8140 になる —— これで**数え方そのもの**が裏付けられる。
+
+    ただしそれだけだと、**途中に種別が 0/1 でない行が 1 つあるだけで**そこで
+    切れ、そこから先のファイルが黙って消える。名前の置き場は根の `/` で始まる
+    ので、そこが `/` でなければ先を探す。
+    """
+
+    #: 公開ソース UNPACK.py の FILENAMES_START
+    FILENAMES_START = 0x8140
+    #: 実物の内訳 (docs/09): ファイル 1951 + フォルダ 116 = レコード 2067
+    FILES, DIRS = 1951, 116
+
+    @classmethod
+    def real_shaped_index(cls) -> bytes:
+        import struct
+        rows = [(1, 1, "/")]
+        rows += [(1, 1, f"d{i:03d}") for i in range(cls.DIRS - 1)]
+        rows += [(0, 1 if i < cls.FILES - 1 else 0, f"f{i:04d}.bin")
+                 for i in range(cls.FILES)]
+        idx = bytearray(b"DFI\0" + struct.pack("<III", 0x100, 0, 0))
+        for is_dir, more, _n in rows:
+            idx += struct.pack("<HHIII", is_dir, more, 0, 1, 16)
+        for _d, _m, n in rows:
+            idx += n.encode() + b"\0"
+        return bytes(idx)
+
+    def test_the_real_shape_lands_on_the_public_constant(self):
+        import boku2
+        idx = self.real_shaped_index()
+        # **材料が弱くないこと**: 実物の内訳どおりの件数になっている
+        self.assertEqual(self.FILES + self.DIRS, 2067)
+        self.assertEqual(boku2.dfi_rec_end(idx), self.FILENAMES_START,
+                         f"名前の置き場が 0x{boku2.dfi_rec_end(idx):X} になっている")
+
+    def test_one_odd_record_does_not_cut_the_table_short(self):
+        import struct
+        import boku2
+        idx = bytearray(self.real_shaped_index())
+        struct.pack_into("<H", idx, 16 + 500 * 16, 2)          # 500 行目の種別を壊す
+        got = boku2.dfi_rec_end(bytes(idx))
+        self.assertEqual(got, self.FILENAMES_START,
+                         f"1 行壊れただけで {(got - 16) // 16} 件に切れている")
+
+    def test_it_falls_back_when_there_is_no_root_name(self):
+        """**材料が弱くないこと**: 根の `/` が無い索引では、今までどおりの数え方."""
+        import struct
+        import boku2
+        idx = bytearray(b"DFI\0" + struct.pack("<III", 0x100, 0, 0))
+        for i in range(20):
+            idx += struct.pack("<HHIII", 0, 1 if i < 19 else 0, 0, 1, 16)
+        plain = len(idx)
+        for i in range(20):
+            idx += f"f{i:03d}.bin".encode() + b"\0"
+        self.assertEqual(boku2.dfi_rec_end(bytes(idx)), plain)
+
+    def test_the_two_sides_find_the_same_boundary(self):
+        import json
+        import shutil
+        import struct
+        import subprocess
+        import boku2
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        i = app.index("function dfiRecEnd(")
+        src = app[i:app.index("\n}\n", i) + 3]
+        broken = bytearray(self.real_shaped_index())
+        struct.pack_into("<H", broken, 16 + 500 * 16, 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, idx in (("健全", self.real_shaped_index()),
+                               ("1 行壊れた", bytes(broken))):
+                with self.subTest(case=label):
+                    # 索引は 33 KB ある。`node -e` の引数に載せると長すぎるので
+                    # ファイルにして読ませる
+                    path = os.path.join(tmp, "i.bin")
+                    with open(path, "wb") as fh:
+                        fh.write(idx)
+                    script = (src + "\nconst fs=require('fs');"
+                                    f"const b=new Uint8Array(fs.readFileSync({json.dumps(path)}));"
+                                    "console.log(dfiRecEnd(b));")
+                    res = subprocess.run([node, "-e", script], capture_output=True,
+                                         text=True, cwd=REPO)
+                    self.assertEqual(res.returncode, 0, res.stderr[-400:])
+                    self.assertEqual(int(res.stdout), boku2.dfi_rec_end(idx))
+
+    def test_every_place_uses_the_same_count(self):
+        """**数え方は 1 か所。** 同じ歩き方を 4 か所に書いていたので、直しても
+        片方だけ古くなる形だった (#104 と同じ筋)."""
+        import re
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        walks = re.findall(r"\(idx\[rec_end\] \| \(idx\[rec_end \+ 1\] << 8\)\) (?:not )?in \(0, 1\)",
+                           src)
+        self.assertFalse(walks, f"レコードの終わりを自前で歩いている所が {len(walks)} か所ある")
+        self.assertGreaterEqual(src.count("dfi_rec_end(idx)"), 4,
+                                "dfi_rec_end を使っている所が少なすぎる")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
