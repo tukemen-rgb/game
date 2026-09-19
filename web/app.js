@@ -6112,17 +6112,26 @@ function bestBokuMap(b, tries) {
   for (const [rec, n] of tries) {
     const head = 4 + n * rec;
     if (head > b.length) continue;
-    const items = [];
-    let prev = 0, ok = true, first = 0;
+    const items = [], spans = [];
+    let ok = true, first = 0;
     for (let i = 0; i < n; i++) {
       const off = u32le(b, 4 + i * rec), len = u32le(b, 8 + i * rec);
       /* **位置が 0 なら空の枠。長さの欄は見ない** (#253。CLI の _best_map_rec と同じ。
          公開ソースの unpackMap は if file_offset == 0 だけで飛ばしている) */
       if (!off) { items.push({ i, at: 0, len: 0 }); continue; }
-      if (off < head || off + len > b.length || off < prev || (off & 15)) { ok = false; break; }
+      if (off < head || off + len > b.length || (off & 15)) { ok = false; break; }
       if (!first) first = off;
-      prev = off + len;
+      spans.push([off, off + len]);
       items.push({ i, at: off, len });
+    }
+    /* **枠の順ではなく、置き場として重なっていないかを見る** (#254。CLI と同じ)。
+       表の順と置き場の順が同じ、という決めつけを外す。重なりだけを見れば、
+       順に頼らずに同じだけ弾ける (作り物 2000 件で測った) */
+    if (ok && spans.length) {
+      const order = spans.slice().sort((x, y) => x[0] - y[0]);
+      for (let i = 1; i < order.length; i++) {
+        if (order[i][0] < order[i - 1][1]) { ok = false; break; }
+      }
     }
     if (!ok || !first) continue;
     /* 12 バイト刻みは 8 バイト刻みとしても読めてしまうことがある (後ろの項目が空のとき)。

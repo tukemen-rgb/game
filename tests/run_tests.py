@@ -7419,6 +7419,141 @@ class TestAnEmptySlotDoesNotThrowAwayTheWholeContainer(unittest.TestCase):
         self.assertTrue(ours, "0 件で緑にしない")
 
 
+class TestTheTableOrderIsNotAssumedToBeThePlacementOrder(unittest.TestCase):
+    """**表の順と置き場の順が同じ、という決めつけを外す** (#254).
+
+    `_best_map_rec` は「次の位置は前の終わりより後ろ」を求めていた。公開ソースの
+    `unpackMap` はそんな条件を見ていない。表は**置き場の目録**なので、順が
+    入れ替わっていても形式としておかしくない —— なのに 1 か所でも入れ替わって
+    いれば、こちらは入れ物ぜんぶを突き返す (#253 と同じ「全部落とす」形)。
+
+    ただの撤去はしない。その条件は**別物を入れ物と言わない**ための重しでもある。
+    代わりに、順に頼らない重し (**置き場が重なっていないこと**) に取り替えて、
+    弾く力が落ちていないことを**測ってから**入れ替える。
+    """
+
+    HEAD = 0x80
+
+    @classmethod
+    def container(cls, sizes: list[int], order: list[int]) -> bytes:
+        """`order` の順に置き場を取る入れ物。`order` を逆順にすれば表と置き場が逆."""
+        import struct
+        blocks = {}
+        at = cls.HEAD
+        for i in order:
+            blocks[i] = (at, sizes[i])
+            at += (sizes[i] + 15) // 16 * 16
+        raw = bytearray(struct.pack("<I", len(sizes)))
+        for i in range(len(sizes)):
+            raw += struct.pack("<II", *blocks[i])
+        raw += b"\0" * (cls.HEAD - len(raw))
+        body = bytearray(b"\0" * (at - cls.HEAD))
+        for i, (off, size) in blocks.items():
+            body[off - cls.HEAD:off - cls.HEAD + size] = bytes([0x41 + i]) * size
+        return bytes(raw) + bytes(body)
+
+    def test_a_container_whose_parts_are_stored_backwards_is_read(self):
+        import boku2
+        raw = self.container([32, 48, 64], order=[2, 1, 0])
+        items = boku2.parse_map(raw)
+        self.assertIsNotNone(items, "置き場の順が表と逆なだけで突き返している")
+        self.assertEqual([(it["i"], it["len"]) for it in items if it["len"]],
+                         [(0, 32), (1, 48), (2, 64)], items)
+        # 中身も取り違えていないこと
+        self.assertEqual(raw[items[0]["at"]:items[0]["at"] + 32], b"A" * 32)
+        self.assertEqual(raw[items[2]["at"]:items[2]["at"] + 64], b"C" * 64)
+
+    def test_the_ordinary_order_still_reads(self):
+        """**材料が弱くないこと**: 順どおりの入れ物は前から読めていた形."""
+        import boku2
+        raw = self.container([32, 48, 64], order=[0, 1, 2])
+        items = boku2.parse_map(raw)
+        self.assertIsNotNone(items)
+        self.assertEqual([(it["i"], it["len"]) for it in items if it["len"]],
+                         [(0, 32), (1, 48), (2, 64)], items)
+
+    def test_overlapping_places_are_still_refused(self):
+        """取り替えた重しが効いていること: 置き場が重なっていたら入れ物ではない."""
+        import struct
+        import boku2
+        raw = bytearray(self.container([32, 48, 64], order=[0, 1, 2]))
+        struct.pack_into("<I", raw, 4 + 1 * 8, self.HEAD)      # 1 番を 0 番に重ねる
+        self.assertIsNone(boku2.parse_map(bytes(raw)),
+                          "置き場が重なっているのに入れ物と言っている")
+
+    def test_the_new_weight_refuses_as_much_as_the_old_one(self):
+        """**測ってから入れ替える。** 「位置は 16 の倍数で範囲内、並びはばらばら」の
+        作り物では、前の条件も新しい条件も 1 件も通さないこと
+        (公開ソースのまま条件なしにすると全部通る)."""
+        import random
+        import struct
+        import boku2
+        rnd = random.Random(254)
+        made = []
+        for _ in range(400):
+            n = rnd.choice([8, 15, 20])
+            rec = rnd.choice([8, 12])
+            size = 4096
+            head = 4 + n * rec
+            raw = bytearray(struct.pack("<I", n))
+            for _i in range(n):
+                off = max(rnd.randrange(head, size) & ~15, (head + 15) & ~15)
+                raw += struct.pack("<II", off, rnd.randrange(0, size - off))
+            raw += b"\0" * (size - len(raw))
+            made.append(bytes(raw[:size]))
+        hit = [b for b in made if boku2.parse_map(b)]
+        self.assertFalse(hit, f"{len(hit)} / {len(made)} 件を入れ物と言っている")
+        # **材料が弱くないこと**: 重しを外せば通ってしまう作り物であること
+        loose = 0
+        for b in made:
+            n = struct.unpack_from("<I", b, 0)[0]
+            for rec in (8, 12):
+                head = 4 + n * rec
+                if head > len(b):
+                    continue
+                ok, first = True, 0
+                for i in range(n):
+                    off, length = struct.unpack_from("<II", b, 4 + i * rec)
+                    if not off:
+                        continue
+                    if off < head or off + length > len(b) or off & 15:
+                        ok = False
+                        break
+                    first = first or off
+                if ok and first:
+                    loose += 1
+                    break
+        self.assertGreater(loose, len(made) * 0.5,
+                           f"材料が弱い: 重しを外しても {loose} 件しか通らない")
+
+    def test_the_two_sides_agree_on_the_backwards_container(self):
+        import json
+        import shutil
+        import subprocess
+        import boku2
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        start = app.index("function bokuMapDerivedCount(")
+        end = app.index("\nfunction bokuUsedInPart(", start)
+        for label, raw in (("逆順", self.container([32, 48, 64], order=[2, 1, 0])),
+                           ("順どおり", self.container([32, 48, 64], order=[0, 1, 2]))):
+            with self.subTest(case=label):
+                script = ("const u32le=(b,p)=>(b[p]|(b[p+1]<<8)|(b[p+2]<<16)|(b[p+3]<<24))>>>0;"
+                          + app[start:end]
+                          + f"\nconst b=Uint8Array.from({json.dumps(list(raw))});"
+                            "const m=parseBokuMap(b);"
+                            "console.log(JSON.stringify(m?m.items.map(x=>[x.i,x.at,x.len]):null));")
+                res = subprocess.run([node, "-e", script], capture_output=True, text=True, cwd=REPO)
+                self.assertEqual(res.returncode, 0, res.stderr[-600:])
+                ours = [[it["i"], it["at"], it["len"]] for it in (boku2.parse_map(raw) or [])]
+                self.assertTrue(ours, "0 件で緑にしない")
+                self.assertEqual(json.loads(res.stdout), ours)
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 

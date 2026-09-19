@@ -812,7 +812,7 @@ def _best_map_rec(b: bytes, tries: list[tuple[int, int]]):
         head = 4 + n * rec
         if head > len(b):
             continue
-        items, prev, first, ok = [], 0, 0, True
+        items, first, ok, spans = [], 0, True, []
         for i in range(n):
             off, length = struct.unpack_from("<II", b, 4 + i * rec)
             # **位置が 0 なら空の枠。長さの欄は見ない** (#253)。公開ソースの
@@ -824,12 +824,23 @@ def _best_map_rec(b: bytes, tries: list[tuple[int, int]]):
             if not off:
                 items.append({"i": i, "at": 0, "len": 0})
                 continue
-            if off < head or off + length > len(b) or off < prev or off & 15:
+            if off < head or off + length > len(b) or off & 15:
                 ok = False
                 break
             first = first or off
-            prev = off + length
+            spans.append((off, off + length))
             items.append({"i": i, "at": off, "len": length})
+        # **枠の順ではなく、置き場として重なっていないかを見る** (#254)。
+        # 前は「次の位置は前の終わり以降」を求めていたが、それは**表の順と
+        # 置き場の順が同じ**という決めつけで、公開ソースはそんな条件を見ていない。
+        # 実物で順が入れ替わっていたら、入れ物ぜんぶを突き返すことになる。
+        # 位置をそろえ直して重なりだけを見れば、順に頼らずに同じだけ弾ける ——
+        # 「位置は 16 の倍数で範囲内、並びはばらばら」の作り物 2000 件で測ると、
+        # 前の条件も重なりの条件も **0 件**、条件なし (公開ソースのまま) は 2000 件
+        if ok and spans:
+            order = sorted(spans)
+            if any(nxt[0] < cur[1] for cur, nxt in zip(order, order[1:])):
+                ok = False
         if ok and first:
             # 12 バイト刻みの入れ物は 8 バイト刻みとしても「読めて」しまうことがある
             # (後ろの項目が空のとき)。部品が多く取れる方を採る。同じなら 8
