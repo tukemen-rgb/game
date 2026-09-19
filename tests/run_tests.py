@@ -8216,6 +8216,116 @@ class TestClosingOneFolderTooManyIsSaidOutLoud(unittest.TestCase):
             self.assertEqual(r.returncode, 1, "確認事項に数えていない")
 
 
+class TestWhichFilesFailTheChecksumAndHowTheySit(unittest.TestCase):
+    """**どのファイルが合わないか、そしてどう並んでいるか** (#261).
+
+    公開ソースの `getCRCdict` は合わなかったファイルを **`CRC FAILURE: 名前` で
+    全部名指し**する。こちらは件数と 1 例しか出していなかった。実物は 1951 件
+    あるので全部は出せないが、1 件だけでは**いちばん大事なこと**が分からない ——
+    合わない分が**固まっている**のか**散らばっている**のか。
+
+    直し方がまるで違う。固まっていれば吸い出しがその区間で壊れているので
+    **もう一度吸い出せば直る**。散らばっていれば切り分けの位置の読み方が外れて
+    いるので**吸い出し直しても直らない**。`dfi_dropped` が「外を指す項目」で
+    同じ見分け方をしている (#203) ので、言い方もそろえる。
+    """
+
+    @staticmethod
+    def sample_with_broken_bodies(folder: str, which) -> None:
+        """練習用データを作り、`which` が選んだ項目の中身だけを潰す."""
+        import boku2
+        import make_boku2_sample
+        make_boku2_sample.build_sample(folder)
+        idx_path = os.path.join(folder, "BOKU2.IDX")
+        img_path = os.path.join(folder, "BOKU2.IMG")
+        with open(img_path, "rb") as fh:
+            img = bytearray(fh.read())
+        with open(idx_path, "rb") as fh:
+            entries = boku2.read_dfi(fh.read(), len(img))
+        for e in which(entries):
+            img[e["at"]:e["at"] + 16] = b"\xAA" * 16
+        with open(img_path, "wb") as fh:
+            fh.write(bytes(img))
+
+    @staticmethod
+    def check(folder: str) -> str:
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                            "check", folder], capture_output=True, text=True, cwd=REPO)
+        return r.stdout + r.stderr
+
+    def test_a_damaged_run_is_called_clustered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            self.sample_with_broken_bodies(folder, lambda es: es[5:12])
+            said = self.check(folder)
+            self.assertIn("に固まっています", said, said[-800:])
+            self.assertIn("もう一度吸い出すと直ることがあります", said, said[-800:])
+            self.assertNotIn("散らばっています", said, said[-800:])
+
+    def test_scattered_damage_is_called_scattered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            self.sample_with_broken_bodies(folder, lambda es: es[::3])
+            said = self.check(folder)
+            self.assertIn("散らばっています", said, said[-800:])
+            self.assertIn("吸い出し直しても直りません", said, said[-800:])
+            self.assertNotIn("に固まっています", said, said[-800:])
+
+    def test_it_names_several_files_not_just_one(self):
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            self.sample_with_broken_bodies(folder, lambda es: es[5:12])
+            said = self.check(folder)
+            line = next((l for l in said.splitlines() if "合わないファイル:" in l), "")
+            self.assertTrue(line, f"名指ししていない:\n{said[-800:]}")
+            self.assertEqual(line.count(","), boku2.CRC_BAD_SHOWN - 1,
+                             f"{boku2.CRC_BAD_SHOWN} 件挙げていない: {line}")
+            self.assertIn("ほか 2 件", line, line)
+
+    def test_a_healthy_dump_says_none_of_it(self):
+        """**いつも出るなら出す意味が無い。** そろっている吸い出しでは出ない."""
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            said = self.check(folder)
+            for phrase in ("合わないファイル:", "に固まっています", "散らばっています"):
+                self.assertNotIn(phrase, said, f"{phrase} が出ている")
+
+    def test_one_odd_file_gets_no_shape_verdict(self):
+        """1 件だけでは「固まっている / 散らばっている」は決まらない (#96)."""
+        import boku2
+        self.assertEqual(boku2.crc_bad_shape([7], 20), "")
+        self.assertEqual(boku2.crc_bad_shape([], 20), "")
+        self.assertIn("固まっています", boku2.crc_bad_shape([5, 6, 7], 20))
+        self.assertIn("散らばっています", boku2.crc_bad_shape([0, 9, 18], 20))
+
+    def test_the_two_sides_judge_the_shape_the_same_way(self):
+        import json
+        import shutil
+        import subprocess
+        import boku2
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        i = app.index("function crcBadShape(")
+        src = app[i:app.index("\n}\n", i) + 3]
+        cases = [([5, 6, 7], 20), ([0, 9, 18], 20), ([7], 20), ([], 20),
+                 ([100, 101, 102, 103], 2000), ([3, 800, 1500], 2000)]
+        script = (src + f"\nconst cs={json.dumps(cases)};"
+                        "console.log(JSON.stringify(cs.map(([a,l])=>crcBadShape(a,l))));")
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stderr[-400:])
+        ours = [boku2.crc_bad_shape(a, l) for a, l in cases]
+        self.assertEqual(json.loads(res.stdout), ours)
+        self.assertTrue(any(ours), "0 件で緑にしない")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 

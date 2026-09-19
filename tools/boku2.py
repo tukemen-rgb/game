@@ -2170,6 +2170,33 @@ def compare_crc_names(crc: dict, entries: list) -> tuple[int, int, tuple | None]
     return same, diff, first_diff
 
 
+#: 検査値が合わなかったファイルを、名前で何件まで挙げるか (#261)。公開ソースの
+#: `getCRCdict` は合わなかったファイルを**全部名指し**する。実物は 1951 件あるので
+#: 全部は出せないが、1 件だけでは「固まっているのか散らばっているのか」が分からない
+CRC_BAD_SHOWN = 5
+
+
+def crc_bad_shape(bad_at: list[int], looked: int) -> str:
+    """合わなかった項目が**固まっているか散らばっているか** (#261).
+
+    直し方がまるで違う。**固まっている**なら吸い出しがその区間で壊れている
+    (もう一度吸い出せば直る)。**散らばっている**なら切り分けの位置の読み方が
+    外れている (吸い出し直しても直らない)。`dfi_dropped` の「外を指す項目」で
+    同じ見分け方をしている (#203) ので、言い方もそろえる。
+    """
+    if len(bad_at) < 2:
+        return ""
+    span = bad_at[-1] - bad_at[0] + 1
+    if span <= len(bad_at) * 1.5:
+        return (f"   合わない {len(bad_at):,} 件は**索引の {bad_at[0]:,} 番目から "
+                f"{bad_at[-1]:,} 番目に固まっています**。吸い出しがその区間で"
+                "壊れている疑いがあるので、**もう一度吸い出すと直ることがあります**")
+    return (f"   合わない {len(bad_at):,} 件は**索引じゅうに散らばっています** "
+            f"({bad_at[0]:,} 番目〜{bad_at[-1]:,} 番目 / 見た {looked:,} 件)。"
+            "吸い出しではなく**切り分けの位置の読み方**が外れている疑いがあります "
+            "(吸い出し直しても直りません)")
+
+
 def crc_report(crc: dict, entries: list, img, rec_count: int,
                names_missing: bool = False) -> tuple[list, int]:
     """`BOKU2.CRC` と、こちらの切り分けを突き合わせた行 (#239).
@@ -2197,6 +2224,8 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
     # **中身まで確かめる。** 切り分けた先頭 0x80 バイトの CRC が、向こうの値と合うか
     ok = ng = 0
     first_bad = None
+    bad_at: list[int] = []            # 合わなかった項目の**索引での番号** (#261)
+    bad_names: list[str] = []
     for i, e in enumerate(entries[:CRC_CHECK_FILES]):
         slot = crc["slots"][i] if i < len(crc["slots"]) else i
         if slot >= len(crc["crcs"]):
@@ -2207,6 +2236,9 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
             ok += 1
         else:
             ng += 1
+            bad_at.append(i)
+            if len(bad_names) < CRC_BAD_SHOWN:
+                bad_names.append(e["path"])
             if first_bad is None:
                 first_bad = (e["path"], got, crc["crcs"][slot])
     looked = ok + ng
@@ -2284,6 +2316,15 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
                          f"例: {first_bad[0]} はこちら 0x{first_bad[1]:04X} / "
                          f"検査値ファイル 0x{first_bad[2]:04X}。"
                          "切り分けの位置がずれている疑いがあります。この行ごと報告してください")
+            # **どのファイルが合わないかを名指しする** (#261)。公開ソースの
+            # `getCRCdict` は合わなかったファイルを全部名指しする。1 件だけでは
+            # 「どこが壊れているか」が分からない
+            if len(bad_names) > 1:
+                lines.append(f"   合わないファイル: {', '.join(bad_names)}"
+                             + (f" ほか {ng - len(bad_names):,} 件" if ng > len(bad_names) else ""))
+            shape = crc_bad_shape(bad_at, looked)
+            if shape:
+                lines.append(shape)
     return lines, problems
 
 

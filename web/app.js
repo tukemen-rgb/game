@@ -3803,6 +3803,27 @@ function crc16Ccitt(b) {
     公開ソースの getCRCdict は検査値ファイルの並び順をまったく当てにしていない。
     同じ検査値に違う名前が来たら、その検査値は引き当てに使わない
     (先頭 0x80 バイトがそっくりなファイルは実在する。当てずっぽうで名前を付けない) */
+/** 検査値が合わなかったファイルを名前で何件まで挙げるか (#261。CLI の CRC_BAD_SHOWN) */
+const CRC_BAD_SHOWN = 5;
+
+/** 合わなかった項目が固まっているか散らばっているか (#261。CLI の crc_bad_shape と同じ言葉)。
+ *  固まっているなら吸い出しがその区間で壊れている (吸い出し直せば直る)。
+ *  散らばっているなら切り分けの位置の読み方が外れている (直らない)。 */
+function crcBadShape(badAt, looked) {
+  if (badAt.length < 2) return "";
+  const span = badAt[badAt.length - 1] - badAt[0] + 1;
+  if (span <= badAt.length * 1.5) {
+    return `   合わない ${badAt.length.toLocaleString()} 件は**索引の ${badAt[0].toLocaleString()} 番目から `
+      + `${badAt[badAt.length - 1].toLocaleString()} 番目に固まっています**。吸い出しがその区間で`
+      + "壊れている疑いがあるので、**もう一度吸い出すと直ることがあります**";
+  }
+  return `   合わない ${badAt.length.toLocaleString()} 件は**索引じゅうに散らばっています** `
+    + `(${badAt[0].toLocaleString()} 番目〜${badAt[badAt.length - 1].toLocaleString()} 番目 / `
+    + `見た ${looked.toLocaleString()} 件)。`
+    + "吸い出しではなく**切り分けの位置の読み方**が外れている疑いがあります "
+    + "(吸い出し直しても直りません)";
+}
+
 function crcNameByValue(crc) {
   const by = new Map(), split = new Set();
   for (let i = 0; i < crc.names.length; i++) {
@@ -4215,6 +4236,7 @@ async function buildIdxReport() {
       }
       const idxNamesOk = (c.named_ok ?? items.length) >= items.length * 0.9;
       let crcOk = 0, crcNg = 0, crcBad = null;
+      const crcBadAt = [], crcBadNames = [];      /* 合わなかった項目の番号と名前 (#261) */
       /* 合わなかった分の検査値が、検査値ファイルの**どこかに**あるか (#252)。
          あるなら中身は取れていて並びだけが違う (CLI の crc_report と同じ判定) */
       const crcTable = new Set(crc.crcs);
@@ -4230,6 +4252,8 @@ async function buildIdxReport() {
         if (got === crc.crcs[slot]) crcOk++;
         else {
           crcNg++;
+          crcBadAt.push(i);
+          if (crcBadNames.length < CRC_BAD_SHOWN) crcBadNames.push(it.name);
           if (crcTable.has(got)) badInTable++;
           if (crcByValue.has(got)) nameable++;
           if (!crcBad) crcBad = { name: it.name, got, want: crc.crcs[slot] };
@@ -4304,6 +4328,14 @@ async function buildIdxReport() {
             + `例: ${crcBad.name} はこちら 0x${hex(crcBad.got, 4)} / `
             + `検査値ファイル 0x${hex(crcBad.want, 4)}。`
             + "切り分けの位置がずれている疑いがあります。この行ごと報告してください");
+          /* **どのファイルが合わないかを名指しする** (#261。CLI の crc_report と同じ) */
+          if (crcBadNames.length > 1) {
+            lines.push(`   合わないファイル: ${crcBadNames.join(", ")}`
+              + (crcNg > crcBadNames.length
+                 ? ` ほか ${(crcNg - crcBadNames.length).toLocaleString()} 件` : ""));
+          }
+          const shape = crcBadShape(crcBadAt, looked);
+          if (shape) lines.push(shape);
         }
       }
     }
