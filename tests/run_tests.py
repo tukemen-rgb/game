@@ -8732,6 +8732,116 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestTheEvidenceOrderIsWrittenDownAndFollowed(unittest.TestCase):
+    """**証拠の強さの順を 1 か所に書き、そのとおりに言うこと** (#272).
+
+    #271 の宿題は「証拠の強さの順が、ほかの段でも逆になっていないか」。
+    逆になっていました。実物なみの索引 (1,901 レコード) で:
+
+        レコード 1901 件 (名前の置き場は 0x76E0 から) / …
+        → 名前の置き場が 0x76E0 です。… 公開ソースは実物を 0x8140 と決め打ち
+           しているので、**レコードの読み方がずれている疑い**があります
+        …
+          切り分けた先頭 128 バイトの検査値: **1,900 件すべて合いました**
+
+    0x8140 は**向こうが実物の 1 枚で決め打ちした値**で、枚数が違えばずれて
+    当たり前。**当たっている読み方を疑わせていた**。
+
+    そこで順を `boku2.EVIDENCE_ORDER` に 1 か所だけ書き、判定の前に
+    `crc_says_the_split_is_right` を呼ぶ形にしました。
+
+    ただし **1 段目が確かめるのは「位置と中身」だけ**。フォルダの入れ子の復元は
+    検査値の外なので、全部合っていても**そのまま疑ってよい** —— そこまで
+    一緒に緩めると、道筋が静かにずれる事故 (#260) を見逃します。
+    """
+
+    @staticmethod
+    def dump(folder: str, records: int, close_every: bool = False) -> None:
+        """実物なみの件数の索引と本体と検査値を作る.
+
+        @param close_every 各ファイルで上のフォルダに戻ろうとする (入れ子の復元が外れる形)
+        """
+        import struct
+        import make_boku2_sample
+        os.makedirs(os.path.join(folder, "MAP"), exist_ok=True)
+        recs, data, names = [(1, 1, 0, 0)], b"", ["/"]
+        for i in range(records):
+            recs.append((0, 0 if close_every else 1, len(data) // 2048, 64))
+            data += bytes(2048)
+            names.append(f"f{i:04d}.bin")
+        if not close_every:
+            recs[-1] = (0, 0, recs[-1][2], recs[-1][3])
+        idx = b"DFI\0" + struct.pack("<I", 0x100) + b"\0" * 8
+        for kind, more, lba, size in recs:
+            idx += struct.pack("<HHIII", kind, more, 0x8130, lba, size)
+        idx += b"".join(n.encode() + b"\0" for n in names)
+        for name, blob in (("BOKU2.IDX", idx), ("BOKU2.IMG", data),
+                           ("BOKU2.CRC", make_boku2_sample.build_crc(idx, data))):
+            with open(os.path.join(folder, name), "wb") as fh:
+                fh.write(blob)
+
+    def said(self, **kw) -> str:
+        import io
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            self.dump(folder, **kw)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_the_order_is_written_in_exactly_one_place(self):
+        import boku2
+        self.assertEqual(len(boku2.EVIDENCE_ORDER), 3, boku2.EVIDENCE_ORDER)
+        heads = [row[0] for row in boku2.EVIDENCE_ORDER]
+        self.assertIn("BOKU2.CRC", heads[0], heads)
+        # 借り物の数が、実際に道具の中の定数として在ること (書き写しではない)
+        for value in (f"0x{boku2.KNOWN_NAMES_AT:X}", str(boku2.FONT_GLYPHS),
+                      str(boku2.FONT_COLS)):
+            self.assertIn(value, heads[1], f"{value} が 2 段目に挙がっていない: {heads[1]}")
+
+    def test_the_borrowed_offset_does_not_overrule_the_checksum(self):
+        said = self.said(records=1900)
+        # 前提: 実物なみの件数で、置き場が 0x8140 でない材料であること
+        self.assertIn("レコード 1901 件", said, "材料が違います (件数)")
+        self.assertIn("件すべて合いました", said, "材料が弱い: 検査値が合っていない")
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("   名前の置き場は 0x")), "")
+        self.assertTrue(line, f"名前の置き場について何も言っていない\n{said[:900]}")
+        self.assertFalse(line.startswith("→"), f"まだ疑いとして出しています: {line}")
+        self.assertIn("レコードの読み方は当たっています", line, line)
+        self.assertNotIn("ずれている疑い", said,
+                         "検査値が全部合っているのに、読み方を疑わせています")
+
+    def test_the_checksum_does_not_vindicate_the_folder_rule(self):
+        """**検査値が確かめるのは位置と中身だけ。** 入れ子の復元は別 (#260)."""
+        said = self.said(records=1200, close_every=True)
+        self.assertIn("件すべて合いました", said, "材料が弱い: 検査値が合っていない")
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("→ フォルダの閉じ方が合いません")), "")
+        self.assertTrue(line, f"入れ子の復元まで黙らせています\n{said[:900]}")
+
+    def test_a_real_sized_index_at_the_known_offset_is_still_praised(self):
+        """置き場が 0x8140 ちょうどなら、今までどおり裏付けとして言うこと."""
+        import boku2
+        # 0x8140 = 16 + 16 × レコード数 → 2067 レコード (根 1 + ファイル 2066)
+        said = self.said(records=(boku2.KNOWN_NAMES_AT - 16) // 16 - 1)
+        self.assertIn(f"名前の置き場が 0x{boku2.KNOWN_NAMES_AT:X} —— ", said,
+                      "決め打ちと同じでも裏付けを言わなくなりました")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue("} else if (crcAllOk) {" in ui,
+                        "画面が借り物の目安で読み方を疑い続けています")
+        self.assertTrue("レコードの読み方は当たっています" in ui,
+                        "画面に同じ言葉がありません")
+        # **入れ子の復元は緩めていない**こと (検査値の外なので)
+        i = ui.index("→ フォルダの閉じ方が合いません")
+        self.assertIn("problems++;", ui[max(0, i - 200):i],
+                      "画面がフォルダの閉じ方まで数えなくなっています")
+
+
 class TestTheStrongerEvidenceWins(unittest.TestCase):
     """**目安より、ゲーム自身の検査値を先に見ること** (#271).
 

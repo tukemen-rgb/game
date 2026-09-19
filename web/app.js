@@ -4115,7 +4115,23 @@ async function buildIdxReport() {
   const recEnd = 16 + c.count * 16;
   lines.push(`レコード ${c.count} 件 (名前の置き場は ${hx(recEnd)} から) / ファイル ${items.length} 件 / 名前が付いた ${c.named_ok ?? "?"} 件`
     + (c.dupes ? ` / 同じ名前 ${c.dupes} 件` : ""));
-  /* **上に戻れなかった回数を言う** (#260。CLI の check と同じ判定・同じ言葉) */
+  /* **判定より先に、外から確かめられる証拠があるかを見る** (#271/#272。
+     CLI の crc_says_the_split_is_right と同じ)。数えるだけで、ここでは何も言わない。
+     証拠の強さの順は CLI の EVIDENCE_ORDER に 1 か所だけ書いてある */
+  let crcAllOk = false;
+  {
+    const crcProbe = state.entries.find((e) => /boku2\.crc$/i.test(e.name));
+    if (crcProbe) {
+      const probe = readCrcFile(await readRange(crcProbe.file, crcProbe.offset, crcProbe.size));
+      if (probe) {
+        const { ok, ng } = await crcMatchCounts(probe, items, dataEntry.file, dataEntry.offset);
+        crcAllOk = ok >= CRC_SURE_MIN && ng === 0;
+      }
+    }
+  }
+  /* **上に戻れなかった回数を言う** (#260。CLI の check と同じ判定・同じ言葉)。
+     **検査値は位置と中身しか確かめない**ので、全部合っていてもフォルダの
+     入れ子の復元は疑ってよい (CLI の EVIDENCE_ORDER の但し書き) */
   if (c.underflow) {
     problems++;
     lines.push(`→ フォルダの閉じ方が合いません: **${c.underflow} 回**、`
@@ -4128,6 +4144,13 @@ async function buildIdxReport() {
     if (recEnd === KNOWN_NAMES_AT) {
       lines.push(`   名前の置き場が ${hx(KNOWN_NAMES_AT)} —— 英語化パッチの公開ソースが`
         + "決め打ちしている値と同じです (レコードの読み方が当たっている裏付け)");
+    } else if (crcAllOk) {
+      /* **検査値が全部合っているなら、レコードの読み方は当たっている** (#272)。
+         0x8140 は「実物の枚数ならここ」という借り物の目安 (CLI と同じ言葉) */
+      lines.push(`   名前の置き場は ${hx(recEnd)} で、公開ソースの決め打ち `
+        + `${hx(KNOWN_NAMES_AT)} とは違います。ただし**ゲーム自身の検査値が`
+        + "全部合っている**ので、レコードの読み方は当たっています "
+        + "(ファイル数が実物と違う吸い出しなら、ここはずれます)");
     } else {
       problems++;
       const diff = recEnd - KNOWN_NAMES_AT;
@@ -4194,15 +4217,6 @@ async function buildIdxReport() {
     /* **強い証拠のほうを先に見る** (#271。CLI の check と 1 字そろえる)。
        使い切りの割合は目安で、ゲーム自身の検査値は位置も中身も確かめる本物の
        裏付け。目安を根拠に、本物の裏付けを黙らせてはいけない */
-    let crcAllOk = false;
-    const crcProbe = state.entries.find((e) => /boku2\.crc$/i.test(e.name));
-    if (crcProbe) {
-      const probe = readCrcFile(await readRange(crcProbe.file, crcProbe.offset, crcProbe.size));
-      if (probe) {
-        const { ok, ng } = await crcMatchCounts(probe, items, dataEntry.file, dataEntry.offset);
-        crcAllOk = ok >= CRC_SURE_MIN && ng === 0;
-      }
-    }
     if (crcAllOk) {
       lines.push(`→ 索引が本体の ${(100 * coverage).toFixed(1)}% しか指していません。`
         + "ただし**ゲーム自身の検査値は全部合っています** (下の [検査値] の段)。"

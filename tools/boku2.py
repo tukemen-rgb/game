@@ -2296,6 +2296,59 @@ def crc_match_counts(crc: dict, entries: list, img) -> tuple[int, int]:
     return ok, ng
 
 
+#: **証拠の強さの順** (#272)。ここだけに書く。判定を足すときは、どの段に入るかを
+#: 決めてからにすること。
+#:
+#: 1. **外から確かめられるもの** —— `BOKU2.CRC` の件数と、各ファイルの先頭
+#:    `CRC_HEAD` バイトの検査値。ゲーム自身が持っている答え合わせで、
+#:    **切り分けた位置と中身**を確かめる。合えば、レコードの読み方 (16 バイト刻み)
+#:    と位置の単位 (セクタ×2048) と長さの欄は**当たっている**。
+#: 2. **公開ソースから借りた目安** —— 名前の置き場 `KNOWN_NAMES_AT` (0x8140)、
+#:    文字表の字数 `FONT_GLYPHS` (1656)、1 行の字数 `FONT_COLS` (23)。
+#:    向こうが**実物の 1 枚のディスク**で決め打ちした値なので、枚数や版が違えば
+#:    ずれて当たり前。**1 段目と食い違ったら、1 段目を採る。**
+#: 3. **こちらが決めた目安** —— 使い切りの割合 `COVERAGE_MIN`、
+#:    名前がきれいな割合 `NAME_CLEAN_RATIO`、中身が空かどうか。
+#:    実物で確かめたことは一度も無い。**上の段と食い違ったら、上を採る。**
+#:
+#: ただし **1 段目が確かめられるのは「位置と中身」だけ**。フォルダの入れ子の
+#: 復元 (`read_dfi` の閉じ方) と名前の並びは検査値の外なので、検査値が全部
+#: 合っていても**そのまま疑ってよい**。
+EVIDENCE_ORDER = (
+    ("BOKU2.CRC の件数と検査値", "外から確かめられる", "切り分けた位置と中身"),
+    ("公開ソースから借りた数 (0x8140・1656 字・1 行 23 字)", "借り物の目安",
+     "実物の 1 枚で決め打ちした値。枚数や版が違えばずれる"),
+    ("こちらが決めた目安 (使い切り・名前のきれいさ・中身が空か)", "こちらの目安",
+     "実物で確かめたことは一度も無い"),
+)
+
+
+def crc_says_the_split_is_right(folder: str, entries: list, img_path: str) -> bool:
+    """`BOKU2.CRC` が「切り分けは位置も中身も合っている」と言っているか (#272).
+
+    **判定を出す前に呼ぶ。** これが真なら、こちらの目安 (使い切りの割合) や
+    借り物の目安 (名前の置き場 0x8140) が何を言おうと、レコードの読み方は
+    当たっている —— `EVIDENCE_ORDER` の 1 段目だから。
+
+    たまたま数件合っただけでひっくり返さないよう、`CRC_SURE_MIN` 件そろって
+    初めて真を返す。検査値ファイルが無い・読めないときは偽 (分からない)。
+    """
+    path = next((os.path.join(folder, n) for n in os.listdir(folder)
+                 if n.lower() == "boku2.crc"), None)
+    if not path:
+        return False
+    try:
+        with open(path, "rb") as fh:
+            crc = read_crc_file(fh.read())
+        if not crc:
+            return False
+        with open(img_path, "rb") as img:
+            ok, ng = crc_match_counts(crc, entries, img)
+    except OSError:
+        return False
+    return ok >= CRC_SURE_MIN and ng == 0
+
+
 def crc_report(crc: dict, entries: list, img, rec_count: int,
                names_missing: bool = False,
                knock_on: str = "") -> tuple[list, int]:
@@ -2525,6 +2578,10 @@ def check(folder: str, out=sys.stdout) -> int:
     used = sum(e["len"] for e in entries)
     say(f"レコード {rec_count} 件 (名前の置き場は 0x{rec_end:X} から) / ファイル {len(entries)} 件 / 名前が付いた {named} 件"
         + (f" / 同じ名前 {dupes} 件" if dupes else ""))
+    # **判定より先に、外から確かめられる証拠があるかを見る** (#271/#272)。
+    # 数えるだけで、ここでは何も言わない。**証拠の強さの順**は
+    # `EVIDENCE_ORDER` に 1 か所だけ書いてある
+    crc_all_ok = crc_says_the_split_is_right(folder, entries, img_path)
     # **実物の索引には、外から確かめられる数がある** (#222)。英語化パッチの公開ソースは
     # 名前の置き場を `FILENAMES_START = 0x8140` と決め打ちしている。実物なみの
     # 大きさの索引でここが合っていれば、レコードの読み方 (16 バイト刻み・見出し 16 バイト)
@@ -2544,6 +2601,15 @@ def check(folder: str, out=sys.stdout) -> int:
         if rec_end == KNOWN_NAMES_AT:
             say(f"   名前の置き場が 0x{KNOWN_NAMES_AT:X} —— 英語化パッチの公開ソースが"
                 "決め打ちしている値と同じです (レコードの読み方が当たっている裏付け)")
+        elif crc_all_ok:
+            # **検査値が全部合っているなら、レコードの読み方は当たっている** (#272)。
+            # 0x8140 は「実物の枚数ならここ」という**借り物の目安**でしかなく、
+            # ファイル数が実物と違う吸い出しならずれて当たり前。ここで「疑い」と
+            # 言うと、**当たっている読み方を疑わせる**ことになる
+            say(f"   名前の置き場は 0x{rec_end:X} で、公開ソースの決め打ち "
+                f"0x{KNOWN_NAMES_AT:X} とは違います。ただし**ゲーム自身の検査値が"
+                "全部合っている**ので、レコードの読み方は当たっています "
+                "(ファイル数が実物と違う吸い出しなら、ここはずれます)")
         else:
             problems += 1
             where, want = f"0x{rec_end:X}", f"0x{KNOWN_NAMES_AT:X}"
@@ -2570,20 +2636,6 @@ def check(folder: str, out=sys.stdout) -> int:
     # 疑いが濃い。数字だけ出して判定に使っていなかったので、12% でも「問題なし」と
     # 言っていた (#96)。基準の 2 割は、ブラウザ側が候補から外す線と同じ
     coverage = used / max(1, img_size)
-    # **判定の前に、強い証拠があるかを見ておく** (#271)。数えるだけで何も言わない
-    crc_all_ok = False
-    crc_probe = next((os.path.join(folder, n) for n in os.listdir(folder)
-                      if n.lower() == "boku2.crc"), None)
-    if crc_probe and coverage < COVERAGE_MIN:
-        try:
-            with open(crc_probe, "rb") as fh:
-                probe_crc = read_crc_file(fh.read())
-            if probe_crc:
-                with open(img_path, "rb") as probe:
-                    ok_n, ng_n = crc_match_counts(probe_crc, entries, probe)
-                crc_all_ok = ok_n >= CRC_SURE_MIN and ng_n == 0
-        except OSError:
-            crc_all_ok = False
     say(f"[本体] {img_size:,} バイト / 索引が指す合計 {used:,} バイト "
         f"({100 * coverage:.1f}% — 索引が本体をどれだけ使い切っているか。"
         "読み方が合っていれば普通は 5 割を超えます)")
