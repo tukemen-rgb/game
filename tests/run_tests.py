@@ -8732,6 +8732,126 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestTheDumpsOwnFontOutranksTheBorrowedCount(unittest.TestCase):
+    """**この吸い出しのフォント画像のほうが、借り物の 1656 字より強い** (#273).
+
+    #272 の宿題は「2 段目の残り 2 つ (文字表 1656 字・1 行 23 字) も同じ形に
+    直す」。1 行 23 字 × 73 行 = **1679 マス**の画像を持つ吸い出しで診ると、
+    こうなっていました。
+
+        → 使われている文字番号の最大が 1660 で、この作品の文字表 1656 字 … に
+           収まりません。… **読み方そのものが違います**
+          この画像のマスは 1679 個 (この作品の文字表は全部で 1656 字)
+          **これで文字表はまかなえます**
+
+    2 つとも間違っています。**この吸い出しの画像に 1679 マスある**のだから、
+    1660 番は普通に存在する字で、読み方は当たっています。そして
+    「まかなえます」で通すと、社長は **1656 字で書き写すのをやめ**、
+    残り 23 マスに番号が振られないまま先へ進みます。
+
+    1656 は公開ソースが**実物の 1 枚のディスク**で決め打ちした借り物の数
+    (docs/09 の「証拠の強さの順」の 2 段目)。**この吸い出しの画像そのもの**は
+    その上に来ます。
+    """
+
+    ROWS = 73                       # 23 × 73 = 1679 マス (借り物の 1656 より多い)
+
+    @classmethod
+    def dump(cls, folder: str, top: int | None) -> None:
+        """大きいフォント画像と、番号 `top` を使う本文を置いた吸い出しを作る."""
+        import struct
+        import boku2
+        import make_boku2_sample
+        import make_tim2
+        os.makedirs(os.path.join(folder, "MAP"), exist_ok=True)
+        page, _ = make_tim2.font_sheet(rows=cls.ROWS, cols=boku2.FONT_COLS,
+                                       cell=boku2.FONT_CELL)
+        tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + page
+        tree = [(True, 1, "/", None), (False, 1, "bk_font.tms", tms)]
+        body = make_boku2_sample.build_msg([[top or 5, 0x8000]], 8)
+        tree.append((False, 0, "a.msg", body))
+        idx, img, _ = make_boku2_sample.build_dfi(tree)
+        for name, blob in (("BOKU2.IDX", idx), ("BOKU2.IMG", img)):
+            with open(os.path.join(folder, name), "wb") as fh:
+                fh.write(blob)
+
+    @classmethod
+    def said(cls, top=None) -> str:
+        import io
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            cls.dump(folder, top)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_the_material_has_more_cells_than_the_borrowed_count(self):
+        """前提: 画像のマスが借り物の 1656 より多いこと (0 件で緑にしない)."""
+        import boku2
+        cells = boku2.FONT_COLS * self.ROWS
+        self.assertGreater(cells, boku2.FONT_GLYPHS, "材料が弱い: マスが足りない")
+        self.assertIn(f"この画像のマスは {cells} 個", self.said())
+
+    def test_more_cells_than_the_borrowed_count_is_said_out_loud(self):
+        import boku2
+        said = self.said()
+        self.assertNotIn("これで文字表はまかなえます", said,
+                         "借り物の数より多いのに黙って通しています")
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("→ マスのほうが")), "")
+        self.assertTrue(line, f"多いことを言っていません\n{said[-700:]}")
+        cells = boku2.FONT_COLS * self.ROWS
+        self.assertIn(f"{cells - boku2.FONT_GLYPHS:,} 個多い", line, line)
+        self.assertIn("マスの数まで番号を振って", line, line)
+
+    def test_a_number_that_fits_the_image_is_not_called_a_misreading(self):
+        """借り物の 1656 は超えるが**画像には収まる**番号を、読み方のせいにしない."""
+        import boku2
+        cells = boku2.FONT_COLS * self.ROWS
+        top = boku2.FONT_GLYPHS + 4           # 1660: 1656 < 1660 < 1679
+        self.assertLess(top, cells, "材料が弱い: 画像に収まらない番号です")
+        said = self.said(top)
+        self.assertNotIn("読み方そのものが違います", said,
+                         "画像に収まる番号なのに、読み方を疑わせています")
+        line = next((ln for ln in said.splitlines()
+                     if "使われている文字番号の最大は" in ln), "")
+        self.assertTrue(line, f"文字番号の行が出ていない\n{said[-700:]}")
+        self.assertIn("字数の見込みのほうがこの版と違います", line, line)
+
+    def test_a_number_beyond_the_image_is_still_a_misreading(self):
+        """**画像にも収まらない番号は、今までどおり**読み方を疑うこと."""
+        import boku2
+        said = self.said(boku2.FONT_COLS * self.ROWS + 10)
+        self.assertIn("読み方そのものが違います", said,
+                      "画像にも収まらないのに、読み方を疑わなくなりました")
+
+    def test_a_normal_dump_is_untouched(self):
+        """練習データ (マスが足りない側) では、今までどおりの言い方."""
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            said = out.getvalue()
+        self.assertIn("字ぶん足りないので", said, "足りない側の言い方が消えました")
+        self.assertNotIn("→ マスのほうが", said, "足りないのに「多い」と言っています")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue("} else if (cells > FONT_GLYPHS) {" in ui,
+                        "画面が借り物の数より多いマスを黙って通しています")
+        self.assertTrue("字数の見込みのほうが" in ui,
+                        "画面に同じ言葉がありません")
+        # **言葉があるだけでは足りない** —— cellsHere の道に繋がっていること
+        self.assertTrue("glyphRangeNote(top, unseen.join(\"と\"), cellsHere)" in ui,
+                        "画面が画像のマス数を見ずに判定しています")
+
+
 class TestTheEvidenceOrderIsWrittenDownAndFollowed(unittest.TestCase):
     """**証拠の強さの順を 1 か所に書き、そのとおりに言うこと** (#272).
 

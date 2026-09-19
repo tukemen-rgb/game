@@ -3748,8 +3748,16 @@ function ansiDamageNote(bad) {
  * 文字表 1656 字という見込みが崩れるか / 2 枚目を探さずに済むか / 何字ぶん要るか。
  * `unseen` (まだ診ていない所の名前) があるなら、頁の判定は出さない (#234)。
  */
-function glyphRangeNote(top, unseen) {
+function glyphRangeNote(top, unseen, cellsHere = 0) {
   if (top >= FONT_GLYPHS) {
+    /* **この吸い出しの画像が答えを持っているなら、そちらを採る** (#273。CLI と同じ言葉)。
+       FONT_GLYPHS は公開ソースが実物の 1 枚で決め打ちした借り物の数 */
+    if (cellsHere && top < cellsHere) {
+      return `  使われている文字番号の最大は ${top} で、公開ソースの決め打ち `
+        + `${FONT_GLYPHS} 字は超えています。ただし**この吸い出しのフォント画像には `
+        + `${cellsHere.toLocaleString()} マスある**ので、読み方ではなく**字数の見込みのほうが`
+        + `この版と違います**。${FONT_GLYPHS} 字で打ち切らず、マスの数まで番号を振ってください`;
+    }
     return `→ 使われている文字番号の最大が ${top} で、この作品の文字表 `
       + `${FONT_GLYPHS} 字 (1 行 ${FONT_COLS} 字 × ${FONT_GLYPHS / FONT_COLS} 行) に`
       + "収まりません。字数の見込みか、2 バイトを 1 字の番号として読む"
@@ -4633,6 +4641,40 @@ async function buildIdxReport() {
   state.usedGlyphsWhole = true;
   const usedBy = [`.msg ${msgUsed.size}`, `入れ物 ${boxUsed.size}`,
                   maps.length ? `MAP の会話 ${mapScan.used.size}` : "MAP は診ていない"];
+  /* 名前で拾えなければ**形で拾う** (#172)。社長の実物では名前が付かず `#0 #1 …` の
+     ままだったことがある (docs/09 の #1・#3)。名前だけで選ぶと、そのときフォントの
+     診断がまるごと飛ぶ。一括処理 (boku2.py の pick_fonts) と同じ順・同じ言葉 */
+  let fonts = items.filter((x) => /font/i.test(x.base || x.name)).slice(0, 3);
+  let byShape = false;
+  if (!fonts.length) {
+    byShape = true;
+    for (const it of items.slice(0, SHAPE_HUNT_FILES)) {
+      if (it.len < 1024) continue;
+      const head = await readRange(dataEntry.file, dataEntry.offset + it.at,
+                                   Math.min(it.len, FONT_HUNT_HEAD));
+      if (tim2Pages(head, 2, true).some((q) => looksLikeAFontPage(q.t.pictures[0]))) {
+        fonts.push(it);
+        if (fonts.length >= 3) break;
+      }
+    }
+  }
+  /* **判定より先に、この吸い出し自身が答えを持っていないかを見る** (#273。
+     CLI の check と同じ数え方)。数えるだけで、ここでは何も言わない */
+  let cellsHere = 0;
+  if (!knockOn) {
+    for (const it of fonts.slice(0, 3)) {
+      const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at,
+                                    Math.min(it.len, FONT_OWN_CAP));
+      const at = findTim2(bytes);
+      if (at < 0) continue;
+      const t = parseTim2(bytes, at);
+      if (!t) continue;
+      const own = tim2Pages(bytes, 8, true).filter((q) => looksLikeAFontPage(q.t.pictures[0]));
+      const cells = own.reduce((sum, q) => sum + fontPageCells(q.t.pictures[0]), 0)
+        || fontPageCells(t.pictures[0]);
+      cellsHere = Math.max(cellsHere, cells);
+    }
+  }
   /* **使われている文字番号の最大**は、実物で最初に出る大事な数 (#230)。
      数字だけ出さず、文字表づくりの段取りが決まる所まで言う (CLI の check と同じ言葉) */
   if (usedHere.size) {
@@ -4650,11 +4692,11 @@ async function buildIdxReport() {
     const lookedMsgs = Math.min(MSG_CHECK_FILES, msgs.length);
     if (msgs.length && lookedMsgs - okMsg > 0) unseen.push(`読めなかった本文 ${lookedMsgs - okMsg} 件`);
     if (boxBad) unseen.push(`読めなかった入れ物 ${boxBad} 件`);
-
-    lines.push(glyphRangeNote(top, unseen.join("と")));
+    lines.push(glyphRangeNote(top, unseen.join("と"), cellsHere));
     /* 番号が文字表の字数に収まらない = **読み方そのものが違う** (#230)。
-       そのときは、足りない番号を「書き足す」と言ってはいけない (#269) */
-    numsTooBig = top >= FONT_GLYPHS;
+       そのときは、足りない番号を「書き足す」と言ってはいけない (#269)。
+       ただし**この吸い出しの画像にマスがあるなら、外れているのは借り物の数のほう** (#273) */
+    numsTooBig = top >= FONT_GLYPHS && !(cellsHere && top < cellsHere);
     if (numsTooBig) problems++;
   }
   /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
@@ -4697,23 +4739,6 @@ async function buildIdxReport() {
   } else {
     lines.push("[文字表] 文字表はまだ貼っていない (「.msg として読む」の欄に貼ってから、もう一度この要約を作ると出来具合が出る)");
     skipped.push("文字表の出来具合 (文字表をまだ貼っていない)");
-  }
-  /* 名前で拾えなければ**形で拾う** (#172)。社長の実物では名前が付かず `#0 #1 …` の
-     ままだったことがある (docs/09 の #1・#3)。名前だけで選ぶと、そのときフォントの
-     診断がまるごと飛ぶ。一括処理 (boku2.py の pick_fonts) と同じ順・同じ言葉 */
-  let fonts = items.filter((x) => /font/i.test(x.base || x.name)).slice(0, 3);
-  let byShape = false;
-  if (!fonts.length) {
-    byShape = true;
-    for (const it of items.slice(0, SHAPE_HUNT_FILES)) {
-      if (it.len < 1024) continue;
-      const head = await readRange(dataEntry.file, dataEntry.offset + it.at,
-                                   Math.min(it.len, FONT_HUNT_HEAD));
-      if (tim2Pages(head, 2, true).some((q) => looksLikeAFontPage(q.t.pictures[0]))) {
-        fonts.push(it);
-        if (fonts.length >= 3) break;
-      }
-    }
   }
   if (!fonts.length) {
     problems++;
@@ -4795,6 +4820,15 @@ async function buildIdxReport() {
               + "この吸い出しからは見つからなかった)");
           }
 
+        } else if (cells > FONT_GLYPHS) {
+          /* **借り物の数より多いなら、そう言う** (#273。CLI の check と同じ言葉)。
+             黙って「まかなえます」で通すと、1656 字で書き写すのをやめてしまう */
+          problems++;
+          lines.push(`→ マスのほうが、公開ソースの決め打ち ${FONT_GLYPHS.toLocaleString()} 字より `
+            + `**${(cells - FONT_GLYPHS).toLocaleString()} 個多い**です (上の行)。`
+            + "外れているのは**字数の見込みのほう**とみられます ——"
+            + `${FONT_GLYPHS.toLocaleString()} 字で打ち切らず、**マスの数まで番号を振って**`
+            + "ください。この行ごと報告してください");
         } else {
           lines.push("  これで文字表はまかなえます");
         }

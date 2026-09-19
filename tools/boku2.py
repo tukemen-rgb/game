@@ -1335,7 +1335,7 @@ def ansi_damage_note(bad: list[int]) -> str:
             "校正では「半角文字が混ざっています」と出ます")
 
 
-def glyph_range_note(top: int, unseen: str = "") -> str:
+def glyph_range_note(top: int, unseen: str = "", cells_here: int = 0) -> str:
     """**使われている文字番号の最大**が何を意味するか、1 行で言う (#230).
 
     `unseen` は「まだ診ていない所」の名前 (MAP の会話など)。そこがあるなら
@@ -1353,6 +1353,18 @@ def glyph_range_note(top: int, unseen: str = "") -> str:
     実物が届いた日にいちばん早く出る数で、文字表づくりの段取りがここで決まる。
     """
     if top >= FONT_GLYPHS:
+        # **この吸い出しの画像が答えを持っているなら、そちらを採る** (#273)。
+        # `FONT_GLYPHS` は公開ソースが**実物の 1 枚のディスク**で決め打ちした
+        # 借り物の数 (docs/09 の「証拠の強さの順」の 2 段目)。この吸い出しの
+        # フォント画像にそれより多くマスがあるなら、外れているのは**借り物の
+        # 数のほう**で、読み方ではない。ここで「読み方が違う」と言い切ると、
+        # 合っている読み方を捨てさせることになる
+        if cells_here and top < cells_here:
+            return (f"  使われている文字番号の最大は {top} で、公開ソースの決め打ち "
+                    f"{FONT_GLYPHS} 字は超えています。ただし**この吸い出しのフォント画像には "
+                    f"{cells_here:,} マスある**ので、読み方ではなく**字数の見込みのほうが"
+                    f"この版と違います**。{FONT_GLYPHS} 字で打ち切らず、マスの数まで"
+                    "番号を振ってください")
         return (f"→ 使われている文字番号の最大が {top} で、この作品の文字表 "
                 f"{FONT_GLYPHS} 字 (1 行 {FONT_COLS} 字 × {FONT_GLYPHS // FONT_COLS} 行) に"
                 "収まりません。字数の見込みか、2 バイトを 1 字の番号として読む"
@@ -2917,9 +2929,25 @@ def check(folder: str, out=sys.stdout) -> int:
         # 数字だけ出さず、文字表づくりの段取りが決まる所まで言う
         #: 番号が文字表の字数に収まらない = **読み方そのものが違う** (#230)。
         #: そのときは、足りない番号を「書き足す」と言ってはいけない (#269)
-        nums_too_big = bool(used_here) and max(used_here) >= FONT_GLYPHS
+        # **判定より先に、この吸い出し自身が答えを持っていないかを見る** (#273)。
+        # 数えるだけで、ここでは何も言わない。原因が 1 つ上にあると分かっている
+        # ときは画像を読まない (#267) ので、そのときは 0 のまま
+        fonts, by_shape = pick_fonts(img, entries)
+        cells_here = 0
+        for e in ([] if knock_on else fonts[:3]):
+            img.seek(e["at"])
+            got = tim2_info(img.read(min(e["len"], 0x100)))
+            if not got:
+                continue
+            img.seek(e["at"])
+            own = [q for q in tim2_pages(img.read(min(e["len"], FONT_OWN_CAP)))
+                   if looks_like_a_font_page(q)]
+            cells_here = max(cells_here,
+                             sum(font_page_cells(q) for q in own) or font_page_cells(got))
+        nums_too_big = (bool(used_here) and max(used_here) >= FONT_GLYPHS
+                        and not (cells_here and max(used_here) < cells_here))
         if used_here:
-            say(glyph_range_note(max(used_here), "と".join(unseen)))
+            say(glyph_range_note(max(used_here), "と".join(unseen), cells_here))
             if nums_too_big:
                 problems += 1
         font_txt = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "font.txt"), None)
@@ -2958,8 +2986,7 @@ def check(folder: str, out=sys.stdout) -> int:
         else:
             say("[文字表] font.txt はまだ無い (作ったらこのフォルダに置くと、ここで出来具合を確かめられる)")
             skipped.append("文字表の出来具合 (font.txt がまだ無い)")
-        # 名前で拾えなければ**形で拾う** (#172)。本体を開いた後でないと中身を見られない
-        fonts, by_shape = pick_fonts(img, entries)
+        # 名前で拾えなければ**形で拾う** (#172)。上で数えたものをそのまま使う
         # **どうやって見つけたか**を言う。名前で拾えなかったのに黙って形で拾うと、
         # 社長は「名前が読めていない」という大事な手がかりを受け取れない (#172)
         if not fonts:
@@ -3055,6 +3082,17 @@ def check(folder: str, out=sys.stdout) -> int:
                             skipped.append(f"文字表の 2 枚目 "
                                            f"(残り {FONT_GLYPHS - cells} 字。"
                                            "この吸い出しからは見つからなかった)")
+                    elif cells > FONT_GLYPHS:
+                        # **借り物の数より多いなら、そう言う** (#273)。黙って
+                        # 「まかなえます」で通すと、社長は 1656 字で書き写すのを
+                        # やめ、**残りのマスに番号が振られないまま**先へ進む
+                        problems += 1
+                        # 数は 1 行上で言ったので繰り返さない (#264)
+                        say(f"→ マスのほうが、公開ソースの決め打ち {FONT_GLYPHS:,} 字より "
+                            f"**{cells - FONT_GLYPHS:,} 個多い**です (上の行)。"
+                            f"外れているのは**字数の見込みのほう**とみられます ——"
+                            f"{FONT_GLYPHS:,} 字で打ち切らず、**マスの数まで番号を振って**"
+                            "ください。この行ごと報告してください")
                     else:
                         say("  これで文字表はまかなえます")
             else:
