@@ -344,6 +344,9 @@ DAMAGE = {
     "crc": "BOKU2.CRC の検査値を 1 つ変える (切り分けと食い違う)",
     # 2 か所に書いてある名前が食い違う形 (#241)
     "crcname": "BOKU2.CRC の名前を 1 つ変える (索引の名前と食い違う)",
+    # **索引の読み方そのものが外れている形** (#266/#267)。吸い出しは無事なので
+    # 取り直しても直らない。この先の段が「それらしい数」を自信たっぷりに出す
+    "length": "索引のレコードの長さの欄を小さくする (索引が本体をほとんど指さない)",
 }
 
 
@@ -375,6 +378,25 @@ def damage(out_dir: str, kind: str) -> str:
             fh.seek(rec_end)
             fh.write(b"\xff" * (len(idx) - rec_end))
         return f"BOKU2.IDX の名前の置き場 (0x{rec_end:X} から最後まで) を FF で埋めた"
+    if kind == "length":
+        # **中身は無事なまま、読み方だけを外す。** 長さの欄を 1/40 にすると、
+        # 索引が本体のごく一部しか指さなくなる —— 切り分けた中身は「途中で
+        # 切れたファイル」になり、検査値も .msg もフォントも全部外れる。
+        # 原因は 1 つ (索引の読み方) で、**吸い出し直しでは直らない**
+        idx2 = bytearray(idx)
+        rec_end = 16
+        while rec_end + 16 <= len(idx2) and (idx2[rec_end] | (idx2[rec_end + 1] << 8)) in (0, 1):
+            rec_end += 16
+        touched = 0
+        for i in range((rec_end - 16) // 16):
+            at = 16 + i * 16
+            length = int.from_bytes(idx2[at + 12:at + 16], "little")
+            if length:
+                idx2[at + 12:at + 16] = max(16, length // 40).to_bytes(4, "little")
+                touched += 1
+        with open(idx_path, "wb") as fh:
+            fh.write(bytes(idx2))
+        return f"BOKU2.IDX のレコード {touched} 件の長さの欄を 1/40 にした (中身はそのまま)"
     if kind == "empty":
         # **索引は正しいまま、中身だけ空**にする。実物では「吸い出しが途中で
         # 切れた」「コピーが終わっていない」で起きる形。索引が読めるので

@@ -4638,6 +4638,16 @@ async function buildIdxReport() {
       + "違うということなので、その行も報告してください");
   }
   for (const it of fonts.slice(0, 3)) {
+    /* **原因が 1 つ上にあるなら、この画像は読まない** (#267。CLI の check と同じ言葉)。
+       索引の読み方が外れていると、フォントの画像は途中で切れた形で読めて、幅も
+       高さもマスの数もそれらしい数字になって出てくる。社長は無い宿題を抱える */
+    if (knockOn) {
+      lines.push(`[フォント] ${it.name}: **読んでいません**。` + knockOn);
+      lines.push("  マスの数と、文字表の 2 枚目が要るかどうかは**ここでは決めません** "
+        + "(上の 1 つを直してから、もう一度診てください)");
+      skipped.push("フォントの画像の読み (上の → を先に直してから、もう一度診てください)");
+      continue;
+    }
     /* 見出しの検証は画素の長さまで見るので、ファイル全体を読む (フォントは数百 KB) */
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, Math.min(it.len, 4 * 1024 * 1024));
     const at = findTim2(bytes);

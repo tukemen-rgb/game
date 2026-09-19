@@ -8734,36 +8734,21 @@ class TestAShakyIndexReadIsOneCauseToo(unittest.TestCase):
     無事なのに何時間もかけて取り直させる。「並びが違うだけ」も誤り。
     """
 
-    @staticmethod
-    def shaky(folder: str) -> None:
-        """レコードの長さの欄を小さくして、索引の読み方が外れた形にする.
-
-        **中身は空にしない** —— 空にすると #265 の「中身が空」の話になって、
-        ここで見たい「読めるのに読み方が違う」形でなくなる。
-        """
-        import struct
-        import boku2
-        path = os.path.join(folder, "BOKU2.IDX")
-        with open(path, "rb") as fh:
-            idx = bytearray(fh.read())
-        n = (boku2.dfi_rec_end(bytes(idx)) - 16) // 16
-        for i in range(n):
-            at = 16 + i * 16
-            ln = struct.unpack_from("<I", idx, at + 12)[0]
-            if ln:
-                struct.pack_into("<I", idx, at + 12, max(16, ln // 40))
-        with open(path, "wb") as fh:
-            fh.write(bytes(idx))
-
     @classmethod
     def said(cls) -> str:
+        """`--break length` (レコードの長さの欄を 1/40 にする) で診た結果.
+
+        **中身は空にしない** —— 空にすると #265 の「中身が空」の話になって、
+        ここで見たい「読めるのに読み方が違う」形でなくなる。壊し方は
+        `make_boku2_sample.DAMAGE` に置いた (社長も練習で通れる道にする)。
+        """
         import io
         import boku2
         import make_boku2_sample
         with tempfile.TemporaryDirectory() as tmp:
             folder = os.path.join(tmp, "S")
             make_boku2_sample.build_sample(folder)
-            cls.shaky(folder)
+            make_boku2_sample.damage(folder, "length")
             out = io.StringIO()
             boku2.check(folder, out=out)
             return out.getvalue()
@@ -8823,11 +8808,58 @@ class TestAShakyIndexReadIsOneCauseToo(unittest.TestCase):
         self.assertEqual(rc, 0, f"普通の吸い出しで問題ありになった\n{said[-600:]}")
         self.assertNotIn(boku2.KNOCK_ON_TAIL, said, "原因が無いのに「そこから来ている」と言っている")
 
+    def test_the_font_section_does_not_make_numbers_up(self):
+        """**フォントの段が、切れた画像から数を作らない**こと (#267).
+
+        索引の読み方が外れていると、フォントの画像は**途中で切れた形**で読める。
+        今までは「マスは 92 個」「1564 字ぶん足りないので、残りは別の画像に
+        あります」「続きが見つかりませんでした」「診ていない段: 文字表の 2 枚目
+        (残り 1564 字)」まで出ていた。**全部この索引のせいで、どれも実物の話では
+        ない。** 社長は「2 枚目を探す」という無い宿題を抱える。
+        """
+        import boku2
+        said = self.said()
+        # 前提: フォントの画像は見つかっていること (見つからない形で試しても意味が無い)
+        line = next((ln for ln in said.splitlines() if ln.startswith("[フォント]")), "")
+        self.assertTrue(line, "フォントの段が出ていない")
+        self.assertIn("読んでいません", line, f"まだ読んでいます: {line[:100]}")
+        self.assertIn(boku2.SHAKY_INDEX_KNOCK_ON, line, f"原因を指していません: {line[:140]}")
+        for made_up in ("マスは", "字ぶん足りないので", "ドット / ",
+                        boku2.FONT_HUNT_NONE.strip(), "文字表の 2 枚目 (残り"):
+            self.assertTrue(made_up not in said,
+                            f"切れた画像から数を作っています: {made_up}")
+        # 黙って飛ばさず、**飛ばしたと言う**こと
+        self.assertTrue("ここでは決めません" in said, "何を決めなかったのかを言っていない")
+        self.assertTrue("フォントの画像の読み" in said, "診ていない段に出ていない")
+
+    def test_a_healthy_dump_still_counts_the_cells(self):
+        """**普通の吸い出しでは、今までどおりマスを数える**こと (止めすぎていない)."""
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            said = out.getvalue()
+        # 練習データは頁が 2 枚あるので「このファイルの頁は 2 枚、マスは … = N 個」。
+        # assertIn は落ちたとき全文を吐くので、判定は assertTrue で書く
+        self.assertTrue("マスは" in said and "字ぶん足りないので" in said,
+                        f"マスを数えなくなりました\n{said[-600:]}")
+
     def test_the_screen_says_the_same_thing(self):
         import boku2
         with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
             ui = fh.read()
         self.assertTrue(boku2.KNOCK_ON_TAIL in ui, "web/app.js に同じ後ろ半分が無い")
+        self.assertTrue("マスの数と、文字表の 2 枚目が要るかどうかは**ここでは決めません**" in ui,
+                        "画面のフォントの段が、切れた画像から数を作り続けています")
+        # **言葉があるだけでは足りない** —— それが `knockOn` の道に繋がっていること。
+        # 言葉だけを見ていたら、画面側を `if (false)` に変えても気づかなかった
+        self.assertTrue("if (knockOn) {\n      lines.push(`[フォント] ${it.name}: "
+                        "**読んでいません**。` + knockOn);" in ui,
+                        "画面のフォントの段が、原因があっても画像を読みにいきます")
         self.assertTrue("索引が本体の N% しか指していません" in ui,
                         "web/app.js に索引の言葉が無い")
         self.assertTrue("この先の診断 (検査値・.msg・入れ物・フォント) は当てになりません" in ui,
@@ -10073,15 +10105,13 @@ class TestEverySharedJudgementIsReached(unittest.TestCase):
     """
 
     #: `check` からは呼ばれないと分かっているもの と、**その理由**。
-    #: 理由の書けるものだけをここに置く (ONLY_CLI と同じ決まり)
-    NOT_FROM_CHECK = {
-        "block_stats":
-            "`guess_kind_note` の最後の枝 (先頭が知らない形で、中身の性質でしか"
-            "言えないとき) からしか呼ばれない。練習データの `.msg` は 56〜80 バイト"
-            "しかなく、この分類は `tile` (言うことなし) にしかならないので、"
-            "実物でしか通らない。枝そのものは "
-            "test_the_unreadable_bytes_are_named_when_they_can_be が直接見ている",
-    }
+    #: 理由の書けるものだけをここに置く (ONLY_CLI と同じ決まり)。
+    #:
+    #: **いまは空**。`block_stats` を「実物でしか通らない」として逃がしていたが、
+    #: #267 で `--break length` (索引のレコードの長さの欄を小さくする) を足したら
+    #: 通った —— 切れた `.msg` は「先頭が知らない形で、中身の性質でしか言えない」
+    #: そのものだった。**逃がした理由は、材料が足りないだけのことが多い** (#190)
+    NOT_FROM_CHECK: dict[str, str] = {}
 
     @staticmethod
     def _camel(name: str) -> list:
@@ -10182,6 +10212,9 @@ class TestDamageDrill(unittest.TestCase):
         "crc": "検査値が 1 件合いません",
         # 2 か所に書いてある名前が食い違う形 (#241)
         "crcname": "名前が 1 件食い違います",
+        # **索引の読み方そのものが外れている形** (#266/#267)。吸い出しは無事なので
+        # 取り直しても直らない。この先の段が黙るかどうかは TestAShakyIndexRead… が見る
+        "length": "しか指していません",
     }
 
     def test_each_damage_kind_is_diagnosed(self):
