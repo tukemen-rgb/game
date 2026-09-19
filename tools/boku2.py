@@ -2673,14 +2673,6 @@ def check(folder: str, out=sys.stdout) -> int:
         if not found:
             container_by_shape = True
             shaped_containers = pick_by_shape(img, entries, lambda b: parse_map(b) is not None)
-        if found or not container_by_shape:
-            say(f"[入れ物] 文言の入れ物: あり {', '.join(found) or 'なし'}"
-                + (f" / 見つからない {', '.join(missing)}" if missing else ""))
-        else:
-            say(f"[入れ物] 名前で拾える文言の入れ物はありません ({', '.join(TEXT_CONTAINERS)})。"
-                f"**中身の形**で探すと {len(shaped_containers)} 件"
-                + (f" (例: {', '.join(e['path'] for e in shaped_containers[:4])})"
-                   if shaped_containers else ""))
         if not msgs and not shaped_containers:
             problems += 1
             say("→ 本文の入っていそうなファイルが 1 つも見つかりません。"
@@ -2743,11 +2735,25 @@ def check(folder: str, out=sys.stdout) -> int:
                 # **中身が空なら、読めないのは当たり前** (#265)。blame が外す
                 problems += blame(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト "
                                   f"{head.hex(' ').upper()}{guess_kind_note(head, body)}")
+        # **見出しは、その下の行の持ち主でなければならない** (#270)。この見出しは
+        # 長らく `.msg` の数の行と統計の行の**あいだ**にあったので、
+        # 「先頭 30 件のうち読めた形: 12 件」「位置表の長さの欄: …」という
+        # `.msg` の数が、4 個しかない入れ物の見出しの下に並んでいた。
+        # 実物は `.msg` が何百件もあるので、数がまるで合わない
+        if found or not container_by_shape:
+            say(f"[入れ物] 文言の入れ物: あり {', '.join(found) or 'なし'}"
+                + (f" / 見つからない {', '.join(missing)}" if missing else ""))
+        else:
+            say(f"[入れ物] 名前で拾える文言の入れ物はありません ({', '.join(TEXT_CONTAINERS)})。"
+                f"**中身の形**で探すと {len(shaped_containers)} 件"
+                + (f" (例: {', '.join(e['path'] for e in shaped_containers[:4])})"
+                   if shaped_containers else ""))
         # **入れ物 (日記・保存画面・出来事・釣り) の文言も数に入れる** (#231)。
         # 名前で拾えたときは `.msg` に入らないので、そのままだと丸ごと落ちていた
         # (皮肉なことに、名前が読めない吸い出しのほうが多く読めていた)
         box_used: set[int] = set()
         box_bad = 0
+        box_parts = 0                    # 取り出せた部品の数 (#270)
         boxes = ([e for e in entries if plain_name(e["path"]) in TEXT_CONTAINERS]
                  or shaped_containers)
         for e in boxes[:MSG_CHECK_FILES]:
@@ -2756,9 +2762,29 @@ def check(folder: str, out=sys.stdout) -> int:
             # **開いたが読めなかった**のか、**読めたが文字番号が無い**のかを分ける (#251)。
             # `saveload.bin` は中身が Shift-JIS なので、読めていても番号は 0 になる。
             # 「番号が 0」で数えると、そろっている吸い出しでも毎回断ることになる
-            if parse_map(raw) is None:
+            parts = parse_map(raw)
+            if parts is None:
                 box_bad += 1
+            else:
+                box_parts += len(parts)
             box_used |= used_numbers_of(raw, e["path"])
+        # **数を出して、判定まで言う** (#270)。ここは長らく見出しと名前だけで、
+        # **読めたかどうかを一度も言っていなかった** —— `[MAP]` の段が
+        # 「入れ物として読めた N 件 / 1 番が会話だった N 件」と言い、0 なら →
+        # を出すのと比べて、同じ入れ物なのにこちらだけ黙っていた。
+        # 実物で日記・保存画面の読み方が外れても、この出力では分からない
+        if boxes:
+            looked_boxes = min(MSG_CHECK_FILES, len(boxes))
+            say(f"  入れ物として読めた {looked_boxes - box_bad} 件 / "
+                f"取り出せた部品 {box_parts} 個 / 文字番号が取れた {len(box_used)} 種 "
+                f"(見た {looked_boxes} 件)")
+            if box_bad == looked_boxes:
+                problems += blame(
+                    f"→ 文言の入れ物が 1 つも読めません ({looked_boxes} 件見ました)。"
+                    "日記・保存画面・出来事・釣りの文言はこの入れ物から取り出すので、"
+                    "ここが読めないとその分が丸ごと落ちます。入れ物の読み方 "
+                    f"(先頭の項目数 + {MAP_ENTRY}/{MAP_ENTRY_ALT} バイト刻みの位置表) が"
+                    "この作品では違うかもしれません。この行ごと報告してください")
         map_used = m["used"] if m else set()
         used_here = msg_used | box_used | map_used
         # **診ていない所があるなら、いちばん大きい番号は本文ぜんぶの数ではない** (#234)。

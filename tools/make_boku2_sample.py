@@ -347,6 +347,10 @@ DAMAGE = {
     # **索引の読み方そのものが外れている形** (#266/#267)。吸い出しは無事なので
     # 取り直しても直らない。この先の段が「それらしい数」を自信たっぷりに出す
     "length": "索引のレコードの長さの欄を小さくする (索引が本体をほとんど指さない)",
+    # **文言の入れ物 (日記・保存画面・出来事・釣り) が読めない形** (#270)。
+    # `.msg` も MAP も無事なので、ここだけが落ちる。壊し方が索引・本体・MAP に
+    # 寄っていて、この段を通る形が 1 つも無かった
+    "box": "文言の入れ物 (diary.bin など) の中身を潰す (入れ物として読めない)",
 }
 
 
@@ -378,6 +382,22 @@ def damage(out_dir: str, kind: str) -> str:
             fh.seek(rec_end)
             fh.write(b"\xff" * (len(idx) - rec_end))
         return f"BOKU2.IDX の名前の置き場 (0x{rec_end:X} から最後まで) を FF で埋めた"
+    if kind == "box":
+        # **入れ物として読めない形にする。** 先頭の項目数だけを壊しても
+        # `map_rec_derived_count` が拾い直すので (公開ソースの読み方の控え)、
+        # 位置表ごと潰す。`.msg` と MAP は触らない
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import boku2 as _b
+        with open(img_path, "r+b") as fh:
+            img = bytearray(fh.read())
+            hit = []
+            for e in _b.read_dfi(idx, len(img)):
+                if _b.plain_name(e["path"]) in _b.TEXT_CONTAINERS:
+                    img[e["at"]:e["at"] + min(e["len"], 256)] = b"\xEE" * min(e["len"], 256)
+                    hit.append(os.path.basename(e["path"]))
+            fh.seek(0)
+            fh.write(bytes(img))
+        return f"BOKU2.IMG の文言の入れ物 {len(hit)} 件 ({', '.join(hit)}) の先頭を EE で埋めた"
     if kind == "length":
         # **中身は無事なまま、読み方だけを外す。** 長さの欄を 1/40 にすると、
         # 索引が本体のごく一部しか指さなくなる —— 切り分けた中身は「途中で

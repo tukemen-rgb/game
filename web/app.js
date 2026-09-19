@@ -3806,6 +3806,11 @@ function crc16Ccitt(b) {
 /** 検査値が合わなかったファイルを名前で何件まで挙げるか (#261。CLI の CRC_BAD_SHOWN) */
 const CRC_BAD_SHOWN = 5;
 
+/** 入れ物の項目の刻み (#270。CLI の MAP_ENTRY / MAP_ENTRY_ALT と同じ数)。
+ *  8 が普通、12 は日記・保存画面など。要約の文にこの数が出る */
+const MAP_ENTRY = 8;
+const MAP_ENTRY_ALT = 12;
+
 /** 原因が 1 つ上にあると分かっている行に添える言葉の後ろ半分
  *  (#265/#266。tools/boku2.py の KNOCK_ON_TAIL と 1 字そろえる) */
 const KNOCK_ON_TAIL = " —— 直すのはその 1 つなので、別の確認事項として数えていません";
@@ -4461,14 +4466,6 @@ async function buildIdxReport() {
     containerByShape = true;
     shapedContainers = await pickByShape((b) => !!parseBokuMap(b));
   }
-  if (found.length || !containerByShape) {
-    lines.push(`[入れ物] 文言の入れ物: あり ${found.join(", ") || "なし"}` + (missing.length ? ` / 見つからない ${missing.join(", ")}` : ""));
-  } else {
-    lines.push(`[入れ物] 名前で拾える文言の入れ物はありません (${CONTAINERS.join(", ")})。`
-      + `**中身の形**で探すと ${shapedContainers.length} 件`
-      + (shapedContainers.length
-        ? ` (例: ${shapedContainers.slice(0, 4).map((it) => it.name).join(", ")})` : ""));
-  }
   if (!msgs.length && !shapedContainers.length) {
     problems++;
     lines.push("→ 本文の入っていそうなファイルが 1 つも見つかりません。"
@@ -4531,12 +4528,23 @@ async function buildIdxReport() {
     }
   }
 
+  /* **見出しは、その下の行の持ち主でなければならない** (#270。CLI の check と同じ)。
+     この見出しは長らく .msg の数の行と統計の行のあいだにあったので、.msg の数が
+     4 個しかない入れ物の見出しの下に並んでいた */
+  if (found.length || !containerByShape) {
+    lines.push(`[入れ物] 文言の入れ物: あり ${found.join(", ") || "なし"}` + (missing.length ? ` / 見つからない ${missing.join(", ")}` : ""));
+  } else {
+    lines.push(`[入れ物] 名前で拾える文言の入れ物はありません (${CONTAINERS.join(", ")})。`
+      + `**中身の形**で探すと ${shapedContainers.length} 件`
+      + (shapedContainers.length
+        ? ` (例: ${shapedContainers.slice(0, 4).map((it) => it.name).join(", ")})` : ""));
+  }
   /* **入れ物 (日記・保存画面・出来事・釣り) の文言も数に入れる** (#231)。名前で
      拾えたときは .msg に入らないので、そのままだと丸ごと落ちていた (皮肉なことに、
      名前が読めない吸い出しのほうが多く読めていた)。`.msg` が 1 件も無くても
      ここは診られるので、`.msg` の段の外に置く (CLI の check と同じ) */
   const boxUsed = new Set();
-  let boxBad = 0;
+  let boxBad = 0, boxParts = 0;
   const boxes = found.length
     ? items.filter((it) => CONTAINERS.includes(plainName(it.base || it.name)))
     : shapedContainers;
@@ -4544,8 +4552,26 @@ async function buildIdxReport() {
     const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at, it.len);
     /* **開いたが読めなかった**のか、**読めたが文字番号が無い**のかを分ける (#251)。
        saveload.bin は中身が Shift-JIS なので、読めていても番号は 0 になる */
-    if (!parseBokuMap(bytes)) boxBad++;
+    /* `parseBokuMap` は {items: …} を返す (CLI の `parse_map` は一覧そのもの)。
+       **数えるのは項目の数**で、両側で同じ数にそろえる (#270) */
+    const parts = parseBokuMap(bytes);
+    if (!parts) boxBad++; else boxParts += parts.items.length;
     for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) boxUsed.add(c);
+  }
+  /* **数を出して、判定まで言う** (#270)。ここは長らく見出しと名前だけで、
+     読めたかどうかを一度も言っていなかった (CLI の check と 1 字そろえる) */
+  if (boxes.length) {
+    const lookedBoxes = Math.min(MSG_CHECK_FILES, boxes.length);
+    lines.push(`  入れ物として読めた ${lookedBoxes - boxBad} 件 / `
+      + `取り出せた部品 ${boxParts} 個 / 文字番号が取れた ${boxUsed.size} 種 `
+      + `(見た ${lookedBoxes} 件)`);
+    if (boxBad === lookedBoxes) {
+      problems += blame(`→ 文言の入れ物が 1 つも読めません (${lookedBoxes} 件見ました)。`
+        + "日記・保存画面・出来事・釣りの文言はこの入れ物から取り出すので、"
+        + "ここが読めないとその分が丸ごと落ちます。入れ物の読み方 "
+        + `(先頭の項目数 + ${MAP_ENTRY}/${MAP_ENTRY_ALT} バイト刻みの位置表) が`
+        + "この作品では違うかもしれません。この行ごと報告してください");
+    }
   }
   const usedHere = new Set([...msgUsed, ...boxUsed, ...mapScan.used]);
   /* 番号が文字表に収まらないか (#269)。下の [文字表] の助言がこれで変わる */

@@ -8732,6 +8732,101 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestTheTextContainersGetAVerdictToo(unittest.TestCase):
+    """**文言の入れ物の段にも、読めたかどうかを言わせる** (#270).
+
+    #269 の宿題は「`--break` に無い形で残りの段を潰しながら出力を読む」でした。
+    文言の入れ物 (日記・保存画面・出来事・釣り) の段を読んで、2 つ出てきました。
+
+    1. **見出しが、その下の行の持ち主ではなかった。**
+
+           .msg: 4 件 (例: system.msg, …)
+           [入れ物] 文言の入れ物: あり diary.bin, saveload.bin, on_mem_event.bin, fish_on_mem.bin
+             先頭 4 件のうち読めた形: 4 件
+             位置表の長さの欄: 合う 4 件 / 合わない 0 件
+
+       字下げの 2 行は **`.msg` の数**なのに、4 個しかない入れ物の見出しの下に
+       並んでいました。練習データは `.msg` も 4 件なので気づけませんが、実物は
+       `.msg` が何百件もあるので「先頭 30 件のうち…」が入れ物 4 個の下に出ます。
+
+    2. **入れ物が読めたかどうかを、一度も言っていなかった。** `[MAP]` の段は
+       「入れ物として読めた N 件 / 1 番が会話だった N 件」と言い、0 なら `→` を
+       出します。**同じ入れ物なのに、こちらだけ黙っていた** —— 実物で日記・
+       保存画面の読み方が外れても、この出力からは分かりません。
+    """
+
+    @staticmethod
+    def said(kind=None) -> str:
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            if kind:
+                make_boku2_sample.damage(folder, kind)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_the_msg_numbers_are_under_the_msg_heading(self):
+        rows = self.said().splitlines()
+        def at(head):
+            return next(i for i, ln in enumerate(rows) if ln.startswith(head))
+        msg_head = at(".msg: ")
+        box_head = at("[入れ物]")
+        read_line = next(i for i, ln in enumerate(rows) if "件のうち読めた形" in ln)
+        self.assertLess(msg_head, read_line,
+                        "「読めた形」が .msg の見出しより前にあります")
+        self.assertLess(read_line, box_head,
+                        "`.msg` の数が [入れ物] の見出しの下に並んでいます:\n  "
+                        + "\n  ".join(rows[msg_head:box_head + 1]))
+
+    def test_the_containers_say_whether_they_were_read(self):
+        line = next((ln for ln in self.said().splitlines()
+                     if "入れ物として読めた" in ln and ln.startswith("  ")), "")
+        self.assertTrue(line, "入れ物が読めたかどうかを言っていません")
+        for want in ("入れ物として読めた 4 件", "取り出せた部品", "文字番号が取れた",
+                     "見た 4 件"):
+            self.assertIn(want, line, f"「{want}」が出ていない: {line}")
+
+    def test_unreadable_containers_are_a_finding(self):
+        """`--break box` で、段まるごと 0 件が `→` になること (#176 と同じ決まり)."""
+        said = self.said("box")
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("→ 文言の入れ物が 1 つも読めません")), "")
+        self.assertTrue(line, f"0 件なのに黙っています\n{said[-900:]}")
+        self.assertIn("8/12 バイト刻み", line, f"読み方を言っていない: {line}")
+        self.assertIn("入れ物として読めた 0 件", said, "数のほうが言えていません")
+        # **ほかの段は無事**であること (入れ物だけを潰した材料になっている)
+        self.assertIn("[MAP] 2 件 / 入れ物として読めた 2 件 / 1 番が会話だった 2 件", said,
+                      "材料が弱い: MAP まで壊れています")
+        self.assertNotIn("→ 読めない .msg の例", said, "材料が弱い: .msg まで壊れています")
+
+    def test_a_healthy_dump_has_no_container_finding(self):
+        said = self.said()
+        self.assertNotIn("文言の入れ物が 1 つも読めません", said,
+                         "読めているのに → を出しています")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue("→ 文言の入れ物が 1 つも読めません" in ui,
+                        "画面が入れ物について黙っています")
+        self.assertTrue("if (boxBad === lookedBoxes) {" in ui,
+                        "画面が 0 件のときに → を出す道を持っていません")
+        # 刻みの数が 2 か所でずれていないこと (文にこの数が出る)
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        for name, value in (("MAP_ENTRY", boku2.MAP_ENTRY),
+                            ("MAP_ENTRY_ALT", boku2.MAP_ENTRY_ALT)):
+            self.assertTrue(f"const {name} = {value};" in ui,
+                            f"web/app.js の {name} が {value} と違う")
+
+
 class TestTheToolSaysOnlyWhatItKnows(unittest.TestCase):
     """**分かったこと以上を言わないこと** (#269).
 
@@ -10478,6 +10573,9 @@ class TestDamageDrill(unittest.TestCase):
         # **索引の読み方そのものが外れている形** (#266/#267)。吸い出しは無事なので
         # 取り直しても直らない。この先の段が黙るかどうかは TestAShakyIndexRead… が見る
         "length": "しか指していません",
+        # **文言の入れ物だけが読めない形** (#270)。ここは長らく見出しと名前
+        # だけで、読めたかどうかを一度も言っていなかった
+        "box": "文言の入れ物が 1 つも読めません",
     }
 
     def test_each_damage_kind_is_diagnosed(self):
