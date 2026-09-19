@@ -7140,6 +7140,160 @@ class TestEveryAskToReportIsCounted(unittest.TestCase):
         self.assertEqual(self.orphan_asks(under), [], self.orphan_asks(under))
 
 
+class TestNamesComeOutEvenWhenTheOrderDiffers(unittest.TestCase):
+    """**並び順に頼らない引き当てを足す** (#252).
+
+    公開ソース `UNPACK.py` の `getCRCdict` をもう一度読んだら、向こうは
+    検査値ファイルの**並び順をまったく当てにしていなかった** —— ディスクの
+    ファイルを 1 つずつ見て、同じ名前の項目を全部試し、検査値が合ったものを採る。
+
+    こちらは「同じ順番なら」しか見ておらず、並びが違うと **20 件のうち 20 件を
+    捨てて**「1 件も当たりませんでした」で終わっていた。社長の実物は索引の名前が
+    読めない吸い出しなので、そこで諦めると名前を得る道が完全に閉じる。
+    """
+
+    @staticmethod
+    def reversed_crc(folder: str, out_path: str) -> str:
+        """検査値ファイルの**名前の並びだけ**を逆順にする.
+
+        検査値の番号は各項目が持っているので、中身 (名前 ↔ 検査値の対応) は
+        壊れない。壊れるのは「索引の N 番目 = 検査値ファイルの N 番目」だけ。
+        """
+        import struct
+        import boku2
+        with open(os.path.join(folder, "BOKU2.CRC"), "rb") as fh:
+            raw = bytearray(fh.read())
+        n, dir_start = struct.unpack_from("<5I", raw, 0)[:2]
+        e = boku2.CRC_ENTRY
+        items = [bytes(raw[dir_start + i * e: dir_start + (i + 1) * e]) for i in range(n)]
+        for i, it in enumerate(reversed(items)):
+            raw[dir_start + i * e: dir_start + (i + 1) * e] = it
+        with open(out_path, "wb") as fh:
+            fh.write(raw)
+        return out_path
+
+    def test_names_are_found_even_when_the_order_differs(self):
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            crc_path = self.reversed_crc(folder, os.path.join(tmp, "rev.crc"))
+            make_boku2_sample.damage(folder, "allnames")     # 索引の名前は読めない
+            out = os.path.join(tmp, "OUT")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                n, _u, _d, paths = boku2.unpack(
+                    os.path.join(folder, "BOKU2.IDX"), os.path.join(folder, "BOKU2.IMG"),
+                    out, crc_path)
+            named = [p for p in paths if not p.startswith("#")]
+            self.assertTrue(named, f"並びが違うだけで 1 件も名前が付かない: {paths}")
+            # 中身から引き当てているので、名前は正しいものになっているはず
+            self.assertIn("system.msg", named, sorted(named))
+            self.assertIn("bk_font.tms", named, sorted(named))
+            self.assertIn("並び順ではなく中身の検査値から", err.getvalue(), err.getvalue())
+
+    def test_a_checksum_shared_by_two_names_gets_no_name(self):
+        """**当てずっぽうでは名前を付けない。** 練習データの写真 8 枚は先頭 128
+        バイトがそっくりなので検査値が同じ。どの名前か決められない."""
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            with open(os.path.join(folder, "BOKU2.CRC"), "rb") as fh:
+                crc = boku2.read_crc_file(fh.read())
+            by_value = boku2.crc_name_by_value(crc)
+            # **材料が弱くないこと**: 同じ検査値を持つ名前が本当に 2 つ以上ある
+            shared = [n for i, n in enumerate(crc["names"])
+                      if n and crc["crcs"][crc["slots"][i]] not in by_value]
+            self.assertGreaterEqual(len(shared), 2,
+                                    f"材料が弱い: 検査値がぶつかる名前が {shared}")
+            for name in shared:
+                self.assertNotIn(name, by_value.values(), name)
+
+    def test_the_order_road_is_used_first_when_it_works(self):
+        """並びが合っているときは、**位置も中身も合った**ほうで数えること
+        (裏付けの強さが違うので、混ぜると弱いほうに引きずられる)."""
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            with open(os.path.join(folder, "BOKU2.CRC"), "rb") as fh:
+                crc = boku2.read_crc_file(fh.read())
+            idx_path = os.path.join(folder, "BOKU2.IDX")
+            with open(idx_path, "rb") as fh:
+                entries = boku2.read_dfi(fh.read(),
+                                         os.path.getsize(os.path.join(folder, "BOKU2.IMG")))
+            with open(os.path.join(folder, "BOKU2.IMG"), "rb") as img:
+                _named, hit, _bumped, by_content = boku2.names_from_crc(crc, entries, img)
+            self.assertEqual(hit, len(entries), "そろっているのに位置で当たっていない")
+            self.assertEqual(by_content, 0,
+                             "位置で当たったものまで中身の引き当てに数えている")
+
+    def test_check_tells_a_wrong_split_from_a_different_order(self):
+        """**直し方がまったく違う 2 つ**を、同じ 1 行で終わらせない."""
+        import subprocess
+        import make_boku2_sample
+
+        def check(folder: str) -> str:
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                                "check", folder], capture_output=True, text=True, cwd=REPO)
+            return r.stdout + r.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. 並びが違うだけ → 「位置は合っている」と言い、打つコマンドを出す
+            a = os.path.join(tmp, "REV")
+            make_boku2_sample.build_sample(a)
+            self.reversed_crc(a, os.path.join(a, "BOKU2.CRC"))
+            said = check(a)
+            crc_line = next(l for l in said.splitlines() if "先頭 128 バイトの検査値が" in l)
+            self.assertIn("検査値ファイルの並びが索引と違う", crc_line, crc_line)
+            self.assertIn("--names-from-crc", said, said[-900:])
+            self.assertNotIn("切り分けの位置がずれている", crc_line, crc_line)
+
+            # 2. 中身が空 → 「切り分けの位置そのもの」がずれている
+            b = os.path.join(tmp, "EMPTY")
+            make_boku2_sample.build_sample(b)
+            make_boku2_sample.damage(b, "empty")
+            said = check(b)
+            crc_line = next(l for l in said.splitlines() if "先頭 128 バイトの検査値が" in l)
+            self.assertIn("切り分けの位置がずれている", crc_line, crc_line)
+            self.assertNotIn("検査値ファイルの並びが索引と違う", crc_line, crc_line)
+
+    def test_the_two_sides_look_names_up_the_same_way(self):
+        import json
+        import shutil
+        import subprocess
+        import boku2
+        import make_boku2_sample
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            with open(os.path.join(folder, "BOKU2.CRC"), "rb") as fh:
+                crc = boku2.read_crc_file(fh.read())
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        i = app.find("function crcNameByValue(")
+        self.assertGreater(i, 0, "app.js に crcNameByValue が無い")
+        src = app[i:app.index("\n}\n", i) + 3]
+        arg = json.dumps({"names": crc["names"], "slots": crc["slots"], "crcs": crc["crcs"]})
+        res = subprocess.run(
+            [node, "-e", src + f"const m=crcNameByValue({arg});"
+                               "console.log(JSON.stringify([...m.entries()].sort()));"],
+            capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        want = sorted([v, n] for v, n in boku2.crc_name_by_value(crc).items())
+        self.assertEqual(json.loads(res.stdout), want)
+        # **0 件で緑にしない**
+        self.assertGreaterEqual(len(want), 5, f"引き当て表が {len(want)} 件しかない")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 

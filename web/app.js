@@ -3799,6 +3799,25 @@ function crc16Ccitt(b) {
  * 見出し 20 バイト (u32 × 5): 項目数 / 名前の並びの位置 / 名前の並びの長さ /
  * 検査値の並びの位置 / 検査値の並びのバイト長。
  */
+/** **検査値 → 名前**の引き当て表 (#252)。tools/boku2.py の crc_name_by_value と同じ。
+    公開ソースの getCRCdict は検査値ファイルの並び順をまったく当てにしていない。
+    同じ検査値に違う名前が来たら、その検査値は引き当てに使わない
+    (先頭 0x80 バイトがそっくりなファイルは実在する。当てずっぽうで名前を付けない) */
+function crcNameByValue(crc) {
+  const by = new Map(), split = new Set();
+  for (let i = 0; i < crc.names.length; i++) {
+    const name = crc.names[i];
+    if (!name) continue;
+    const slot = i < crc.slots.length ? crc.slots[i] : i;
+    if (slot >= crc.crcs.length) continue;
+    const value = crc.crcs[slot];
+    if (by.has(value) && by.get(value) !== name) split.add(value);
+    else if (!by.has(value)) by.set(value, name);
+  }
+  for (const v of split) by.delete(v);
+  return by;
+}
+
 function readCrcFile(b) {
   if (b.length < 20) return null;
   const n = u32le(b, 0), dirStart = u32le(b, 4), dirSize = u32le(b, 8);
@@ -4188,6 +4207,11 @@ async function buildIdxReport() {
       }
       const idxNamesOk = (c.named_ok ?? items.length) >= items.length * 0.9;
       let crcOk = 0, crcNg = 0, crcBad = null;
+      /* 合わなかった分の検査値が、検査値ファイルの**どこかに**あるか (#252)。
+         あるなら中身は取れていて並びだけが違う (CLI の crc_report と同じ判定) */
+      const crcTable = new Set(crc.crcs);
+      const crcByValue = crcNameByValue(crc);
+      let badInTable = 0, nameable = 0;
       for (let i = 0; i < Math.min(items.length, CRC_CHECK_FILES); i++) {
         const slot = i < crc.slots.length ? crc.slots[i] : i;
         if (slot >= crc.crcs.length) continue;
@@ -4198,6 +4222,8 @@ async function buildIdxReport() {
         if (got === crc.crcs[slot]) crcOk++;
         else {
           crcNg++;
+          if (crcTable.has(got)) badInTable++;
+          if (crcByValue.has(got)) nameable++;
           if (!crcBad) crcBad = { name: it.name, got, want: crc.crcs[slot] };
         }
       }
@@ -4250,11 +4276,27 @@ async function buildIdxReport() {
         }
       } else {
         problems++;
-        lines.push(`→ 切り分けた先頭 ${CRC_HEAD} バイトの検査値が ${crcNg.toLocaleString()} 件合いません `
-          + `(合う ${crcOk.toLocaleString()} 件 / 見た ${looked.toLocaleString()} 件)。`
-          + `例: ${crcBad.name} はこちら 0x${hex(crcBad.got, 4)} / `
-          + `検査値ファイル 0x${hex(crcBad.want, 4)}。`
-          + "切り分けの位置がずれている疑いがあります。この行ごと報告してください");
+        /* **「位置がずれている」と「並び順が違うだけ」を分ける** (#252)。直し方が
+           まったく違う —— 前者は索引の読み方をやり直す話、後者はこのまま名前が付く話 */
+        if (crcNg * 2 > looked && badInTable * 2 >= crcNg) {
+          lines.push(`→ 切り分けた先頭 ${CRC_HEAD} バイトの検査値が ${crcNg.toLocaleString()} 件合いませんが、`
+            + `合わなかった分の検査値は検査値ファイルの中に ${badInTable.toLocaleString()} 件`
+            + `**見つかります** (合う ${crcOk.toLocaleString()} 件 / 見た ${looked.toLocaleString()} 件)。`
+            + `例: ${crcBad.name} はこちら 0x${hex(crcBad.got, 4)} / `
+            + `同じ順番の検査値ファイルは 0x${hex(crcBad.want, 4)}。`
+            + "つまり**切り分けの位置は合っていて、検査値ファイルの並びが"
+            + "索引と違う**とみられます。この行ごと報告してください");
+          lines.push(`  並びに頼らずに名前を引き当てられるのは ${nameable.toLocaleString()} 件です `
+            + "(同じ検査値の名前が 2 つ以上ある分は引き当てません):");
+          lines.push("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/"
+            + " --names-from-crc 実物/BOKU2.CRC");
+        } else {
+          lines.push(`→ 切り分けた先頭 ${CRC_HEAD} バイトの検査値が ${crcNg.toLocaleString()} 件合いません `
+            + `(合う ${crcOk.toLocaleString()} 件 / 見た ${looked.toLocaleString()} 件)。`
+            + `例: ${crcBad.name} はこちら 0x${hex(crcBad.got, 4)} / `
+            + `検査値ファイル 0x${hex(crcBad.want, 4)}。`
+            + "切り分けの位置がずれている疑いがあります。この行ごと報告してください");
+        }
       }
     }
   }
@@ -5170,24 +5212,32 @@ async function addParts(dataEntry, items, how) {
      合わなければ番号のまま —— 当てずっぽうでは名前を付けない。
      社長の実物は名前が付かない吸い出しだった (docs/09 の #1・#3) ので、
      CLI にだけ逃げ道があって画面に無い、という形にはしない */
-  let crcNamed = 0, crcBumped = 0;
+  let crcNamed = 0, crcBumped = 0, crcByContent = 0;
   if (kids.filter((k) => k.bare).length > kids.length * 0.1) {
     const crcEntry = state.entries.find((e) => /boku2\.crc$/i.test(e.name));
     if (crcEntry) {
       const crc = readCrcFile(await readRange(crcEntry.file, crcEntry.offset, crcEntry.size));
       if (crc) {
         const taken = new Set(kids.map((k) => k.name));
+        const byValue = crcNameByValue(crc);
         for (let i = 0; i < kids.length; i++) {
           const k = kids[i];
-          if (!k.bare || i >= crc.names.length || !crc.names[i]) continue;
-          const slot = i < crc.slots.length ? crc.slots[i] : i;
-          if (slot >= crc.crcs.length) continue;
+          if (!k.bare) continue;
           const head = await readRange(k.file, k.offset, Math.min(k.size, CRC_HEAD));
-          if (crc16Ccitt(head) !== crc.crcs[slot]) continue;
+          const value = crc16Ccitt(head);
+          let base = null;
+          /* 1. 並びが合っているときの当て方 (位置も中身も合う。いちばん強い) */
+          if (i < crc.names.length && crc.names[i]) {
+            const slot = i < crc.slots.length ? crc.slots[i] : i;
+            if (slot < crc.crcs.length && crc.crcs[slot] === value) base = crc.names[i];
+          }
+          /* 2. 並びに頼らない当て方 (#252。CLI の names_from_crc と同じ) */
+          if (base === null && byValue.has(value)) { base = byValue.get(value); crcByContent++; }
+          if (base === null) continue;
           /* **同じ名前がぶつかったら `~2` を付ける** (#245)。検査値ファイルの名前は
              フォルダの付かないファイル名だけなので、別のフォルダの同名ファイルが
              重なる。一括処理ではそのまま**上書き**していた (20 件が 19 件になった) */
-          let want = crc.names[i];
+          let want = base;
           if (taken.has(want)) {
             let n = 2;
             while (taken.has(`${want}~${n}`)) n++;
@@ -5234,6 +5284,8 @@ async function addParts(dataEntry, items, how) {
       + `。中身の見当: ${sniffSummary(kinds)}。`
       + (crcNamed ? `検査値ファイルの名前を ${crcNamed} 件当てました `
                     + `(その項目の先頭 ${CRC_HEAD} バイトの検査値が合ったものだけ)。` : "")
+      + (crcByContent ? `そのうち ${crcByContent} 件は、並び順ではなく中身の検査値から`
+                        + "引き当てました (同じ検査値の名前が 2 つ以上ある項目には名前を付けていません)。" : "")
       + (crcBumped ? `そのうち ${crcBumped} 件は名前がぶつかったので \`~2\` を付けました `
                      + "(検査値ファイルの名前にはフォルダが付かないため)。" : "")
       + (bareCount ? `名前が無い ${bareCount} 件は種類を末尾に付けました。` : "")

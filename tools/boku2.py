@@ -552,18 +552,49 @@ def body_looks_empty(img, entries: list[dict]) -> tuple[int, int]:
     return checked, zero
 
 
-def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int, int]:
-    """検査値ファイルの名前を、切り分けた項目に当てる (#240).
+def crc_name_by_value(crc: dict) -> dict[int, str]:
+    """**検査値 → 名前**の引き当て表 (#252).
 
-    名前の並びと索引の並びが同じ順かどうかは、実物でしか決まらない。だから
-    **1 件ずつ検査値で裏を取る** —— その項目の先頭 0x80 バイトの CRC が、
-    名前が指す検査値と合ったときだけ名前を使う。合わなければ元の名前のまま。
+    公開ソースの `getCRCdict` は、検査値ファイルの並び順を**まったく当てにして
+    いない**。ディスクのファイルを 1 つずつ見て、同じ名前の項目を全部試し、
+    検査値が合ったものを採る。こちらも同じ考え方の表を作っておく。
 
-    合った件数も返す。全部合えば「並びが同じ」という強い裏付けになり、
-    1 件も合わなければ並びが違う (名前は使えない) と分かる。
+    同じ検査値に**違う名前**が来たら、その検査値は引き当てに使わない
+    (先頭 0x80 バイトがそっくりなファイルは実在する。当てずっぽうで名前を付けない)。
+    """
+    by: dict[int, str | None] = {}
+    for i, name in enumerate(crc["names"]):
+        if not name:
+            continue
+        slot = crc["slots"][i] if i < len(crc["slots"]) else i
+        if slot >= len(crc["crcs"]):
+            continue
+        value = crc["crcs"][slot]
+        if value in by and by[value] != name:
+            by[value] = None                   # 名前が割れた → 決められない
+        else:
+            by.setdefault(value, name)
+    return {v: n for v, n in by.items() if n}
+
+
+def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int, int, int]:
+    """検査値ファイルの名前を、切り分けた項目に当てる (#240・#252).
+
+    当て方は 2 通りあり、**強いほうから順に**試す:
+
+    1. **並びが合っているときの当て方**。その項目の先頭 0x80 バイトの CRC が、
+       同じ順番の名前が指す検査値と合えば、位置と中身の両方が合ったことになる。
+       いちばん強い裏付け。
+    2. **並びに頼らない当て方** (#252。公開ソース `getCRCdict` と同じ考え方)。
+       中身の検査値から名前を引く。**その検査値を持つ名前が 1 つに決まるときだけ**
+       使う。1 の並びが違っていても名前は出せる —— 今まではここで諦めて
+       「1 件も当たりませんでした」と言い、**20 件のうち 20 件を捨てていた**。
+
+    @returns (名前を当てた一覧, 1 で当てた数, `~2` を付けた数, 2 で当てた数)
     """
     named: list = []
-    hit = bumped = 0
+    hit = bumped = by_content = 0
+    by_value = crc_name_by_value(crc)
     # **同じ名前がぶつかったら `~2` を付ける** (#245)。検査値ファイルの名前は
     # フォルダの付かない**ファイル名だけ**なので、実物のように 116 のフォルダに
     # 1951 件あると、別のフォルダの同名ファイルが必ずぶつかる。そのまま使うと
@@ -578,24 +609,29 @@ def names_from_crc(crc: dict, entries: list, img) -> tuple[list, int, int]:
         # 名前が全部変になっていた。しかも `~2` が付くと `.msg` として拾われないので、
         # 本文が丸ごと落ちる (#247 の本題)
         seen.discard(keep)
+        img.seek(e["at"])
+        value = crc16_ccitt(img.read(min(e["len"], CRC_HEAD)))
+        base = None
         if i < len(crc["names"]) and crc["names"][i]:
             slot = crc["slots"][i] if i < len(crc["slots"]) else i
-            if slot < len(crc["crcs"]):
-                img.seek(e["at"])
-                if crc16_ccitt(img.read(min(e["len"], CRC_HEAD))) == crc["crcs"][slot]:
-                    base = crc["names"][i]
-                    folder = os.path.dirname(e["path"])
-                    keep = f"{folder}/{base}" if folder else base
-                    if keep in seen:
-                        n = 2
-                        while f"{keep}~{n}" in seen:
-                            n += 1
-                        keep = f"{keep}~{n}"
-                        bumped += 1
-                    hit += 1
+            if slot < len(crc["crcs"]) and crc["crcs"][slot] == value:
+                base = crc["names"][i]     # 1. 位置も中身も合った
+                hit += 1
+        if base is None and value in by_value:
+            base = by_value[value]         # 2. 中身の検査値から引き当てた
+            by_content += 1
+        if base is not None:
+            folder = os.path.dirname(e["path"])
+            keep = f"{folder}/{base}" if folder else base
+            if keep in seen:
+                n = 2
+                while f"{keep}~{n}" in seen:
+                    n += 1
+                keep = f"{keep}~{n}"
+                bumped += 1
         seen.add(keep)                     # 名前を使わなかったときも枠は戻す
         named.append(dict(e, path=keep))
-    return named, hit, bumped
+    return named, hit, bumped, by_content
 
 
 def unpack(idx_path: str, img_path: str, out_dir: str, crc_path: str | None = None) -> int:
@@ -617,14 +653,22 @@ def unpack(idx_path: str, img_path: str, out_dir: str, crc_path: str | None = No
                   "名前は索引のものを使います", file=sys.stderr)
         else:
             with open(img_path, "rb") as img:
-                entries, hit, bumped = names_from_crc(crc, entries, img)
+                entries, hit, bumped, by_content = names_from_crc(crc, entries, img)
             # **「当てました」と「1 件も当たりませんでした」を同時に言わない** (#247)。
             # 後者は `if bumped:` の else に付いていたので、**全部当たって 1 件も
             # ぶつからなかったとき** —— いちばん良い形 —— に 2 行が食い違っていた
-            if hit:
-                print(f"検査値ファイルの名前を {hit} 件当てました "
+            if hit or by_content:
+                print(f"検査値ファイルの名前を {hit + by_content} 件当てました "
                       f"(その項目の先頭 {CRC_HEAD} バイトの検査値が合ったものだけ)",
                       file=sys.stderr)
+                if by_content:
+                    # **どちらの当て方かで、裏付けの強さが違う** (#252)。並び順まで
+                    # 合っていれば「位置も中身も合った」だが、中身だけで引き当てた分は
+                    # 「その検査値を持つ名前が 1 つしか無かった」という根拠しか無い
+                    print(f"　そのうち {by_content} 件は、**並び順ではなく中身の検査値から"
+                          "引き当てました** (検査値ファイルの並びが索引と違うようです。"
+                          "同じ検査値の名前が 2 つ以上ある項目には名前を付けていません)",
+                          file=sys.stderr)
                 if bumped:
                     # **理由が違うので、索引の名前がぶつかったときとは別に言う** (#245)
                     print(f"注意: そのうち {bumped} 件は名前がぶつかったので `~2` を付けました。"
@@ -632,7 +676,8 @@ def unpack(idx_path: str, img_path: str, out_dir: str, crc_path: str | None = No
                           "別のフォルダの同じ名前が重なります", file=sys.stderr)
             else:
                 print("注意: 検査値ファイルの名前は 1 件も当たりませんでした "
-                      "(並び順が索引と違うようです)。名前は索引のものを使います",
+                      "(並び順でも中身の検査値でも引き当てられませんでした)。"
+                      "名前は索引のものを使います",
                       file=sys.stderr)
     if dupes:
         print(f"注意: 同じ名前が {dupes} 件あり `~2` を付けて区別しました。"
@@ -2055,11 +2100,47 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
                          " --names-from-crc 実物/BOKU2.CRC")
     else:
         problems += 1
-        lines.append(f"→ 切り分けた先頭 {CRC_HEAD} バイトの検査値が {ng:,} 件合いません "
-                     f"(合う {ok:,} 件 / 見た {looked:,} 件)。"
-                     f"例: {first_bad[0]} はこちら 0x{first_bad[1]:04X} / "
-                     f"検査値ファイル 0x{first_bad[2]:04X}。"
-                     "切り分けの位置がずれている疑いがあります。この行ごと報告してください")
+        # **「位置がずれている」と「並び順が違うだけ」を分ける** (#252)。
+        # 今までは同じ 1 行で終わっていたが、直し方がまったく違う ——
+        # 前者は索引の読み方をやり直す話、後者は**このまま名前が付く**話。
+        # 切り分けた中身の検査値が、検査値ファイルの**どこかに**あるなら、
+        # 位置は合っていて並びだけが違う (公開ソース getCRCdict は並びに頼らない)
+        # 合わなかった分だけを見る。**その検査値が表のどこかにある**なら、中身は
+        # 取れていて並びだけが違う。数件しか合わないとき (1 件だけ値が違う等) は
+        # 並びの話ではないので、今までどおりの言い方にする
+        table = set(crc["crcs"])
+        by_value = crc_name_by_value(crc)
+        bad_in_table = nameable = 0
+        for i, e in enumerate(entries[:CRC_CHECK_FILES]):
+            slot = crc["slots"][i] if i < len(crc["slots"]) else i
+            if slot >= len(crc["crcs"]):
+                continue
+            img.seek(e["at"])
+            value = crc16_ccitt(img.read(min(e["len"], CRC_HEAD)))
+            if value == crc["crcs"][slot]:
+                continue
+            if value in table:
+                bad_in_table += 1
+            if value in by_value:
+                nameable += 1
+        if ng * 2 > looked and bad_in_table * 2 >= ng:
+            lines.append(f"→ 切り分けた先頭 {CRC_HEAD} バイトの検査値が {ng:,} 件合いませんが、"
+                         f"合わなかった分の検査値は検査値ファイルの中に {bad_in_table:,} 件"
+                         f"**見つかります** (合う {ok:,} 件 / 見た {looked:,} 件)。"
+                         f"例: {first_bad[0]} はこちら 0x{first_bad[1]:04X} / "
+                         f"同じ順番の検査値ファイルは 0x{first_bad[2]:04X}。"
+                         "つまり**切り分けの位置は合っていて、検査値ファイルの並びが"
+                         "索引と違う**とみられます。この行ごと報告してください")
+            lines.append(f"  並びに頼らずに名前を引き当てられるのは {nameable:,} 件です "
+                         "(同じ検査値の名前が 2 つ以上ある分は引き当てません):")
+            lines.append("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/"
+                         " --names-from-crc 実物/BOKU2.CRC")
+        else:
+            lines.append(f"→ 切り分けた先頭 {CRC_HEAD} バイトの検査値が {ng:,} 件合いません "
+                         f"(合う {ok:,} 件 / 見た {looked:,} 件)。"
+                         f"例: {first_bad[0]} はこちら 0x{first_bad[1]:04X} / "
+                         f"検査値ファイル 0x{first_bad[2]:04X}。"
+                         "切り分けの位置がずれている疑いがあります。この行ごと報告してください")
     return lines, problems
 
 
