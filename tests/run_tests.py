@@ -7812,6 +7812,67 @@ class TestOurFontTableReaderMatchesThePublicOne(unittest.TestCase):
                         f"全角と半角の取り違えが無い: {sorted(pairs)}")
 
 
+class TestOurChecksumMatchesThePublicOne(unittest.TestCase):
+    """**検査値の計算そのものを、公開ソースと突き合わせる** (#257).
+
+    `BOKU2.CRC` は向こうに**読み側しか無い** (`getCRCdict`) ので、書き出させて
+    読み返す形では確かめられない。ただし**検査値を計算する `crc16` は走らせられる**。
+    こちらの `crc16_ccitt` が 1 ビットでも違えば、`check` の「いちばん強い裏付け」
+    (位置も中身も合っている) が丸ごと嘘になる —— **そこだけは自前で持たない**。
+    """
+
+    PUB = "/home/user/hilltopworks/bokunonatsuyasumi2"
+
+    def setUp(self):
+        if not os.path.isdir(self.PUB):
+            self.skipTest("公開ソースが無い")
+
+    @classmethod
+    def their_crc16(cls):
+        with open(os.path.join(cls.PUB, "UNPACK.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        ns = {}
+        i = src.index("def crc16(")
+        exec(src[i:src.index("\ndef ", i + 10)], ns)
+        return ns["crc16"]
+
+    def test_the_two_sides_give_the_same_value(self):
+        import random
+        import boku2
+        their = self.their_crc16()
+        cases = [b"", b"\x00", b"\xff", b"A", b"123456789", bytes(range(256)),
+                 b"\x00" * boku2.CRC_HEAD, b"\xff" * boku2.CRC_HEAD]
+        rnd = random.Random(257)
+        for _ in range(400):
+            n = rnd.choice([0, 1, 7, 16, 63, 64, 127, boku2.CRC_HEAD])
+            cases.append(bytes(rnd.randrange(256) for _ in range(n)))
+        bad = [c for c in cases
+               if boku2.crc16_ccitt(c) != their(bytearray(c), 0, len(c))]
+        self.assertFalse(bad, f"{len(bad)} / {len(cases)} 通りで答えが違う: {bad[:2]}")
+        self.assertGreater(len(cases), 100, "0 件で緑にしない")
+
+    def test_it_is_the_standard_ccitt_false(self):
+        """**知られた検査ベクトルで留める。** 公開ソースが将来変わっても、
+        こちらが何を計算しているかは 1 行で分かる."""
+        import boku2
+        self.assertEqual(boku2.crc16_ccitt(b"123456789"), 0x29B1)
+
+    def test_a_short_file_is_hashed_whole(self):
+        """向こうの `crcFile` は 0x80 に足りないファイルを**その長さで**計算する
+        (#239 でここを間違え、8 件が食い違った)."""
+        import boku2
+        their = self.their_crc16()
+        short = b"abc"
+        self.assertEqual(boku2.crc16_ccitt(short[:min(len(short), boku2.CRC_HEAD)]),
+                         their(bytearray(short), 0, len(short)))
+        long_ = bytes(range(256))
+        self.assertEqual(boku2.crc16_ccitt(long_[:boku2.CRC_HEAD]),
+                         their(bytearray(long_), 0, boku2.CRC_HEAD))
+        # **材料が弱くないこと**: 端を取り違えれば答えは変わる
+        self.assertNotEqual(boku2.crc16_ccitt(long_[:boku2.CRC_HEAD]),
+                            boku2.crc16_ccitt(long_))
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
@@ -15167,6 +15228,25 @@ class TestWhatIsConfirmedHasOneAnswer(unittest.TestCase):
             if row is confirmed[0]:
                 continue
             self.assertIn("| まだ |", row, f"確かめたかどうかが書いていない行: {row}")
+
+    def test_every_row_says_how_far_the_public_source_took_it(self):
+        """**「実物でまだ」の中にも段がある** (#257)。向こうのコードを**走らせて**
+        突き合わせた行と、**読んだだけ**の行は、次の一手がまるで違う。
+        2 値の表にしていたので、#255・#256 で走らせて確かめたことが表に出ず、
+        社長は「全部ただの推定」と読むしかなかった。
+        """
+        rows = [r for r in self.table if not r.startswith("| ---")][1:]
+        levels = ("**走らせて突き合わせた**", "読んだだけ", "| — |")
+        missing = [r[:60] for r in rows if not any(x in r for x in levels)]
+        self.assertFalse(missing, "公開ソースとの突き合わせ方が書いていない行:\n"
+                         + "\n".join(missing))
+        ran = [r for r in rows if "**走らせて突き合わせた**" in r]
+        # **0 件で緑にしない。** 走らせた行が消えたら、それは後退
+        self.assertGreaterEqual(len(ran), 5,
+                                f"走らせて突き合わせた行が {len(ran)} 行しかない")
+        for row in ran:
+            self.assertTrue(re.search(r"#\d+", row),
+                            f"どの回で走らせたのかが書いていない: {row[:60]}")
 
     def test_every_tool_of_the_real_game_is_classified(self):
         """boku2.py に下位コマンドを足したら、この表に載せ忘れない.
