@@ -3839,8 +3839,11 @@ function crcNameOverlap(crc, items) {
 function crcNameOverlapLines(got) {
   const { onlyIndex, onlyCrc, both } = got;
   if (!onlyIndex.length && !onlyCrc.length && both) {
-    return [`   ただし**名前の顔ぶれは同じ** (${both.toLocaleString()} 種類)。`
-      + "並びが違うだけで、**同じディスクのもの**とみてよいです"];
+    /* **分かったこと以上を言わない** (#269。CLI の crc_name_overlap_lines と同じ)。
+       顔ぶれがそろっている事実から言えるのは「別の版ではない」まで。原因が
+       並びかどうかは、ここでは決まらない */
+    return [`   ただし**名前の顔ぶれは同じ** (${both.toLocaleString()} 種類) なので、`
+      + "**別の版ではありません**。食い違いの原因は上の行のほうです"];
   }
   if (!both) {
     return ["   **名前の顔ぶれがまったく重なりません。** 吸い出しと検査値ファイルが"
@@ -4545,6 +4548,8 @@ async function buildIdxReport() {
     for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) boxUsed.add(c);
   }
   const usedHere = new Set([...msgUsed, ...boxUsed, ...mapScan.used]);
+  /* 番号が文字表に収まらないか (#269)。下の [文字表] の助言がこれで変わる */
+  let numsTooBig = false;
   /* **目盛りの緑に、吸い出しぜんぶの分を入れる** (#233)。ここでしか全部の番号は
      分からないので、要約を一度作れば、フォント画像の上で「本文が要る字」が
      まとめて見える。読んだ .msg 1 本ぶんの緑で書き写しを終える事故を防ぐ */
@@ -4571,7 +4576,10 @@ async function buildIdxReport() {
     if (boxBad) unseen.push(`読めなかった入れ物 ${boxBad} 件`);
 
     lines.push(glyphRangeNote(top, unseen.join("と")));
-    if (top >= FONT_GLYPHS) problems++;
+    /* 番号が文字表の字数に収まらない = **読み方そのものが違う** (#230)。
+       そのときは、足りない番号を「書き足す」と言ってはいけない (#269) */
+    numsTooBig = top >= FONT_GLYPHS;
+    if (numsTooBig) problems++;
   }
   /* 文字表の出来具合 (boku2.py check の [文字表] と同じ項目)。「.msg として読む」の欄に貼った文字表を使う */
   const glyphText = $("msgglyphs").value;
@@ -4589,7 +4597,12 @@ async function buildIdxReport() {
          行に残してある (そこは画面にしかない行なので、突き合わせの相手がいない) */
       + { untested: "。文字番号を使っている行が無いので、文字表は試せていない",
           missing: ` (例: ${missing.slice(0, 10).join(" ")}${missing.length > 10 ? " …" : ""})。`
-            + "フォント画像のこの番号を書き足す (docs/10 の手順 3)",
+            /* **書き足せる番号と、書き足せない番号を分ける** (#269。CLI と同じ言葉) */
+            + (numsTooBig
+               ? "**書き足してはいけません。** 1 行上のとおり、この番号は文字表 "
+                 + `${FONT_GLYPHS} 字に収まらないので、**読み方のほうが違います**。`
+                 + "先にそちらを直してください"
+               : "フォント画像のこの番号を書き足す (docs/10 の手順 3)"),
           ok: "。この範囲は全部読める" }[verdict]);
     /* **保存のときに潰れた疑い**があれば、そう言う (#199)。
        一括処理 (boku2.py の ansi_damage) と同じ判定・同じ言葉 */

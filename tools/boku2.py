@@ -2205,8 +2205,13 @@ def crc_name_overlap_lines(got: dict) -> list[str]:
     """`crc_name_overlap` を行にする (#262)。**画面と同じ言葉**にしておくこと."""
     only_i, only_c = got["only_index"], got["only_crc"]
     if not only_i and not only_c and got["both"]:
-        return [f"   ただし**名前の顔ぶれは同じ** ({got['both']:,} 種類)。"
-                "並びが違うだけで、**同じディスクのもの**とみてよいです"]
+        # **分かったこと以上を言わない** (#269)。顔ぶれがそろっている事実から
+        # 言えるのは「別の版ではない」まで。**原因が並びかどうかは、ここでは
+        # 決まらない。** この行は 2 か所から呼ばれていて、片方は 1 行上で
+        # 「切り分けの位置がずれている」「吸い出し直しても直りません」と
+        # 言っている —— そこで「並びが違うだけ」と続けると、2 行で正反対になる
+        return [f"   ただし**名前の顔ぶれは同じ** ({got['both']:,} 種類) なので、"
+                "**別の版ではありません**。食い違いの原因は上の行のほうです"]
     if not got["both"]:
         return ["   **名前の顔ぶれがまったく重なりません。** 吸い出しと検査値ファイルが"
                 "**別のディスクのもの**かもしれません"]
@@ -2781,9 +2786,12 @@ def check(folder: str, out=sys.stdout) -> int:
         # 文字表 (font.txt) がこのフォルダにあれば、その出来具合も診る (docs/10 の手順 3 の途中経過)
         # **使われている文字番号の最大**は、実物で最初に出る大事な数 (#230)。
         # 数字だけ出さず、文字表づくりの段取りが決まる所まで言う
+        #: 番号が文字表の字数に収まらない = **読み方そのものが違う** (#230)。
+        #: そのときは、足りない番号を「書き足す」と言ってはいけない (#269)
+        nums_too_big = bool(used_here) and max(used_here) >= FONT_GLYPHS
         if used_here:
             say(glyph_range_note(max(used_here), "と".join(unseen)))
-            if max(used_here) >= FONT_GLYPHS:
+            if nums_too_big:
                 problems += 1
         font_txt = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "font.txt"), None)
         if font_txt:
@@ -2792,8 +2800,18 @@ def check(folder: str, out=sys.stdout) -> int:
             say(f"[文字表] font.txt: {sum(1 for g in glyphs if g)} 字 / 本文で使われている番号 "
                 f"{len(used_here)} 種 ({' / '.join(used_by)}) のうち"
                 f"文字表に無い {len(missing)} 種"
-                + (f" (例: {' '.join(str(u) for u in missing[:10])}{' …' if len(missing) > 10 else ''})。"
-                   "フォント画像のこの番号を書き足す (docs/10 の手順 3)" if missing
+                + (f" (例: {' '.join(str(u) for u in missing[:10])}"
+                   f"{' …' if len(missing) > 10 else ''})。"
+                   # **書き足せる番号と、書き足せない番号を分ける** (#269)。
+                   # 1 行上で「この読み方そのものが違う」と言っておきながら、
+                   # 32767 のような番号を「フォント画像に書き足す」と言っていた。
+                   # 1656 マスの表に 32767 番のマスは無い。社長はごみを書き写す
+                   + ("**書き足してはいけません。** 1 行上のとおり、この番号は"
+                      f"文字表 {FONT_GLYPHS} 字に収まらないので、**読み方のほうが"
+                      "違います**。先にそちらを直してください"
+                      if nums_too_big
+                      else "フォント画像のこの番号を書き足す (docs/10 の手順 3)")
+                   if missing
                    else "。文字番号を使っている行が無いので、文字表は試せていない" if not used_here
                    else "。この範囲は全部読める"))
             # **保存のときに潰れた疑い**があれば、そう言う (#199)

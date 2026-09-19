@@ -8418,7 +8418,10 @@ class TestTheNameLineupIsComparedWithoutRelyingOnOrder(unittest.TestCase):
             # **材料が弱くないこと**: 並びは本当に合っていない
             self.assertIn("検査値ファイルの並びが索引と違う", said, said[-700:])
             self.assertIn("名前の顔ぶれは同じ", said, said[-900:])
-            self.assertIn("同じディスクのもの", said, said[-900:])
+            # 顔ぶれから言えるのは「別の版ではない」まで。**原因は上の行が言う**
+            # (#269。ここで「並びが違うだけ」と続けると、位置がずれている回で
+            # 1 行上と正反対になる)
+            self.assertIn("別の版ではありません", said, said[-900:])
 
     def test_a_different_disc_is_called_out(self):
         import make_boku2_sample
@@ -8571,7 +8574,9 @@ class TestTheFirstHourTableMatchesWhatTheToolDoes(unittest.TestCase):
             said = subprocess.run(
                 [sys.executable, os.path.join(REPO, "tools", "boku2.py"), "check", a],
                 capture_output=True, text=True, cwd=REPO).stdout
-            for phrase in ("見つかります", "並びが違う", "--names-from-crc"):
+            # 「並びが違う」は #269 で顔ぶれの行から外したので、**→ の行の
+            # ほうの言い方**で見る (道具が実際に出す文字どおりに)
+            for phrase in ("見つかります", "並びが索引と違う", "--names-from-crc"):
                 self.assertIn(phrase, said, f"道具が「{phrase}」と言っていない")
 
             # 本体の一区間だけを潰す → 「固まって」が出る
@@ -8725,6 +8730,146 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
         mirror = re.findall(r'lines\.push\("(→ 名前が付かないファイルが多い[^"]*)"\)', ui)
         self.assertEqual(sorted(mirror), sorted(got),
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
+
+
+class TestTheToolSaysOnlyWhatItKnows(unittest.TestCase):
+    """**分かったこと以上を言わないこと** (#269).
+
+    #268 の宿題は「『#N で直した』と書いてある所を、記録ではなく**出力で**
+    確かめる」でした。#96 (数を出すだけで判定していない) と #97 (報告してと
+    言うなら数える) を出力で追ったら、どちらも直っていて、代わりに
+    **助言のほうが 2 か所で出しゃばっていた**のが出てきました。
+
+    1. 検査値が合わない吸い出しで、名前の顔ぶれがそろっていると
+
+           → … 検査値が 4 件合いません … **切り分けの位置がずれている疑い**
+              合わない 4 件は索引じゅうに**散らばっています**。…
+              **吸い出し直しても直りません**
+              ただし名前の顔ぶれは同じ (20 種類)。**並びが違うだけ**で、…
+
+       1 行上で「位置がずれている」「吸い出し直しても直らない」と言った直後に
+       「**並びが違うだけ**」。顔ぶれがそろっている事実から言えるのは
+       「**別の版ではない**」までで、原因はここでは決まりません。
+
+    2. 文字番号が文字表に収まらない吸い出しで
+
+           → 使われている文字番号の最大が 1756 で、… 文字表 1656 字に
+              収まりません。…**読み方そのものが違います**
+           [文字表] … 文字表に無い 1 種 (例: 1756)。
+              **フォント画像のこの番号を書き足す** (docs/10 の手順 3)
+
+       1656 マスの表に 1756 番のマスはありません。**社長はごみを書き写す**
+       ことになります。1 行上で「読み方が違う」と言った以上、ここは
+       「書き足してはいけない」でなければ筋が通りません。
+    """
+
+    @staticmethod
+    def said(build) -> str:
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            build(folder)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    @staticmethod
+    def spoil_boxes(folder: str) -> None:
+        """文言の入れ物の先頭だけを潰す (索引も本体も .msg も無事)."""
+        import boku2
+        with open(os.path.join(folder, "BOKU2.IDX"), "rb") as fh:
+            idx = fh.read()
+        path = os.path.join(folder, "BOKU2.IMG")
+        with open(path, "rb") as fh:
+            img = bytearray(fh.read())
+        for e in boku2.read_dfi(idx, len(img)):
+            if os.path.basename(e["path"]) in ("diary.bin", "saveload.bin",
+                                               "on_mem_event.bin", "fish_on_mem.bin"):
+                img[e["at"]:e["at"] + 16] = b"\xEE" * 16
+        with open(path, "wb") as fh:
+            fh.write(bytes(img))
+
+    def test_matching_names_do_not_decide_the_cause(self):
+        said = self.said(self.spoil_boxes)
+        line = next((ln for ln in said.splitlines() if "名前の顔ぶれは同じ" in ln), "")
+        self.assertTrue(line, f"顔ぶれの行が出ていない\n{said[-800:]}")
+        # 前提: この材料では「位置がずれている」と言っていること
+        self.assertTrue("切り分けの位置がずれている疑い" in said,
+                        "材料が違います (位置の話になっていない)")
+        self.assertNotIn("並びが違うだけ", line,
+                         f"1 行上と正反対のことを言っています: {line}")
+        self.assertIn("別の版ではありません", line, line)
+
+    def test_the_same_line_is_used_in_the_order_case_too(self):
+        """**言い方を 1 つにする。** 並びが違う回でも同じ行が出ること.
+
+        2 か所から呼ぶ行なので、片方だけ直すと同じ道具が 2 通りの文を出す。
+        """
+        import struct
+        import boku2
+
+        def reverse_crc(folder: str) -> None:
+            path = os.path.join(folder, "BOKU2.CRC")
+            with open(path, "rb") as fh:
+                raw = bytearray(fh.read())
+            n, dir_start = struct.unpack_from("<5I", raw, 0)[:2]
+            e = boku2.CRC_ENTRY
+            items = [bytes(raw[dir_start + i * e: dir_start + (i + 1) * e]) for i in range(n)]
+            for i, it in enumerate(reversed(items)):
+                raw[dir_start + i * e: dir_start + (i + 1) * e] = it
+            with open(path, "wb") as fh:
+                fh.write(bytes(raw))
+
+        said = self.said(reverse_crc)
+        # 前提: こちらは本当に「並びが違う」回
+        self.assertIn("検査値ファイルの並びが索引と違う", said, "材料が違います")
+        line = next((ln for ln in said.splitlines() if "名前の顔ぶれは同じ" in ln), "")
+        self.assertTrue(line, "顔ぶれの行が出ていない")
+        self.assertIn("別の版ではありません", line, f"言い方が 2 通りある: {line}")
+
+    def test_numbers_that_cannot_fit_are_not_told_to_be_written_in(self):
+        import make_boku2_sample
+        said = self.said(lambda f: make_boku2_sample.damage(f, "bignum"))
+        line = next((ln for ln in said.splitlines() if ln.startswith("[文字表]")), "")
+        self.assertTrue(line, f"文字表の行が出ていない\n{said[-800:]}")
+        # 前提: 収まらない番号がある回であること
+        self.assertIn("に収まりません", said, "材料が違います (番号が収まっている)")
+        self.assertNotIn("フォント画像のこの番号を書き足す", line,
+                         f"収まらない番号を書き写させようとしています: {line}")
+        self.assertIn("書き足してはいけません", line, line)
+
+    def test_numbers_that_fit_are_still_told_to_be_written_in(self):
+        """**収まる番号は、今までどおり「書き足す」と言う**こと (止めすぎていない)."""
+        def shrink_table(folder: str) -> None:
+            path = os.path.join(folder, "font.txt")
+            with open(path, encoding="utf-8") as fh:
+                rows = fh.read().replace("\r", "").split("\n")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(rows[:2]) + "\n")
+
+        said = self.said(shrink_table)
+        line = next((ln for ln in said.splitlines() if ln.startswith("[文字表]")), "")
+        self.assertTrue(line, f"文字表の行が出ていない\n{said[-800:]}")
+        self.assertNotIn("に収まりません", said, "材料が違います (番号が収まっていない)")
+        self.assertIn("フォント画像のこの番号を書き足す", line,
+                      f"書き足せる番号まで止めています: {line}")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue("**別の版ではありません**。食い違いの原因は上の行のほうです" in ui,
+                        "画面がまだ「並びが違うだけ」と言っています")
+        self.assertTrue("並びが違うだけ" not in ui,
+                        "画面に古い言い方が残っています")
+        # **言葉があるだけでは足りない** —— それが `numsTooBig` の道に繋がっている
+        # こと (#267 で踏んだのと同じ穴。言葉だけ見ていると `false` に変えても緑)
+        self.assertTrue("+ (numsTooBig\n" in ui,
+                        "画面が収まらない番号でも「書き足す」と言い続けています")
+        self.assertTrue("書き足してはいけません" in ui,
+                        "画面に止める言葉がありません")
 
 
 class TestNotCheckedIsNotTheSameAsNoProblem(unittest.TestCase):
