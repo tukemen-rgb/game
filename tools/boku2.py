@@ -145,7 +145,8 @@ def read_dfi_names(idx: bytes, rec_end: int, rec_count: int) -> list[str]:
     return [x.decode("ascii") if good else "" for x, good in zip(raw, ok)]
 
 
-def read_dfi(idx: bytes, data_size: int, rule: str = "flag") -> list[dict]:
+def read_dfi(idx: bytes, data_size: int, rule: str = "flag",
+             info: dict | None = None) -> list[dict]:
     """レコードを歩いて {path, at, len} の一覧にする。ブラウザ側 readDfi と同じ規則.
 
     フォルダの閉じ方 (rule):
@@ -174,6 +175,7 @@ def read_dfi(idx: bytes, data_size: int, rule: str = "flag") -> list[dict]:
     stack: list[tuple[str, int]] = []
     seen: set[str] = set()
     escape = False
+    underflow = 0
     for k in range(rec_count):
         p = 16 + k * 16
         is_dir = (idx[p] | (idx[p + 1] << 8)) == 1
@@ -197,6 +199,13 @@ def read_dfi(idx: bytes, data_size: int, rule: str = "flag") -> list[dict]:
         if length > 0 and at + length <= data_size:
             entries.append({"path": path, "at": at, "len": length})
         if more == 0:
+            # **上に戻れなかった回数を数える** (#260)。公開ソースの `unpackIMG` は
+            # ここで積みが底を突くと `IDX INDEX ERROR` で止まる (最後の 1 件だけは
+            # 大目に見る)。こちらは黙って素通りしていたので、**フォルダの閉じ方が
+            # 合っていないことに誰も気づけなかった** —— そのあとのファイルは
+            # 根の直下に landed し、道筋が静かにずれる
+            if not stack and k != rec_count - 1:
+                underflow += 1
             if rule == "flag":
                 if stack:
                     stack.pop()
@@ -207,6 +216,8 @@ def read_dfi(idx: bytes, data_size: int, rule: str = "flag") -> list[dict]:
                 d = stack.pop() if stack else None
                 while d and d[1] == 0 and len(stack) > 1:
                     d = stack.pop()
+    if info is not None:
+        info["underflow"] = underflow
     return entries
 
 
@@ -2324,7 +2335,8 @@ def check(folder: str, out=sys.stdout) -> int:
         say(stopped_here(1, "索引が読めないので"))
         return 1
     rec_end = dfi_rec_end(idx)
-    entries = read_dfi(idx, img_size)
+    dfi_info: dict = {}
+    entries = read_dfi(idx, img_size, info=dfi_info)
     rec_count = (rec_end - 16) // 16
     named = sum(1 for e in entries if not os.path.basename(e["path"]).startswith("#"))
     dupes = sum(1 for e in entries if "~" in os.path.basename(e["path"]))
@@ -2335,6 +2347,17 @@ def check(folder: str, out=sys.stdout) -> int:
     # 名前の置き場を `FILENAMES_START = 0x8140` と決め打ちしている。実物なみの
     # 大きさの索引でここが合っていれば、レコードの読み方 (16 バイト刻み・見出し 16 バイト)
     # が当たっている裏付けになる。ずれていれば、名前が付かない原因がここだと分かる
+    # **上に戻れなかった回数を言う** (#260)。公開ソースの `unpackIMG` はここで
+    # 積みが底を突くと「索引が壊れている」として止まる。こちらは黙って素通りして
+    # いたので、**フォルダの閉じ方が合っていないことに誰も気づけなかった** ——
+    # そのあとのファイルは根の直下に並び、道筋が静かにずれる。
+    # フォルダの閉じ方は docs/09 の表で「実物ではまだ」の行なので、ここがいちばん外れる
+    if dfi_info.get("underflow"):
+        problems += 1
+        say(f"→ フォルダの閉じ方が合いません: **{dfi_info['underflow']} 回**、"
+            "もう上のフォルダが無いのに戻ろうとしました。英語化パッチの公開ソースは"
+            "ここで「索引が壊れている」として止まります。**そのあとのファイルは"
+            "根の直下に並ぶので、道筋が静かにずれます。** この行ごと報告してください")
     if rec_count >= REAL_INDEX_RECORDS_MIN:
         if rec_end == KNOWN_NAMES_AT:
             say(f"   名前の置き場が 0x{KNOWN_NAMES_AT:X} —— 英語化パッチの公開ソースが"

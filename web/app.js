@@ -4007,6 +4007,14 @@ async function buildIdxReport() {
   const recEnd = 16 + c.count * 16;
   lines.push(`レコード ${c.count} 件 (名前の置き場は ${hx(recEnd)} から) / ファイル ${items.length} 件 / 名前が付いた ${c.named_ok ?? "?"} 件`
     + (c.dupes ? ` / 同じ名前 ${c.dupes} 件` : ""));
+  /* **上に戻れなかった回数を言う** (#260。CLI の check と同じ判定・同じ言葉) */
+  if (c.underflow) {
+    problems++;
+    lines.push(`→ フォルダの閉じ方が合いません: **${c.underflow} 回**、`
+      + "もう上のフォルダが無いのに戻ろうとしました。英語化パッチの公開ソースは"
+      + "ここで「索引が壊れている」として止まります。**そのあとのファイルは"
+      + "根の直下に並ぶので、道筋が静かにずれます。** この行ごと報告してください");
+  }
   /* **実物の索引には外から確かめられる数がある** (#222)。文言は tools/boku2.py と 1 字そろえる */
   if (c.count >= REAL_INDEX_RECORDS_MIN) {
     if (recEnd === KNOWN_NAMES_AT) {
@@ -4815,7 +4823,7 @@ function readDfi(idx, dataSize, rule) {
   const out = [];
   const stack = [];
   const seen = new Set();
-  let bad = 0, dupes = 0, escape = false;
+  let bad = 0, dupes = 0, escape = false, underflow = 0;
   for (let k = 0; k < recCount; k++) {
     const p = 16 + k * 16;
     const isDir = (idx[p] | (idx[p + 1] << 8)) === 1;
@@ -4845,6 +4853,10 @@ function readDfi(idx, dataSize, rule) {
       bad++;
     }
     if (more === 0) {
+      /* **上に戻れなかった回数を数える** (#260。CLI の read_dfi と同じ)。公開ソースの
+         unpackIMG はここで積みが底を突くと「索引が壊れている」として止まる
+         (最後の 1 件だけは大目に見る)。黙って素通りすると道筋が静かにずれる */
+      if (!stack.length && k !== recCount - 1) underflow++;
       if (rule === "flag") {
         if (stack.length) stack.pop();
         if (escape && stack.length) stack.pop();
@@ -4870,7 +4882,7 @@ function readDfi(idx, dataSize, rule) {
     named: true, known: "DFI", rec: 16, skip: 16,
     nameField: 4, atField: 8, lenField: 12, atMult: 2048, lenMult: 1,
     count: recCount, files: out.length, dirs: recCount - out.length - bad, gap: 0,
-    named_ok: out.filter((x) => !x.bare).length, dupes,
+    named_ok: out.filter((x) => !x.bare).length, dupes, underflow,
     coverage: Math.min(1, used / Math.max(1, dataSize)),
     entries: out,
   };

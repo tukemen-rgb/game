@@ -8140,6 +8140,82 @@ class TestWhereTheRecordsEndMatchesThePublicConstant(unittest.TestCase):
                                 "dfi_rec_end を使っている所が少なすぎる")
 
 
+class TestClosingOneFolderTooManyIsSaidOutLoud(unittest.TestCase):
+    """**向こうが止まる所で、こちらが黙って通っていた** (#260).
+
+    #253〜#259 は「こちらが公開ソースより厳しい」所を直してきた。今回は逆向きに
+    読んだ —— **向こうが見ていて、こちらが見ていない**条件はどこか。
+
+    1 つ見つかった。`unpackIMG` はフォルダの積みが底を突くと
+    `assert False, "IDX INDEX ERROR"` で止まる (最後の 1 件だけは大目に見る)。
+    こちらは `if stack: stack.pop()` と黙って素通りしていた。**そのあとの
+    ファイルは根の直下に並ぶので、道筋が静かにずれる** ——
+    `system/system.msg` が `system.msg` になる、という形。
+    フォルダの閉じ方は docs/09 の表で「実物ではまだ」の行なので、
+    ここがいちばん外れやすい。
+    """
+
+    @staticmethod
+    def index(rows: list[tuple[int, int, str]]) -> bytes:
+        import struct
+        idx = bytearray(b"DFI\0" + struct.pack("<III", 0x100, 0, 0))
+        for i, (is_dir, more, _n) in enumerate(rows):
+            idx += struct.pack("<HHIII", is_dir, more, 0, 1 + i, 16)
+        for _d, _m, n in rows:
+            idx += n.encode() + b"\0"
+        return bytes(idx)
+
+    #: フォルダを 1 つ開いて、ファイルで 4 回閉じる (公開ソースは IDX INDEX ERROR)
+    BROKEN = [(1, 1, "/"), (1, 1, "d0"), (0, 0, "a.bin"), (0, 0, "b.bin"),
+              (0, 0, "c.bin"), (0, 0, "d.bin")]
+
+    def test_it_counts_the_times_it_could_not_go_up(self):
+        import boku2
+        info: dict = {}
+        got = boku2.read_dfi(self.index(self.BROKEN), 1 << 30, info=info)
+        self.assertEqual(info["underflow"], 1, info)
+        # **材料が弱くないこと**: 道筋が本当にずれている (根の直下に並ぶ)
+        self.assertEqual([e["path"] for e in got],
+                         ["d0/a.bin", "b.bin", "c.bin", "d.bin"], got)
+
+    def test_a_healthy_index_counts_zero(self):
+        """**いつも鳴るなら鳴る意味が無い。** 練習用データは 0 回."""
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            with open(os.path.join(folder, "BOKU2.IDX"), "rb") as fh:
+                idx = fh.read()
+            info: dict = {}
+            boku2.read_dfi(idx, os.path.getsize(os.path.join(folder, "BOKU2.IMG")), info=info)
+            self.assertEqual(info["underflow"], 0, info)
+
+    def test_the_last_record_is_forgiven_like_the_public_source(self):
+        """公開ソースは**最後の 1 件**の底突きだけ「読み終わった」として許す."""
+        import boku2
+        rows = [(1, 1, "/"), (0, 0, "a.bin"), (0, 0, "b.bin")]
+        info: dict = {}
+        boku2.read_dfi(self.index(rows), 1 << 30, info=info)
+        self.assertEqual(info["underflow"], 0, info)
+
+    def test_check_says_it(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "BOKU2.IDX"), "wb") as fh:
+                fh.write(self.index(self.BROKEN))
+            with open(os.path.join(tmp, "BOKU2.IMG"), "wb") as fh:
+                fh.write(b"\0" * (2048 * 8))
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                                "check", tmp], capture_output=True, text=True, cwd=REPO)
+            said = r.stdout + r.stderr
+            line = next((l for l in said.splitlines() if "フォルダの閉じ方が合いません" in l), "")
+            self.assertTrue(line, f"言っていない:\n{said[:600]}")
+            self.assertIn("**1 回**", line, line)
+            self.assertIn("道筋が静かにずれます", line, line)
+            self.assertEqual(r.returncode, 1, "確認事項に数えていない")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
