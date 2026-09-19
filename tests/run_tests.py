@@ -7658,6 +7658,160 @@ class TestTheMsgReaderAgreesWithThePublicWriter(unittest.TestCase):
         self.assertIsNone(boku2.parse_msg(bytes(odd), 8), "奇数の位置を読めたと言っている")
 
 
+class TestTheFontTableCanComeInTwoPages(unittest.TestCase):
+    """**頁ごとに書き出した文字表を、並べて渡せること** (#256).
+
+    実物の文字表は 1656 字で、1 枚目の画像には 1058 字しか入らない (docs/09)。
+    画面は 2 枚目の番号を「1 枚目の続き」で振るのに、一括処理には**つなぐ手立てが
+    無かった** —— 2 枚目だけを `-f` に渡すと **1058 字ぶん手前にずれる**。
+    しかも日本語は出てしまうので、目では気づけない。
+    """
+
+    PUB = "/home/user/hilltopworks/bokunonatsuyasumi2"
+
+    def setUp(self):
+        if not os.path.isdir(self.PUB):
+            self.skipTest("公開ソースが無い")
+
+    def path(self, name: str) -> str:
+        return os.path.join(self.PUB, name)
+
+    def test_two_pages_join_to_the_whole_table(self):
+        import boku2
+        joined = boku2.load_font([self.path("font1.txt"), self.path("font2.txt")])
+        self.assertEqual(len(joined), boku2.FONT_GLYPHS, "つないだ字数が 1656 にならない")
+        one = boku2.load_font(self.path("font1.txt"))
+        self.assertEqual(joined[:len(one)], one, "1 枚目が先に来ていない")
+        self.assertEqual(len(one), boku2.FONT_PAGE1_GLYPHS)
+
+    def test_one_page_alone_still_works(self):
+        """**材料が弱くないこと**: 1 つだけ渡す道は今までどおり."""
+        import boku2
+        self.assertEqual(len(boku2.load_font(self.path("font.txt"))), boku2.FONT_GLYPHS)
+        self.assertEqual(boku2.font_join_note(self.path("font.txt")), [])
+        self.assertEqual(boku2.font_join_note([self.path("font.txt")]), [])
+
+    def test_it_says_what_it_joined_and_warns_on_the_wrong_order(self):
+        import boku2
+        said = boku2.font_join_note([self.path("font1.txt"), self.path("font2.txt")])
+        self.assertTrue(said and "1656 字" in said[0], said)
+        self.assertIn("font1.txt 1058 字 + font2.txt 598 字", said[0], said)
+        self.assertEqual(len(said), 1, f"順どおりなのに文句を言っている: {said}")
+
+        back = boku2.font_join_note([self.path("font2.txt"), self.path("font1.txt")])
+        self.assertEqual(len(back), 2, back)
+        self.assertIn("順番が逆かもしれません", back[1], back)
+
+    def test_the_cli_takes_two_pages(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "chars.txt")
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                                "fontlist", self.path("font1.txt"), self.path("font2.txt"),
+                                "-o", out], capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("2 つつないで 1656 字", r.stdout + r.stderr)
+            # **書き出したものを、実際に読む側で読み直す** (校正の `--font-chars`)。
+            # 自前で `#` を落とす書き方をすると、#256 の穴をそのまま見落とす
+            import boku2
+            import proofread
+            got = proofread.load_font_chars(out)
+            want = {g for g in boku2.load_font([self.path("font1.txt"),
+                                                self.path("font2.txt")]) if g}
+            self.assertEqual(got, want, f"落ちた字: {sorted(want - got)}")
+
+    def test_the_hash_glyph_survives_the_round_trip(self):
+        """**`#` そのものが文字表に入っている** (41 番)。`fontlist` は 1 行 1 文字で
+        書き出すので、`#` の行を注釈として捨てると**その字だけ消える**。
+        消えると訳文の `#` が「フォントに無い文字」として誤って鳴る —— この検査は
+        「実機で □ になる字」を当てる所なので、そこで嘘を言うのがいちばん困る."""
+        import subprocess
+        import boku2
+        import proofread
+        glyphs = boku2.load_font(self.path("font.txt"))
+        # **材料が弱くないこと**: `#` が本当に入っていて、行頭ではない
+        self.assertIn("#", glyphs)
+        self.assertNotEqual(glyphs.index("#") % boku2.FONT_COLS, 0,
+                            "材料が弱い: # が行頭にある")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "chars.txt")
+            r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                                "fontlist", self.path("font.txt"), "-o", out],
+                               capture_output=True, text=True, cwd=REPO)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(out, encoding="utf-8") as fh:
+                self.assertIn("\n#\n", fh.read(), "材料が弱い: # の行が書かれていない")
+            self.assertIn("#", proofread.load_font_chars(out), "# が文字表から消えている")
+
+    def test_a_real_comment_line_is_still_skipped(self):
+        """**材料が弱くないこと**: 注釈は今までどおり読み飛ばす."""
+        import proofread
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "c.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("# これは注釈です\nあ\n#\nい\n")
+            got = proofread.load_font_chars(path)
+            self.assertEqual(got, {"あ", "#", "い"}, got)
+
+
+class TestOurFontTableReaderMatchesThePublicOne(unittest.TestCase):
+    """**文字表の読みを、公開ソースの `readFont` と突き合わせる** (#256).
+
+    docs/09 の表で、フォントの 1 行 23 字・1656 字は「公開ソースの数値」を
+    書き写しただけの欄だった。`MSG.py` の `readFont` は英語化パッチが実際に
+    使っている読み側なので、**同じファイルを両方で読んで突き合わせれば**、
+    数字だけでなく**読み方そのもの**を確かめられる (#108・#253・#255 と同じ)。
+    """
+
+    PUB = "/home/user/hilltopworks/bokunonatsuyasumi2"
+
+    @classmethod
+    def read_font(cls):
+        with open(os.path.join(cls.PUB, "MSG.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        ns = {"EXTRACTION": 0, "INSERTION": 1}
+        i = src.index("def readFont(")
+        exec(src[i:src.index("\ndef ", i + 10)], ns)
+        return ns["readFont"]
+
+    def setUp(self):
+        if not os.path.isdir(self.PUB):
+            self.skipTest("公開ソースが無い")
+
+    def test_the_three_published_tables_read_the_same(self):
+        import boku2
+        read_font = self.read_font()
+        for name, start, want in (("font.txt", 0, boku2.FONT_GLYPHS),
+                                  ("font1.txt", 0, boku2.FONT_PAGE1_GLYPHS),
+                                  ("font2.txt", boku2.FONT_PAGE1_GLYPHS,
+                                   boku2.FONT_GLYPHS - boku2.FONT_PAGE1_GLYPHS)):
+            with self.subTest(file=name):
+                path = os.path.join(self.PUB, name)
+                theirs = read_font(path, start, 0)          # EXTRACTION: 番号 → 文字
+                ours = {start + i: g for i, g in enumerate(boku2.load_font(path))
+                        if g is not None}
+                self.assertEqual(len(theirs), want, f"材料が弱い: {len(theirs)} 字")
+                self.assertEqual(ours, theirs, f"{name}: 読み方が違う")
+
+    def test_the_two_public_transcriptions_disagree(self):
+        """**書き写しは、出した本人でも間違える。** 公開ソースには同じフォントの
+        書き写しが 2 通りあり (`font.txt` と `font1.txt`+`font2.txt`)、
+        **19 か所で食い違う**。docs/10 の「紛らわしい字」の裏付けそのもの。
+        """
+        import boku2
+        whole = boku2.load_font(os.path.join(self.PUB, "font.txt"))
+        pages = boku2.load_font([os.path.join(self.PUB, "font1.txt"),
+                                 os.path.join(self.PUB, "font2.txt")])
+        self.assertEqual(len(whole), len(pages), "字数は同じはず")
+        diff = [(i, a, b) for i, (a, b) in enumerate(zip(whole, pages)) if a != b]
+        self.assertTrue(diff, "材料が弱い: 食い違いが 1 つも無い")
+        # docs/10 が名指ししている型が、実際に出ていること
+        pairs = {(a, b) for _i, a, b in diff}
+        self.assertIn(("ー", "一"), pairs, f"長音と漢数字の取り違えが無い: {sorted(pairs)}")
+        self.assertTrue(any(a.isascii() != b.isascii() for _i, a, b in diff),
+                        f"全角と半角の取り違えが無い: {sorted(pairs)}")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 

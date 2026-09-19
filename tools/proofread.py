@@ -217,7 +217,14 @@ def load_font_chars(path: str) -> set[str]:
     with scrp.open_text(path) as fh:
         for line in fh:
             line = line.rstrip("\n")
-            if not line or line.startswith("#"):
+            # **`#` そのものが文字表に入っている** (#256)。`fontlist` は 1 行 1 文字で
+            # 書き出すので、`#` の行を「注釈」として捨てると**その字だけ文字表から
+            # 消える**。実物の文字表には `#` があり (41 番)、消えると訳文の `#` が
+            # 「フォントに無い文字」として誤って鳴る —— この検査は「実機で □ になる字」を
+            # 当てる所なので、そこで嘘を言うのがいちばん困る。
+            # 注釈は 2 文字以上。`#` が行頭に来る 23 字の行は、この作品では起きない
+            # (41 番は行頭ではない)
+            if not line or (line.startswith("#") and len(line) > 1):
                 continue
             lines.append(line)
     return {ch for ch in boku2.parse_glyph_table("\n".join(lines)) if ch}

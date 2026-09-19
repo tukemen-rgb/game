@@ -1350,12 +1350,49 @@ def font_trouble(path: str | None) -> list[str]:
         return glyph_table_trouble(fh.read())
 
 
-def load_font(path: str | None) -> list | None:
-    """フォント画像を左上から書き出したテキスト、または「番号=文字」の対応表."""
+def load_font(path) -> list | None:
+    """フォント画像を左上から書き出したテキスト、または「番号=文字」の対応表.
+
+    **頁を分けて書き出したものは、並べて渡せる** (#256)。実物の文字表は 1656 字で、
+    1 枚目の画像には 1058 字しか入らない (docs/09)。画面は 2 枚目の番号を
+    「1 枚目の続き」で振るが、書き出したものを**そのまま 1 つの文字表として渡すと
+    1058 字ぶん手前にずれる** —— しかも日本語は出てしまうので、目では気づけない。
+    `-f 1枚目.txt -f 2枚目.txt` と並べれば、その順につなげる。
+    """
     if not path:
         return None
-    with scrp.open_text(path) as fh:                  # BOM 付き / UTF-16 / cp932 でも同じに読む
-        return parse_glyph_table(fh.read())
+    paths = [path] if isinstance(path, str) else list(path)
+    if not paths:
+        return None
+    out: list = []
+    for one in paths:
+        with scrp.open_text(one) as fh:               # BOM 付き / UTF-16 / cp932 でも同じに読む
+            part = parse_glyph_table(fh.read())
+        if len(paths) == 1:
+            return part
+        out += part
+    return out
+
+
+def font_join_note(paths) -> list[str]:
+    """文字表を並べて渡したときに、**何をどうつないだか**を言う (#256).
+
+    黙ってつなぐと、順番を取り違えたことに気づけない。1 枚目の字数は
+    `FONT_PAGE1_GLYPHS` に決まっているので、そこがずれていれば言える。
+    """
+    if not paths or isinstance(paths, str) or len(paths) < 2:
+        return []
+    sizes = []
+    for one in paths:
+        with scrp.open_text(one) as fh:
+            sizes.append(len(parse_glyph_table(fh.read())))
+    out = [f"文字表を {len(paths)} つつないで {sum(sizes)} 字にしました "
+           + " + ".join(f"{os.path.basename(p)} {n} 字" for p, n in zip(paths, sizes))]
+    if sizes[0] != FONT_PAGE1_GLYPHS and FONT_PAGE1_GLYPHS in sizes:
+        out.append(f"注意: **順番が逆かもしれません。** 1 枚目は {FONT_PAGE1_GLYPHS} 字の"
+                   "はずですが、その字数のものが 1 つ目に来ていません。"
+                   "ずれたまま取り出しても日本語は出るので、目では気づけません")
+    return out
 
 
 def text_rows(path: str, glyphs: list[str] | None, keep_voice: bool = False) -> list[tuple[str, int, int, str]]:
@@ -2688,14 +2725,17 @@ def main(argv=None) -> int:
     p = sub.add_parser("maps", help="マップの入れ物を部品にする")
     p.add_argument("files", nargs="+"); p.add_argument("-o", "--out", required=True)
     p = sub.add_parser("text", help="会話を TSV にする (フォルダを渡せば中の *.msg と 1.bin を全部)")
-    p.add_argument("files", nargs="+"); p.add_argument("-f", "--font"); p.add_argument("-o", "--out")
+    p.add_argument("files", nargs="+")
+    # **頁ごとに書き出した文字表を並べて渡せる** (#256)。実物は 1656 字で 1 枚に入らない
+    p.add_argument("-f", "--font", action="append")
+    p.add_argument("-o", "--out")
     p.add_argument("--keep-voice", action="store_true", help="音声の番号の項目も残す")
     p = sub.add_parser("fontlist", help="フォントの並びを校正ツールのフォント一覧にする")
-    p.add_argument("font"); p.add_argument("-o", "--out")
+    p.add_argument("font", nargs="+"); p.add_argument("-o", "--out")
     p = sub.add_parser("used", help="本文で使われている文字番号だけを並べる (書き出す手間を減らす)")
     p.add_argument("files", nargs="+")
     p = sub.add_parser("table", help="文字表を docs/01 の .tbl (16進=文字) にする。hexdump.py --table で使える")
-    p.add_argument("font"); p.add_argument("-o", "--out", required=True)
+    p.add_argument("font", nargs="+"); p.add_argument("-o", "--out", required=True)
     p = sub.add_parser("check", help="吸い出したフォルダを診て、報告用の要約を出す (最初に走らせる)")
     p.add_argument("folder")
     args = ap.parse_args(argv)
@@ -2836,8 +2876,11 @@ def run(args) -> int:
             print(ansi_damage_note(damaged), file=sys.stderr)
         # 書き写しで 1 行ぶんずれていたら、**取り出す前に**言う (#229)。
         # ずれたまま取り出すと、下の「文字表で全部読めました」まで通ってしまう
-        for line in font_trouble(args.font):
+        for line in font_join_note(args.font):
             print(line, file=sys.stderr)
+        for one in (args.font or []):
+            for line in font_trouble(one):
+                print(line, file=sys.stderr)
         rows = []
         given = expand_patterns(args.files)
         files = expand_inputs(given)
@@ -2871,7 +2914,7 @@ def run(args) -> int:
                 note = ""
             elif args.font:
                 # -f を渡したのに空だった。「文字表なし」だと渡していないように読める
-                note = f" (文字表 {args.font} から読めた字が 0 なので、番号のまま)"
+                note = (f" (文字表 {', '.join(args.font)} から読めた字が 0 なので、番号のまま)")
             else:
                 note = " (文字表なし: 番号のまま。-f font.txt を付けると日本語になります)"
             print(f"{len(rows)} 行 → {args.out}" + note)
@@ -2967,8 +3010,11 @@ def run(args) -> int:
         glyphs = load_font(args.font) or []
         # 校正の文字表に渡す前に、書き写しのずれを言う (#229)。ここを通った一覧が
         # proofread の `--font-chars` になるので、ずれたまま渡すと校正ごと外れる
-        for line in font_trouble(args.font):
+        for line in font_join_note(args.font):
             print(line, file=sys.stderr)
+        for one in args.font:
+            for line in font_trouble(one):
+                print(line, file=sys.stderr)
         # 全角の空白 (U+3000) を落とさないこと。フォントには入っている (僕の夏休み 2 では
         # 0 番) ので、落とすと本文の空白が「フォントに無い文字」として誤って指摘される (#89)
         lines = ["# フォント画像の並び (tools/boku2.py fontlist)"] + [g for g in glyphs if g]
