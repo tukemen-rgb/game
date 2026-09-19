@@ -4006,9 +4006,11 @@ function glyphTableTrouble(text) {
  * **601 件は触れてもいないのに締めは「問題なし」**になっていた (#195)。 */
 const MSG_CHECK_FILES = 2000;
 
-/** 1 行 23 字の幅で割り切れる画像か (文字表の続きが入っていそうか、#168) */
-const looksLikeAFontPage = (p) => Math.floor(p.width / FONT_CELL) === FONT_COLS
-  && fontPageCells(p) > 0;
+/** 1 行の字数が揃っている画像か (文字表の続きが入っていそうか、#168)。
+ *  `cols` を渡さなければ借り物の FONT_COLS (23) で見る。**1 枚目が見つかって
+ *  いるなら、その列数を渡すこと** (#274。CLI の looks_like_a_font_page と同じ) */
+const looksLikeAFontPage = (p, cols = 0) =>
+  Math.floor(p.width / FONT_CELL) === (cols || FONT_COLS) && fontPageCells(p) > 0;
 /** その画像に番号を振れるマスの数 */
 const fontPageCells = (p) => Math.floor(p.width / FONT_CELL) * Math.floor(p.height / FONT_CELL);
 
@@ -4026,7 +4028,7 @@ const fontPageCells = (p) => Math.floor(p.width / FONT_CELL) * Math.floor(p.heig
    tools/boku2.py の FONT_HUNT_NONE と同じ */
 const FONT_HUNT_NONE = "  この吸い出しの中には続きが見つかりませんでした";
 
-async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0) {
+async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0, cols = 0) {
   const want = FONT_GLYPHS - cells;
   const out = [];
 
@@ -4035,7 +4037,7 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0) 
   for (const p of tim2Pages(own, 8, true)) {
     /* known は上で既に数えた頁の位置。**そこを候補に数えない** ——
        数えた画像をもう一度挙げると、足し算が二重になる */
-    if (known.has(p.at) || !looksLikeAFontPage(p.t.pictures[0])) continue;
+    if (known.has(p.at) || !looksLikeAFontPage(p.t.pictures[0], cols)) continue;
     const pic = p.t.pictures[0];
     out.push(`  ・同じファイルの位置 ${hx(p.at)} にもう 1 枚 `
       + `(${pic.width}×${pic.height} ドット / ${fontPageCells(pic)} マス)`);
@@ -4057,7 +4059,7 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0) 
                                   Math.min(other.len, cap));
     for (const p of tim2Pages(bytes, 2, true)) {
       const pic = p.t.pictures[0];
-      if (!looksLikeAFontPage(pic) || fontPageCells(pic) < want) continue;
+      if (!looksLikeAFontPage(pic, cols) || fontPageCells(pic) < want) continue;
       (wide && pic.width === wide ? same : otherW).push(
         `  ・${other.name} (位置 ${hx(p.at)} / ${pic.width}×${pic.height} ドット / `
         + `${fontPageCells(pic)} マス)`);
@@ -4071,14 +4073,14 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0) 
   if (out.length) {
     const head = (wide && same.length)
       ? `  続きが入っていそうな画像 ${out.length} 件 `
-        + `(1 行 ${FONT_COLS} 字の幅で、残り ${want} 字が入る大きさ。`
+        + `(1 行 ${cols || FONT_COLS} 字の幅で、残り ${want} 字が入る大きさ。`
         + `**1 枚目と同じ幅 ${wide} ドット**のものから先に挙げます):`
       : `  続きが入っていそうな画像 ${out.length} 件 `
-        + `(1 行 ${FONT_COLS} 字の幅で、残り ${want} 字が入る大きさ):`;
+        + `(1 行 ${cols || FONT_COLS} 字の幅で、残り ${want} 字が入る大きさ):`;
     return [head, ...out];
   }
   return [`${FONT_HUNT_NONE} `
-    + `(1 行 ${FONT_COLS} 字の幅で ${want} 字ぶん入るものを `
+    + `(1 行 ${cols || FONT_COLS} 字の幅で ${want} 字ぶん入るものを `
     + `${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探した。`
     + `名前に font が付くものと .tms は先頭 ${FONT_OWN_CAP / 1024 / 1024} MB まで、`
     + `ほかは先頭 ${FONT_HUNT_HEAD / 1024} KB までを見た)。この行ごと報告してください`];
@@ -4105,7 +4107,7 @@ async function buildIdxReport() {
      いたが、それは「全部を診た結果」ではなく「診た分には問題が無かった」でしかない。
      社長は前者の意味で読む。何を診ていないかは、結果の行に必ず出す。
      一括処理 (boku2.py) と**同じ言葉**にしておくこと */
-  const skipped = [];
+  let skipped = [];
   const b = state.idxBuf;
   lines.push(`== 診断 (構造探査台): ${idxEntry.name} → ${dataEntry.name}`);
   lines.push(`[索引] ${b.length.toLocaleString()} バイト / 先頭 4 バイト ${[...b.subarray(0, 4)].map((v) => hex(v, 2)).join(" ")}`
@@ -4810,7 +4812,9 @@ async function buildIdxReport() {
              両方の報告が 1 行ずつ一致することは tests/e2e/broken.py が見張っている */
           const known = new Set(own.map((q) => q.at));
           known.add(at);
-          const hunt = await fontPageHunt(items, it, known, cells, dataEntry, p.width || 0);
+          /* **1 枚目の列数で探す** (#274。CLI の check と同じ) */
+          const hunt = await fontPageHunt(items, it, known, cells, dataEntry, p.width || 0,
+                                          Math.floor((p.width || 0) / FONT_CELL));
           for (const line of hunt) lines.push(line);
           /* **「この行ごと報告してください」と言うなら、数える** (#250。#97 と同じ約束)。
              文字表の 2 枚目がどこにあるかはまだ分かっていないので、実物でいちばん
@@ -4862,6 +4866,9 @@ async function buildIdxReport() {
   }
   /* **別の行にする。** 締めの行に混ぜると、画面と CLI で「文字表」の見方が違う分が
      そのまま締めの行に出て、2 つの報告を 1 行ずつ突き合わせられなくなる */
+  /* **同じ行を 2 度数えない** (#274。CLI の check と同じ)。フォント画像が 2 枚
+     見つかると、どちらも同じ「文字表の 2 枚目 (残り N 字…)」を足していた */
+  skipped = [...new Set(skipped)];
   if (skipped.length) lines.push(`診ていない段: ${skipped.length} 件 (${skipped.join(", ")})`);
   /* **診ていない段があるのに「問題なし」で締めない** (#268。CLI の check と 1 字そろえる)。
      吸い出しに問題があるわけではないので、変えるのは言い方だけ */

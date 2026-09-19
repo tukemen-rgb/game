@@ -1824,13 +1824,20 @@ def font_page_cells(info: dict) -> int:
     return (info["width"] // FONT_CELL) * (info["height"] // FONT_CELL)
 
 
-def looks_like_a_font_page(info: dict) -> bool:
+def looks_like_a_font_page(info: dict, cols: int = 0) -> bool:
     """文字表の続きが入っていそうな画像か (#168).
 
-    決め手は **1 行 23 字の幅で割り切れること**。文字表はどの頁も同じ升目で
-    並んでいるはずなので、列数が 23 にならない画像は続きではない。
+    決め手は **1 行の字数が揃っていること**。文字表はどの頁も同じ升目で並んで
+    いるはずなので、列数の違う画像は続きではない。
+
+    `cols` を渡さなければ借り物の `FONT_COLS` (23) で見る。**1 枚目が見つかって
+    いるなら、その列数を渡すこと** (#274) —— 23 は公開ソースが実物の 1 枚で
+    決め打ちした数 (docs/09 の「証拠の強さの順」の 2 段目) で、版が違えば変わる。
+    ここを借り物のままにしていたので、**1 行 24 字の吸い出しでは、同じ幅の
+    2 枚目が目の前にあっても「見つかりませんでした」と言っていた。**
     """
-    return (info.get("width") or 0) // FONT_CELL == FONT_COLS and font_page_cells(info) > 0
+    return ((info.get("width") or 0) // FONT_CELL == (cols or FONT_COLS)
+            and font_page_cells(info) > 0)
 
 
 #: **ほかの**ファイルから読む上限。実物の索引は 1951 個あるので、全部を丸ごと読むと遅い
@@ -1939,7 +1946,7 @@ FONT_HUNT_NONE = "  この吸い出しの中には続きが見つかりません
 
 
 def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
-                   known: set | None = None, wide: int = 0) -> list[str]:
+                   known: set | None = None, wide: int = 0, cols: int = 0) -> list[str]:
     """文字表の続きが入っていそうな画像を、**同じ吸い出しの中から**挙げる (#168).
 
     #167 で「1 枚では足りない」と言えるようになったが、**どこを見ればいいかは
@@ -1964,7 +1971,7 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
     # 数えた画像を「もう 1 枚あります」と出すと、足し算が二重になる
     seen = known or set()
     same = [p for p in tim2_pages(img.read(min(font_entry["len"], FONT_OWN_CAP)))
-            if p["at"] not in seen and looks_like_a_font_page(p)]
+            if p["at"] not in seen and looks_like_a_font_page(p, cols)]
     for p in same:
         out.append(f"  ・同じファイルの位置 0x{p['at']:X} にもう 1 枚 "
                    f"({p['width']}×{p['height']} ドット / {font_page_cells(p)} マス)")
@@ -1988,7 +1995,7 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
             deep += 1
         img.seek(other["at"])
         for p in tim2_pages(img.read(min(other["len"], cap)), limit=2):
-            if not (looks_like_a_font_page(p) and font_page_cells(p) >= want):
+            if not (looks_like_a_font_page(p, cols) and font_page_cells(p) >= want):
                 continue
             (same if wide and p["width"] == wide else other_w).append((other["path"], p))
             break
@@ -2005,14 +2012,14 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
 
     if out:
         head = (f"  続きが入っていそうな画像 {len(out)} 件 "
-                f"(1 行 {FONT_COLS} 字の幅で、残り {want} 字が入る大きさ):")
+                f"(1 行 {cols or FONT_COLS} 字の幅で、残り {want} 字が入る大きさ):")
         if wide and same:
             head = (f"  続きが入っていそうな画像 {len(out)} 件 "
-                    f"(1 行 {FONT_COLS} 字の幅で、残り {want} 字が入る大きさ。"
+                    f"(1 行 {cols or FONT_COLS} 字の幅で、残り {want} 字が入る大きさ。"
                     f"**1 枚目と同じ幅 {wide} ドット**のものから先に挙げます):")
         return [head] + out
     return [f"{FONT_HUNT_NONE} "
-            f"(1 行 {FONT_COLS} 字の幅で {want} 字ぶん入るものを "
+            f"(1 行 {cols or FONT_COLS} 字の幅で {want} 字ぶん入るものを "
             f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探した。"
             f"名前に font が付くものと .tms は先頭 {FONT_OWN_CAP // 1024 // 1024} MB まで、"
             f"ほかは先頭 {FONT_HUNT_HEAD // 1024} KB までを見た)。"
@@ -3066,9 +3073,12 @@ def check(folder: str, out=sys.stdout) -> int:
                             "残るのは、そのためです")
                         # 足りないと言うだけで終わらず、**この吸い出しの中から探す** (#168)。
                         # 上で数えた頁は候補に入れない (数えた分をもう一度挙げない)
+                        # **1 枚目の列数で探す** (#274)。借り物の 23 で探すと、
+                        # 1 行 24 字の吸い出しでは同じ幅の 2 枚目を素通りする
                         hunt = font_page_hunt(img, entries, e, cells,
                                               {p["at"] for p in own} | {info["at"]},
-                                              wide=info.get("width") or 0)
+                                              wide=info.get("width") or 0,
+                                              cols=(info.get("width") or 0) // FONT_CELL)
                         for line in hunt:
                             say(line)
                         # **「この行ごと報告してください」と言うなら、数える** (#250。
@@ -3148,6 +3158,13 @@ def check(folder: str, out=sys.stdout) -> int:
     # (CLI はフォルダの font.txt、画面は貼ってある表) がそのまま締めの行に出てしまい、
     # 2 つの報告を 1 行ずつ突き合わせられなくなる (tests/e2e/broken.py)
     if skipped:
+        # **同じ行を 2 度数えない** (#274)。フォント画像が 2 枚見つかると、
+        # どちらも「文字表の 2 枚目 (残り N 字…)」を足すので、同じ文が並んで
+        # 件数まで増えていた。順は残したまま、重なりだけを落とす
+        seen_skips: dict[str, None] = {}
+        for note in skipped:
+            seen_skips.setdefault(note, None)
+        skipped = list(seen_skips)
         say()
         say(f"診ていない段: {len(skipped)} 件 ({', '.join(skipped)})")
     # **診ていない段があるのに「問題なし」で締めない** (#268)。#174 はここを

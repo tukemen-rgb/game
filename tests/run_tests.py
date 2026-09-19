@@ -8732,6 +8732,131 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestTheContinuationIsHuntedWithTheGridWeFound(unittest.TestCase):
+    """**続きは「1 枚目と同じ升目」で探すこと** (#274).
+
+    #273 の宿題は「2 段目の最後の 1 つ、1 行 23 字 (`FONT_COLS`)」。
+    1 行 **24 字**のフォント画像を 2 枚持つ吸い出しで診たら、こうなりました。
+
+        → [フォント] 幅が 528 ドットあり、22 ドット刻みで割ると 1 行 24 字に
+           なります (この作品は 1 行 23 字)。…
+          この画像のマスは 1056 個 (この作品の文字表は全部で 1656 字)
+          **この吸い出しの中には続きが見つかりませんでした**
+           (1 行 **23 字**の幅で 600 字ぶん入るものを … 探した)
+
+    **2 枚目は同じ吸い出しの中に、同じ 528 ドット幅で置いてある。** 探す側が
+    借り物の 23 で絞っていたので、素通りしていました。社長は「続きはこの吸い出しに
+    無い」と受け取り、**在りかを探す宿題を無駄に抱えます**。
+
+    23 は公開ソースが実物の 1 枚で決め打ちした数 (docs/09 の「証拠の強さの順」の
+    2 段目)。**1 枚目が見つかっているなら、その列数のほうがこの吸い出しの事実**です。
+    幅が 23 字ぶんでないことを `→` で言うのは今までどおり (読み方の設定が
+    違う合図なので、そこは黙らせない)。
+    """
+
+    COLS = 24                      # 借り物の 23 ではない版のつもり
+
+    @classmethod
+    def dump(cls, folder: str, rows1: int, rows2: int) -> None:
+        import struct
+        import boku2
+        import make_boku2_sample
+        import make_tim2
+        os.makedirs(os.path.join(folder, "MAP"), exist_ok=True)
+        p1, _ = make_tim2.font_sheet(rows=rows1, cols=cls.COLS, cell=boku2.FONT_CELL)
+        p2, _ = make_tim2.font_sheet(rows=rows2, cols=cls.COLS, cell=boku2.FONT_CELL)
+        tms = b"TMS\0" + struct.pack("<I", 0x80) + b"\0" * (0x80 - 8) + p1
+        idx, img, _ = make_boku2_sample.build_dfi(
+            [(True, 1, "/", None), (False, 1, "bk_font.tms", tms),
+             (False, 0, "font2.tms", p2)])
+        for name, blob in (("BOKU2.IDX", idx), ("BOKU2.IMG", img)):
+            with open(os.path.join(folder, name), "wb") as fh:
+                fh.write(blob)
+
+    @classmethod
+    def said(cls) -> str:
+        import io
+        import boku2
+        # 1 枚目 1056 マス / 2 枚目 600 マス = 1656 (残りがちょうど入る大きさ)
+        rows1 = 1058 // cls.COLS + 1
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            cls.dump(folder, rows1, (boku2.FONT_GLYPHS - rows1 * cls.COLS
+                                     + cls.COLS - 1) // cls.COLS)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_the_material_is_not_the_borrowed_grid(self):
+        """前提: 1 行の字数が借り物の 23 でないこと (0 件で緑にしない)."""
+        import boku2
+        self.assertNotEqual(self.COLS, boku2.FONT_COLS, "材料が弱い: 借り物と同じ升目")
+        self.assertIn(f"1 行 {self.COLS} 字になります", self.said(),
+                      "材料が違います (幅が 23 字ぶんになっている)")
+
+    def test_the_second_page_in_the_same_dump_is_found(self):
+        import boku2
+        said = self.said()
+        self.assertNotIn(boku2.FONT_HUNT_NONE.strip(), said,
+                         "同じ吸い出しにある 2 枚目を見落としています")
+        line = next((ln for ln in said.splitlines()
+                     if ln.lstrip().startswith("・") and "font2.tms" in ln), "")
+        self.assertTrue(line, f"2 枚目を挙げていません\n{said[-900:]}")
+        self.assertIn("← 1 枚目と同じ幅", line, line)
+
+    def test_the_hunt_says_which_grid_it_used(self):
+        line = next((ln for ln in self.said().splitlines()
+                     if "続きが入っていそうな画像" in ln), "")
+        self.assertTrue(line, "探した結果の見出しが出ていない")
+        self.assertIn(f"1 行 {self.COLS} 字の幅で", line,
+                      f"どの升目で探したかが借り物のままです: {line}")
+
+    def test_the_odd_grid_is_still_reported(self):
+        """**緩めすぎない。** 幅が 23 字ぶんでないことは今までどおり `→` で言う."""
+        said = self.said()
+        self.assertTrue(any(ln.startswith("→ [フォント] 幅が") for ln in said.splitlines()),
+                        f"升目が違うことを言わなくなりました\n{said[-900:]}")
+
+    def test_the_not_checked_line_does_not_repeat_itself(self):
+        """同じ「診ていない段」を 2 度数えないこと (フォント画像が 2 枚あると重なる)."""
+        import boku2
+        import io
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            # 続きが見つからない形 (2 枚とも小さい) にして、同じ行が 2 度出る道を通す
+            self.dump(folder, 20, 20)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            said = out.getvalue()
+        line = next((ln for ln in said.splitlines() if ln.startswith("診ていない段:")), "")
+        self.assertTrue(line, "診ていない段の行が出ていない")
+        # 中の括弧を食べないように、外側の丸括弧だけを外す
+        notes = line[line.index("(") + 1:line.rindex(")")].split(", ")
+        self.assertEqual(len(notes), len(set(notes)),
+                         f"同じ行を 2 度数えています: {line}")
+
+    def test_a_normal_dump_still_uses_the_borrowed_grid(self):
+        """1 枚目が見つからないときは、今までどおり借り物の 23 で探すこと."""
+        import boku2
+        self.assertTrue(boku2.looks_like_a_font_page(
+            {"width": boku2.FONT_COLS * boku2.FONT_CELL, "height": 22}),
+            "借り物の升目で見なくなりました")
+        self.assertFalse(boku2.looks_like_a_font_page(
+            {"width": (boku2.FONT_COLS + 1) * boku2.FONT_CELL, "height": 22}),
+            "升目を指定しないのに、何でも通すようになりました")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue("looksLikeAFontPage = (p, cols = 0) =>" in ui,
+                        "画面が借り物の升目でしか探していません")
+        self.assertTrue("Math.floor((p.width || 0) / FONT_CELL));" in ui,
+                        "画面が 1 枚目の列数を渡していません")
+        self.assertTrue("skipped = [...new Set(skipped)];" in ui,
+                        "画面が同じ「診ていない段」を 2 度数えています")
+
+
 class TestTheDumpsOwnFontOutranksTheBorrowedCount(unittest.TestCase):
     """**この吸い出しのフォント画像のほうが、借り物の 1656 字より強い** (#273).
 
