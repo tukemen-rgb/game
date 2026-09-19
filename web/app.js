@@ -4174,11 +4174,16 @@ async function buildIdxReport() {
   }
   if ((c.named_ok || 0) < items.length * 0.9) {
     problems++;
-    /* 文言は tools/boku2.py の check と 1 字そろえる。docs/10 の → の一覧もこの形 (#100) */
-    lines.push("→ 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください");
-    /* **どこで止まったかが分かるなら、そこを指す** (#202)。CLI と 1 字そろえる */
+    /* **2 つの場所を続けて指さない** (#264。CLI の check と 1 字そろえる)。
+       次の行が「名前の置き場の先頭ではなく、ここ」と書いてあるので、その 1 行上で
+       名前の置き場の先頭を指すと、2 行で正反対のことを言うことになる */
     const stopNote = dfiNameStopNote(dfiNameStop(b));
-    if (stopNote) lines.push(stopNote);
+    if (stopNote) {
+      lines.push("→ 名前が付かないファイルが多い。**どこで止まったかは次の行**にあります");
+      lines.push(stopNote);
+    } else {
+      lines.push("→ 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください");
+    }
     lines.push("   " + [...b.subarray(recEnd, recEnd + 64)].map((v) => hex(v, 2)).join(" "));
   }
   if (c.dupes) { problems++; lines.push("→ 同じ名前があります。フォルダの入れ子の規則が実物と違うかもしれません (docs/09 #18)"); }

@@ -8564,6 +8564,141 @@ class TestTheFirstHourTableMatchesWhatTheToolDoes(unittest.TestCase):
                 self.assertIn(phrase, said, f"道具が「{phrase}」と言っていない")
 
 
+class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
+    """**2 行続けて別々の場所を指さないこと** (#264).
+
+    #202 で「名前の読み取りがどこで止まったか」を足したとき、**その 1 行上を
+    直し忘れていました。** 名前が付かない索引で出ていたのはこの 2 行です:
+
+        → 名前が付かないファイルが多い。名前の置き場 (上の 0x…) 付近の 64 バイトを報告してください
+           名前は **1 個目で止まっています**: 位置 0x220 に … (名前の置き場の先頭ではなく、ここ)
+
+    上は「名前の置き場の先頭を見ろ」、下は「名前の置き場の先頭ではなく、ここ」。
+    **2 行で正反対のことを言っています。** 社長の実物はまさに名前が付かない
+    吸い出しだった (docs/09 の #1・#3) ので、いちばん最初に読む 2 行がこれでした。
+    どちらを見ればよいか分からなければ、報告される 64 バイトも外れます。
+
+    止まった所が分かるときは上の行で場所を言わず、**次の行にあると言うだけ**に
+    する。分からないときだけ今までどおり名前の置き場の先頭を指す。
+    """
+
+    #: 場所を指している文句。止まった所が分かるときに、この行と同居してはいけない
+    OLD = "名前の置き場 (上の 0x…) 付近"
+    #: 止まった所が分かるときに、上の行が言うこと
+    POINTER = "どこで止まったかは次の行"
+
+    @staticmethod
+    def arrow_and_next(said: str):
+        """「名前が付かないファイルが多い」の → の行と、その次の行を返す."""
+        rows = said.splitlines()
+        i = next((k for k, ln in enumerate(rows)
+                  if ln.startswith("→ 名前が付かないファイルが多い")), None)
+        return (None, None) if i is None else (rows[i], rows[i + 1] if i + 1 < len(rows) else "")
+
+    def test_when_the_stop_is_known_only_the_next_line_points(self):
+        """止まった所が分かる壊れ方で、上の行が場所を言っていないこと.
+
+        `--break name` (名前に使えない字が 1 つ) と `--break allnames`
+        (名前の終わりの 0 が無い) の**両方**で見る。前者は #1・#3 の実物の形。
+        """
+        import io
+        import boku2
+        import make_boku2_sample
+
+        for kind in ("name", "allnames"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                folder = os.path.join(tmp, "S")
+                make_boku2_sample.build_sample(folder)
+                make_boku2_sample.damage(folder, kind)
+                out = io.StringIO()
+                boku2.check(folder, out=out)
+                arrow, nxt = self.arrow_and_next(out.getvalue())
+                self.assertTrue(arrow, f"{kind}: 名前の → が出ていない")
+                # 1. 次の行が本当に場所を指していること (指していないなら前提が違う)
+                self.assertTrue("個目で止まって" in nxt or "名前らしくありません" in nxt,
+                                f"{kind}: 次の行が場所を指していない: {nxt}")
+                # 2. **その上で**、→ の行が別の場所を指していないこと
+                self.assertNotIn(self.OLD, arrow,
+                                 f"{kind}: → の行と次の行が別の場所を指しています\n"
+                                 f"  {arrow}\n  {nxt}")
+                self.assertIn(self.POINTER, arrow,
+                              f"{kind}: → の行が次の行を指していない: {arrow}")
+
+    def test_when_the_stop_is_unknown_the_old_wording_stays(self):
+        """止まった所が分からないときは、今までどおり名前の置き場の先頭を指すこと.
+
+        名前の置き場が**途中で終わっている**索引 (30 レコードに名前が 10 個だけ)
+        を作る。枠は最後まで壊れていないので `dfi_name_stop` は None を返す ——
+        この道で案内ごと消してしまうと、**社長に報告する所が 1 つも無くなる。**
+        """
+        import io
+        import struct
+        import boku2
+
+        n, given = 30, 10
+        codes = [1, 2, 3, 0x8000]
+        good = (struct.pack("<I", 1) + struct.pack("<I", 12) + b"\0" * 4
+                + struct.pack(f"<{len(codes)}H", *codes))
+        data, recs = bytearray(), []
+        for _i in range(n):
+            recs.append((len(data) // 2048, len(good)))
+            data += good + bytes(2048 - len(good))
+        idx = bytearray(b"DFI\0" + struct.pack("<III", n, 0, 0))
+        for sector, ln in recs:
+            idx += struct.pack("<HHIII", 0, 0, 0, sector, ln)
+        for i in range(given):
+            idx += f"f{i:03d}.msg".encode() + b"\0"
+        idx = bytes(idx)
+
+        # 前提: 止まった所が分からない形であること (分かる形で試しても意味が無い)
+        self.assertIsNone(boku2.dfi_name_stop(idx), "この材料では止まった所が分かってしまう")
+        named = [e for e in boku2.read_dfi(idx, len(data))
+                 if not os.path.basename(e["path"]).startswith("#")]
+        self.assertEqual(len(named), given, f"名前が付いたのが {len(named)} 件")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "BOKU2.IDX"), "wb") as fh:
+                fh.write(idx)
+            with open(os.path.join(tmp, "BOKU2.IMG"), "wb") as fh:
+                fh.write(bytes(data))
+            out = io.StringIO()
+            boku2.check(tmp, out=out)
+            said = out.getvalue()
+            arrow, nxt = self.arrow_and_next(said)
+            self.assertTrue(arrow, f"名前の → が出ていない\n{said[-500:]}")
+            self.assertIn(self.OLD, arrow, f"指す所が 1 つも無くなっています: {arrow}")
+            self.assertNotIn(self.POINTER, arrow,
+                             f"次の行を指しているのに、次の行が場所を言っていない: {nxt}")
+            # 添えた 16 進が続くこと (報告するものが無ければ案内の意味が無い)
+            self.assertRegex(nxt, r"^   (?:[0-9A-F]{2} )*[0-9A-F]{2}$",
+                             f"64 バイトが添えられていない: {nxt}")
+
+    def test_the_screen_says_the_same_two_lines(self):
+        """画面の要約も同じ 2 通りを出すこと.
+
+        文言は**道具の側から取り出して**突き合わせる。手で書き写すと、片側を
+        直したときに写しだけが古くなる (#179 と同じ穴)。
+        """
+        import re
+
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            cli = fh.read()
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        i = cli.index("def check(folder: str, out=sys.stdout) -> int:")
+        body = cli[i:cli.index("\ndef ", i + 10)]
+        got = re.findall(r'say\("(→ 名前が付かないファイルが多い[^"]*)"\)', body)
+        self.assertEqual(len(got), 2,
+                         f"check の名前の → が {len(got)} 通りしかない (2 通りのはず)")
+        for line in got:
+            # assertIn は落ちたとき app.js 全文を吐く。何がまずいのか読めなくなる
+            self.assertTrue(line in ui, f"web/app.js に同じ行が無い: {line}")
+        # 画面側も 2 通りで、**余分な言い方が増えていない**こと
+        mirror = re.findall(r'lines\.push\("(→ 名前が付かないファイルが多い[^"]*)"\)', ui)
+        self.assertEqual(sorted(mirror), sorted(got),
+                         f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
