@@ -8326,6 +8326,147 @@ class TestWhichFilesFailTheChecksumAndHowTheySit(unittest.TestCase):
         self.assertTrue(any(ours), "0 件で緑にしない")
 
 
+class TestTheNameLineupIsComparedWithoutRelyingOnOrder(unittest.TestCase):
+    """**並びが合わなくても、名前の顔ぶれは比べられる** (#262).
+
+    `compare_crc_names` (#241) は**同じ順番どうし**を比べるので、並びが違うと
+    「全部食い違う」になる。だから #242 以降は**検査値が全部合ったときしか**
+    呼んでいない —— つまり**並びが違う吸い出しでは、名前について何も
+    言っていなかった**。社長の実物で起きうる形そのもの (#252)。
+
+    顔ぶれが同じかどうかは並びに関係なく決まる。公開ソースの `getCRCdict` も
+    ディスクのファイル名を一覧から**探して** (`file_names.index`)、無ければ
+    `MISSING FILE` と言う。顔ぶれが同じなら**同じディスクのもの**、
+    大きく違うなら**別の版**。
+    """
+
+    @staticmethod
+    def reverse_crc(folder: str) -> None:
+        import struct
+        import boku2
+        path = os.path.join(folder, "BOKU2.CRC")
+        with open(path, "rb") as fh:
+            raw = bytearray(fh.read())
+        n, dir_start = struct.unpack_from("<5I", raw, 0)[:2]
+        e = boku2.CRC_ENTRY
+        items = [bytes(raw[dir_start + i * e: dir_start + (i + 1) * e]) for i in range(n)]
+        for i, it in enumerate(reversed(items)):
+            raw[dir_start + i * e: dir_start + (i + 1) * e] = it
+        with open(path, "wb") as fh:
+            fh.write(bytes(raw))
+
+    @staticmethod
+    def rename_crc(folder: str, step: int) -> None:
+        """検査値ファイルの名前を `step` おきに別物にする."""
+        import struct
+        import boku2
+        path = os.path.join(folder, "BOKU2.CRC")
+        with open(path, "rb") as fh:
+            raw = bytearray(fh.read())
+        n, dir_start = struct.unpack_from("<5I", raw, 0)[:2]
+        e = boku2.CRC_ENTRY
+        for i in range(0, n, step):
+            at = dir_start + i * e + 8
+            raw[at:at + e - 8] = b"\0" * (e - 8)
+            name = f"zz{i:03d}.bin".encode()
+            raw[at:at + len(name)] = name
+        with open(path, "wb") as fh:
+            fh.write(bytes(raw))
+
+    @staticmethod
+    def check(folder: str) -> str:
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                            "check", folder], capture_output=True, text=True, cwd=REPO)
+        return r.stdout + r.stderr
+
+    def test_a_reversed_crc_still_says_the_lineup_matches(self):
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            self.reverse_crc(folder)
+            said = self.check(folder)
+            # **材料が弱くないこと**: 並びは本当に合っていない
+            self.assertIn("検査値ファイルの並びが索引と違う", said, said[-700:])
+            self.assertIn("名前の顔ぶれは同じ", said, said[-900:])
+            self.assertIn("同じディスクのもの", said, said[-900:])
+
+    def test_a_different_disc_is_called_out(self):
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            self.rename_crc(folder, 2)          # 半分だけ別名
+            self.reverse_crc(folder)
+            said = self.check(folder)
+            self.assertIn("名前の顔ぶれ: 両方にある", said, said[-900:])
+            self.assertIn("索引だけ:", said, said[-900:])
+            self.assertIn("検査値ファイルだけ:", said, said[-900:])
+
+    def test_nothing_in_common_says_another_disc(self):
+        import boku2
+        got = boku2.crc_name_overlap({"names": ["zz.bin", "yy.bin"]},
+                                     [{"path": "a/diary.bin"}, {"path": "b/x.msg"}])
+        self.assertEqual(got["both"], 0, got)
+        line = "\n".join(boku2.crc_name_overlap_lines(got))
+        self.assertIn("別のディスクのもの", line, line)
+
+    def test_a_healthy_dump_does_not_get_the_lineup_line(self):
+        """**いつも出るなら出す意味が無い。** 並びが合っていれば今までどおり
+        「名前も N 件そろっています」だけ."""
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            said = self.check(folder)
+            self.assertIn("名前も 20 件そろっています", said)
+            self.assertNotIn("名前の顔ぶれ", said, said[-700:])
+
+    def test_the_folder_part_is_ignored(self):
+        """検査値ファイルの名前にはフォルダが付かないので、ファイル名だけで比べる."""
+        import boku2
+        got = boku2.crc_name_overlap(
+            {"names": ["SYSTEM.MSG", "diary.bin"]},
+            [{"path": "system/system.msg"}, {"path": "diary.bin"}, {"path": "#7"}])
+        self.assertEqual(got["both"], 2, got)
+        self.assertEqual(got["only_index"], [], got)
+        self.assertEqual(got["only_crc"], [], got)
+
+    def test_the_two_sides_say_the_same_thing(self):
+        import json
+        import shutil
+        import subprocess
+        import boku2
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        src = ""
+        for name in ("plainName", "crcNameOverlap", "crcNameOverlapLines"):
+            i = app.index(f"function {name}(")
+            src += app[i:app.index("\n}\n", i) + 3]
+        src = "const CRC_BAD_SHOWN = 5;" + src
+        cases = [
+            ({"names": ["a.bin", "b.bin"]}, [{"path": "x/a.bin"}, {"path": "y/b.bin"}]),
+            ({"names": ["a.bin", "z.bin"]}, [{"path": "a.bin"}, {"path": "b.bin"}]),
+            ({"names": ["q.bin"]}, [{"path": "a.bin"}]),
+        ]
+        js_cases = [[c, [{"name": e["path"], "base": e["path"]} for e in es]]
+                    for c, es in cases]
+        script = (src + f"\nconst cs={json.dumps(js_cases)};"
+                        "console.log(JSON.stringify(cs.map(([c,i])=>"
+                        "crcNameOverlapLines(crcNameOverlap(c,i)))));")
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stderr[-500:])
+        ours = [boku2.crc_name_overlap_lines(boku2.crc_name_overlap(c, es))
+                for c, es in cases]
+        self.assertEqual(json.loads(res.stdout), ours)
+        self.assertTrue(all(ours), "0 件で緑にしない")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 

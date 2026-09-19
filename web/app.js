@@ -3809,6 +3809,46 @@ const CRC_BAD_SHOWN = 5;
 /** 合わなかった項目が固まっているか散らばっているか (#261。CLI の crc_bad_shape と同じ言葉)。
  *  固まっているなら吸い出しがその区間で壊れている (吸い出し直せば直る)。
  *  散らばっているなら切り分けの位置の読み方が外れている (直らない)。 */
+/** 名前を**集合として**突き合わせる (#262。tools/boku2.py の crc_name_overlap と同じ)。
+ *  並び順にまったく頼らない。顔ぶれが同じなら同じディスクのもの、大きく違うなら別の版。
+ *  検査値ファイルの名前にはフォルダが付かないので、ファイル名だけで比べる。 */
+function crcNameOverlap(crc, items) {
+  const ours = new Set();
+  for (const it of items) {
+    const b = plainName(it.base || it.name);
+    if (!b.startsWith("#")) ours.add(b);
+  }
+  const theirs = new Set(crc.names.filter(Boolean).map((n) => n.toLowerCase()));
+  const onlyIndex = [...ours].filter((x) => !theirs.has(x)).sort();
+  const onlyCrc = [...theirs].filter((x) => !ours.has(x)).sort();
+  return { both: [...ours].filter((x) => theirs.has(x)).length, onlyIndex, onlyCrc };
+}
+
+/** crcNameOverlap を行にする (#262。CLI の crc_name_overlap_lines と同じ言葉) */
+function crcNameOverlapLines(got) {
+  const { onlyIndex, onlyCrc, both } = got;
+  if (!onlyIndex.length && !onlyCrc.length && both) {
+    return [`   ただし**名前の顔ぶれは同じ** (${both.toLocaleString()} 種類)。`
+      + "並びが違うだけで、**同じディスクのもの**とみてよいです"];
+  }
+  if (!both) {
+    return ["   **名前の顔ぶれがまったく重なりません。** 吸い出しと検査値ファイルが"
+      + "**別のディスクのもの**かもしれません"];
+  }
+  const out = [`   名前の顔ぶれ: 両方にある ${both.toLocaleString()} 種類 / `
+    + `索引だけ ${onlyIndex.length.toLocaleString()} 種類 / `
+    + `検査値ファイルだけ ${onlyCrc.length.toLocaleString()} 種類`];
+  if (onlyIndex.length) {
+    out.push(`     索引だけ: ${onlyIndex.slice(0, CRC_BAD_SHOWN).join(", ")}`
+      + (onlyIndex.length > CRC_BAD_SHOWN ? " …" : ""));
+  }
+  if (onlyCrc.length) {
+    out.push(`     検査値ファイルだけ: ${onlyCrc.slice(0, CRC_BAD_SHOWN).join(", ")}`
+      + (onlyCrc.length > CRC_BAD_SHOWN ? " …" : ""));
+  }
+  return out;
+}
+
 function crcBadShape(badAt, looked) {
   if (badAt.length < 2) return "";
   const span = badAt[badAt.length - 1] - badAt[0] + 1;
@@ -4322,6 +4362,10 @@ async function buildIdxReport() {
             + "(同じ検査値の名前が 2 つ以上ある分は引き当てません):");
           lines.push("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/"
             + " --names-from-crc 実物/BOKU2.CRC");
+          /* **並びが合わなくても、顔ぶれは比べられる** (#262。CLI と同じ言葉) */
+          if (idxNamesOk && crc.names.some((x) => x)) {
+            for (const ln of crcNameOverlapLines(crcNameOverlap(crc, items))) lines.push(ln);
+          }
         } else {
           lines.push(`→ 切り分けた先頭 ${CRC_HEAD} バイトの検査値が ${crcNg.toLocaleString()} 件合いません `
             + `(合う ${crcOk.toLocaleString()} 件 / 見た ${looked.toLocaleString()} 件)。`
@@ -4336,6 +4380,9 @@ async function buildIdxReport() {
           }
           const shape = crcBadShape(crcBadAt, looked);
           if (shape) lines.push(shape);
+          if (idxNamesOk && crc.names.some((x) => x)) {
+            for (const ln of crcNameOverlapLines(crcNameOverlap(crc, items))) lines.push(ln);
+          }
         }
       }
     }

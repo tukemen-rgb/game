@@ -2176,6 +2176,51 @@ def compare_crc_names(crc: dict, entries: list) -> tuple[int, int, tuple | None]
 CRC_BAD_SHOWN = 5
 
 
+def crc_name_overlap(crc: dict, entries: list) -> dict:
+    """名前を**集合として**突き合わせる (#262)。並び順にまったく頼らない.
+
+    `compare_crc_names` (#241) は**同じ順番どうし**を比べるので、並びが違うと
+    「全部食い違う」になってしまい、#242 以降は**検査値が全部合ったときしか**
+    呼んでいない。つまり**並びが違う吸い出しでは、名前について何も言っていない**。
+
+    ところが「顔ぶれが同じかどうか」は並びに関係なく決まる。公開ソースの
+    `getCRCdict` も、ディスクのファイル名を検査値ファイルの名前の**一覧から
+    探して** (`file_names.index`)、無ければ `MISSING FILE` と言う。
+    顔ぶれが同じなら**同じディスクのもの**、大きく違うなら**別の版**。
+
+    検査値ファイルの名前にはフォルダが付かないので、こちらも**ファイル名だけ**で
+    比べる (大文字小文字は無視)。
+
+    @returns {"both": 両方にある名前の種類数, "only_index": [...], "only_crc": [...]}
+    """
+    ours = {plain_name(e["path"]) for e in entries
+            if not plain_name(e["path"]).startswith("#")}
+    theirs = {n.lower() for n in crc["names"] if n}
+    return {"both": len(ours & theirs),
+            "only_index": sorted(ours - theirs),
+            "only_crc": sorted(theirs - ours)}
+
+
+def crc_name_overlap_lines(got: dict) -> list[str]:
+    """`crc_name_overlap` を行にする (#262)。**画面と同じ言葉**にしておくこと."""
+    only_i, only_c = got["only_index"], got["only_crc"]
+    if not only_i and not only_c and got["both"]:
+        return [f"   ただし**名前の顔ぶれは同じ** ({got['both']:,} 種類)。"
+                "並びが違うだけで、**同じディスクのもの**とみてよいです"]
+    if not got["both"]:
+        return ["   **名前の顔ぶれがまったく重なりません。** 吸い出しと検査値ファイルが"
+                "**別のディスクのもの**かもしれません"]
+    out = [f"   名前の顔ぶれ: 両方にある {got['both']:,} 種類 / "
+           f"索引だけ {len(only_i):,} 種類 / 検査値ファイルだけ {len(only_c):,} 種類"]
+    if only_i:
+        out.append(f"     索引だけ: {', '.join(only_i[:CRC_BAD_SHOWN])}"
+                   + (" …" if len(only_i) > CRC_BAD_SHOWN else ""))
+    if only_c:
+        out.append(f"     検査値ファイルだけ: {', '.join(only_c[:CRC_BAD_SHOWN])}"
+                   + (" …" if len(only_c) > CRC_BAD_SHOWN else ""))
+    return out
+
+
 def crc_bad_shape(bad_at: list[int], looked: int) -> str:
     """合わなかった項目が**固まっているか散らばっているか** (#261).
 
@@ -2310,6 +2355,9 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
                          "(同じ検査値の名前が 2 つ以上ある分は引き当てません):")
             lines.append("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/"
                          " --names-from-crc 実物/BOKU2.CRC")
+            # **並びが合わなくても、顔ぶれは比べられる** (#262)
+            if not names_missing and any(crc["names"]):
+                lines += crc_name_overlap_lines(crc_name_overlap(crc, entries))
         else:
             lines.append(f"→ 切り分けた先頭 {CRC_HEAD} バイトの検査値が {ng:,} 件合いません "
                          f"(合う {ok:,} 件 / 見た {looked:,} 件)。"
@@ -2325,6 +2373,12 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
             shape = crc_bad_shape(bad_at, looked)
             if shape:
                 lines.append(shape)
+            # **並びが合わなくても、顔ぶれは比べられる** (#262)。ここは
+            # `compare_crc_names` (同じ順番どうし) を呼べない所なので、今までは
+            # 名前について何も言っていなかった。同じディスクのものなら顔ぶれは
+            # そろうし、そろわなければ**版が違う**という、いちばん大きい話になる
+            if not names_missing and any(crc["names"]):
+                lines += crc_name_overlap_lines(crc_name_overlap(crc, entries))
     return lines, problems
 
 
