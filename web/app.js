@@ -6116,7 +6116,9 @@ function bestBokuMap(b, tries) {
     let prev = 0, ok = true, first = 0;
     for (let i = 0; i < n; i++) {
       const off = u32le(b, 4 + i * rec), len = u32le(b, 8 + i * rec);
-      if (!off && !len) { items.push({ i, at: 0, len: 0 }); continue; }
+      /* **位置が 0 なら空の枠。長さの欄は見ない** (#253。CLI の _best_map_rec と同じ。
+         公開ソースの unpackMap は if file_offset == 0 だけで飛ばしている) */
+      if (!off) { items.push({ i, at: 0, len: 0 }); continue; }
       if (off < head || off + len > b.length || off < prev || (off & 15)) { ok = false; break; }
       if (!first) first = off;
       prev = off + len;

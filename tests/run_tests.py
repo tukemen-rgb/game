@@ -7294,6 +7294,131 @@ class TestNamesComeOutEvenWhenTheOrderDiffers(unittest.TestCase):
         self.assertGreaterEqual(len(want), 5, f"引き当て表が {len(want)} 件しかない")
 
 
+class TestAnEmptySlotDoesNotThrowAwayTheWholeContainer(unittest.TestCase):
+    """**位置が 0 なら空の枠。長さの欄は見ない** (#253).
+
+    公開ソースの `unpackMap` は `if file_offset == 0: continue` だけで枠を飛ばす。
+    こちらは**長さまで 0 であること**を求めていたので、位置 0 で長さの欄に値が
+    残っている枠が 1 つあるだけで、`parse_map` が `None` を返し、
+    **入れ物ぜんぶを「入れ物ではありません」と突き返して**いた。
+    向こうの `packMap` は空の枠を 0 で 2 つ書くが、**ディスクの元データに何が
+    残っているかは別の話**で、向こうの読み側はそこを見ていない。
+    """
+
+    HEAD = 0x80
+
+    @classmethod
+    def container(cls, parts: list[bytes], null_at: int, null_size: int) -> bytes:
+        """15 枠の入れ物。`null_at` 番だけ位置 0 / 長さ `null_size` にする."""
+        import struct
+        body = bytearray(b"\0" * cls.HEAD)
+        ents = []
+        fed = 0
+        for i in range(15):
+            if i == null_at:
+                ents.append((0, null_size))
+            elif fed < len(parts):
+                ents.append((len(body), len(parts[fed])))
+                body += parts[fed]
+                fed += 1
+            else:
+                ents.append((0, 0))
+        raw = bytearray(struct.pack("<I", 0xE))
+        for off, size in ents:
+            raw += struct.pack("<II", off, size)
+        raw += b"\0" * (cls.HEAD - len(raw))
+        return bytes(raw) + bytes(body[cls.HEAD:])
+
+    def test_a_null_slot_with_a_leftover_size_is_still_read(self):
+        import boku2
+        raw = self.container([b"A" * 32, b"B" * 32], null_at=2, null_size=0x40)
+        items = boku2.parse_map(raw)
+        self.assertIsNotNone(items, "空の枠 1 つで入れ物ぜんぶを突き返している")
+        self.assertEqual([(it["i"], it["len"]) for it in items if it["len"]],
+                         [(0, 32), (1, 32)], items)
+
+    def test_the_same_bytes_still_read_when_the_size_is_zero(self):
+        """**材料が弱くないこと**: 長さも 0 なら前から読めていた形."""
+        import boku2
+        raw = self.container([b"A" * 32, b"B" * 32], null_at=2, null_size=0)
+        items = boku2.parse_map(raw)
+        self.assertIsNotNone(items)
+        self.assertEqual([(it["i"], it["len"]) for it in items if it["len"]],
+                         [(0, 32), (1, 32)], items)
+
+    def test_the_public_source_reads_it_the_same_way(self):
+        """**実物で動いている側と突き合わせる** (#108 と同じやり方)。
+        公開ソースの `unpackMap` をこの合成データに対して実際に走らせる."""
+        import struct
+        import types
+        import boku2
+        pub = "/home/user/hilltopworks/bokunonatsuyasumi2"
+        if not os.path.isdir(pub):
+            self.skipTest("公開ソースが無い")
+        # resource.py は numpy を読み込むので、使う読み取り関数だけを本文のまま借りる
+        with open(os.path.join(pub, "resource.py"), encoding="utf-8") as fh:
+            rsrc = fh.read()
+        resource = types.ModuleType("resource")
+        for name in ("ReadString", "readLong", "readInt", "readShort", "readByte"):
+            i = rsrc.index(f"def {name}(")
+            resource.__dict__.update({"struct": struct})
+            exec(rsrc[i:rsrc.index("\ndef ", i + 5)], resource.__dict__)
+        with open(os.path.join(pub, "UNPACK.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        i = src.index("def unpackMap(")
+        ns = {"resource": resource, "os": os, "log": lambda *a, **k: None}
+        exec(src[i:src.index("\ndef ", i + 10)], ns)
+
+        raw = self.container([b"A" * 32, b"B" * 32], null_at=2, null_size=0x40)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "M.BIN")
+            with open(path, "wb") as fh:
+                fh.write(raw)
+            out = os.path.join(tmp, "OUT")
+            ns["unpackMap"](path, out, 1)
+            theirs = sorted(os.listdir(out))
+        ours = sorted(f"{it['i']}.bin" for it in (boku2.parse_map(raw) or []) if it["len"])
+        self.assertEqual(theirs, ["0.bin", "1.bin"],
+                         f"材料が弱い: 向こうも読めていない: {theirs}")
+        self.assertEqual(ours, theirs, "実物で動いている側と答えが違う")
+
+    def test_a_block_of_zeros_is_still_not_a_container(self):
+        """**要らないものまで入れ物と言わない。** 位置が 1 つも無いなら入れ物ではない."""
+        import struct
+        import boku2
+        raw = struct.pack("<I", 0xE) + b"\0" * 0x100
+        self.assertIsNone(boku2.parse_map(raw), "ゼロの塊を入れ物と言っている")
+        # 長さの欄だけ値が入っていても同じ (位置が無ければ読みようがない)
+        raw = bytearray(struct.pack("<I", 0xE) + b"\0" * 0x100)
+        struct.pack_into("<II", raw, 4, 0, 0x40)
+        self.assertIsNone(boku2.parse_map(bytes(raw)), "ゼロの塊を入れ物と言っている")
+
+    def test_the_two_sides_read_it_the_same_way(self):
+        import json
+        import shutil
+        import subprocess
+        import boku2
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        raw = self.container([b"A" * 32, b"B" * 32], null_at=2, null_size=0x40)
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        start = app.index("function bokuMapDerivedCount(")
+        end = app.index("\nfunction bokuUsedInPart(", start)
+        script = ("const u32le=(b,p)=>(b[p]|(b[p+1]<<8)|(b[p+2]<<16)|(b[p+3]<<24))>>>0;"
+                  + app[start:end]
+                  + f"\nconst b=Uint8Array.from({json.dumps(list(raw))});"
+                    "const m=parseBokuMap(b);"
+                    "console.log(JSON.stringify(m?m.items.filter(x=>x.len).map(x=>[x.i,x.len]):null));")
+        res = subprocess.run([node, "-e", script], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, res.stderr[-600:])
+        ours = [[it["i"], it["len"]] for it in (boku2.parse_map(raw) or []) if it["len"]]
+        self.assertEqual(json.loads(res.stdout), ours)
+        self.assertTrue(ours, "0 件で緑にしない")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 

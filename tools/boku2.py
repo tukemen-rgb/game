@@ -815,7 +815,13 @@ def _best_map_rec(b: bytes, tries: list[tuple[int, int]]):
         items, prev, first, ok = [], 0, 0, True
         for i in range(n):
             off, length = struct.unpack_from("<II", b, 4 + i * rec)
-            if not off and not length:
+            # **位置が 0 なら空の枠。長さの欄は見ない** (#253)。公開ソースの
+            # `unpackMap` は `if file_offset == 0: continue` だけで飛ばしている
+            # (向こうの `packMap` は空の枠を 0 で 2 つ書くが、**ディスクの元データに
+            # 何が残っているかは別の話**)。ここで長さまで 0 を要求していたので、
+            # 位置 0 で長さの欄に値が残っている枠が 1 つあるだけで、
+            # **入れ物ぜんぶを「入れ物ではありません」と突き返して**いた
+            if not off:
                 items.append({"i": i, "at": 0, "len": 0})
                 continue
             if off < head or off + length > len(b) or off < prev or off & 15:
