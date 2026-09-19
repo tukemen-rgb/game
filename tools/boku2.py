@@ -2242,8 +2242,15 @@ def crc_bad_shape(bad_at: list[int], looked: int) -> str:
             "(吸い出し直しても直りません)")
 
 
+#: 本体がほとんどゼロ埋めのときに、**そこから来ている**と分かる行に添える言葉
+#: (#265)。画面 (web/app.js の EMPTY_KNOCK_ON) と 1 字そろえること
+EMPTY_KNOCK_ON = ("**上の「本体の中身がほとんど空です」から来ています** —— "
+                  "直すのはその 1 つなので、別の確認事項として数えていません")
+
+
 def crc_report(crc: dict, entries: list, img, rec_count: int,
-               names_missing: bool = False) -> tuple[list, int]:
+               names_missing: bool = False,
+               body_empty: bool = False) -> tuple[list, int]:
     """`BOKU2.CRC` と、こちらの切り分けを突き合わせた行 (#239).
 
     実物には索引 (`BOKU2.IDX`) とは**別に**このファイルがあり、項目数・名前・
@@ -2318,6 +2325,14 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
                          "こう打つと名前が付きます (1 件ずつ検査値で裏を取ります):")
             lines.append("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/"
                          " --names-from-crc 実物/BOKU2.CRC")
+    elif body_empty:
+        # **中身が空なら、検査値が合わないのは当たり前** (#265)。ここで
+        # 「切り分けの位置がずれている疑い」と言うと、社長は**索引の読み方を
+        # やり直す**ほうへ行く。直すのは吸い出しのほうで、1 つ上に書いてある。
+        # 数にも入れない —— 締めの「確認事項 N 件」が 1 つの原因を 4 件に見せる
+        lines.append(f"  切り分けた先頭 {CRC_HEAD} バイトの検査値が {ng:,} 件合いません "
+                     f"(合う {ok:,} 件 / 見た {looked:,} 件)。"
+                     "中身が無いのだから合いません。" + EMPTY_KNOCK_ON)
     else:
         problems += 1
         # **「位置がずれている」と「並び順が違うだけ」を分ける** (#252)。
@@ -2389,7 +2404,27 @@ def check(folder: str, out=sys.stdout) -> int:
     def say(s=""):
         out.write(s + "\n")
 
+    def blame(line: str) -> int:
+        """`→` の行を出し、数えた件数を返す (#265).
+
+        本体がほとんど空なら、その先の「読めません」は**全部そこから来る**。
+        `→` を外して字下げにし、どこから来たかを添えて、**数にも入れない** ——
+        原因が 1 つなのに 4 件に見えると、社長はそのうちのどれか (たいてい
+        検査値の「切り分けの位置がずれている疑い」) を追いかけて、本当の
+        直し方 (吸い出し直し) から遠ざかる。
+
+        呼ぶ側は今までどおり `"→ …"` の形で渡すこと。**道具の出す `→` の
+        一覧を機械で集めている検査があり** (#179)、組み立ててから `→` を
+        付けると、そこから漏れる。
+        """
+        if body_empty:
+            say("  " + line.removeprefix("→ ") + "。" + EMPTY_KNOCK_ON)
+            return 0
+        say(line)
+        return 1
+
     problems = 0
+    body_empty = False        # 本体がほとんどゼロ埋めか (#265)。blame が見る
     # **診ていない段**を数える (#175)。→ が 1 本も出なければ「問題なし」と言って
     # いたが、それは「全部を診た結果」ではなく「診た分には問題が無かった」でしかない。
     # 社長は前者の意味で読む。何を診ていないかは、結果の行に必ず出す
@@ -2497,7 +2532,12 @@ def check(folder: str, out=sys.stdout) -> int:
     # 「読めない」に見せる。原因は 1 つ上にあるので、先に名指しする
     with open(img_path, "rb") as probe:
         looked, empty = body_looks_empty(probe, entries)
-    if looked >= 5 and empty >= looked * 0.9:
+    #: 本体がほとんど空か (#265)。**この先の「読めません」は全部ここから来る**ので、
+    #: 別々の確認事項として数えない。原因が 1 つなのに 4 件に見えると、社長は
+    #: そのうちのどれか (たいてい検査値の「切り分けの位置がずれている疑い」) を
+    #: 追いかけて、本当の直し方 (吸い出し直し) から遠ざかる
+    body_empty = looked >= 5 and empty >= looked * 0.9
+    if body_empty:
         problems += 1
         say(f"→ 本体の中身がほとんど空です (覗いた {looked} 個のうち {empty} 個がゼロ埋め)。"
             "吸い出しが途中で切れたか、コピーが終わっていない疑いがあります。"
@@ -2558,7 +2598,8 @@ def check(folder: str, out=sys.stdout) -> int:
         else:
             with open(img_path, "rb") as probe:
                 lines, more = crc_report(crc, entries, probe, rec_count,
-                                         names_missing=named < len(entries) * 0.9)
+                                         names_missing=named < len(entries) * 0.9,
+                                         body_empty=body_empty)
             for line in lines:
                 say(line)
             problems += more
@@ -2662,10 +2703,10 @@ def check(folder: str, out=sys.stdout) -> int:
                         "その項目のバイト長だ、という読みがこの作品では違うかもしれません"
                         " (合わない分は位置だけで読んでいます)。この行ごと報告してください")
             if first_bad:
-                problems += 1
                 e, head, body = first_bad
-                say(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト "
-                    f"{head.hex(' ').upper()}{guess_kind_note(head, body)}")
+                # **中身が空なら、読めないのは当たり前** (#265)。blame が外す
+                problems += blame(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト "
+                                  f"{head.hex(' ').upper()}{guess_kind_note(head, body)}")
         # **入れ物 (日記・保存画面・出来事・釣り) の文言も数に入れる** (#231)。
         # 名前で拾えたときは `.msg` に入らないので、そのままだと丸ごと落ちていた
         # (皮肉なことに、名前が読めない吸い出しのほうが多く読めていた)
@@ -2826,9 +2867,10 @@ def check(folder: str, out=sys.stdout) -> int:
                     else:
                         say("  これで文字表はまかなえます")
             else:
-                problems += 1
                 img.seek(e["at"])
-                say(f"→ [フォント] {e['path']} は TIM2 として読めません。先頭 16 バイト {img.read(16).hex(' ').upper()}")
+                # **中身が空なら、TIM2 に見えないのは当たり前** (#265)。blame が外す
+                problems += blame(f"→ [フォント] {e['path']} は TIM2 として読めません。"
+                                  f"先頭 16 バイト {img.read(16).hex(' ').upper()}")
 
     if map_dir:
         files = m["files"]

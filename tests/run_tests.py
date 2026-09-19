@@ -2804,7 +2804,8 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         i = self.cli.index("def check(folder: str, out=sys.stdout) -> int:")
         j = self.cli.index("\ndef ", i + 10)
         body = self.cli[i:j]
-        cli = {head(h) for h in re.findall(r'(?:say\(|^\s+)f?"→ ([^"{]+)', body, re.M)}
+        cli = {head(h) for h in re.findall(r'(?:say\(|blame\(|^\s+)f?"→ ([^"{]+)',
+                                           body, re.M)}
         # `check` から呼ぶ助けの関数が組み立てる → も、check の → として数える
         cli |= {head(h) for h in re.findall(r'return \(f?"→ ([^"{]+)', self.cli)}
         # 一覧にして返す助けの関数 (`glyph_table_trouble`) の → も同じ (#229)。
@@ -2813,7 +2814,7 @@ class TestBothSidesDiagnoseTheSame(unittest.TestCase):
         # 行を**その場で並べて返す**助けの関数 (`crc_report`) の → も同じ (#239)。
         # 形が 1 つ増えるたびに見張りから漏れる —— 出る言葉のほうを見る
         cli |= {head(h) for h in re.findall(r'lines\.append\(\s*f?"→ ([^"{]+)', self.cli)}
-        ui = {head(h) for h in re.findall(r'lines\.push\([`"]→ ([^`"$]+)', self.ui)}
+        ui = {head(h) for h in re.findall(r'(?:lines\.push|blame)\([`"]→ ([^`"$]+)', self.ui)}
         # 知らせの文を組み立てる助けの関数 (`ansiDamageNote`) に移すと `lines.push` の
         # 形では見つからない。**出る言葉のほうを見る** (CLI 側で #178 に直したのと同じ)
         ui |= {head(h) for h in re.findall(r'return "→ ([^"]+)"', self.ui)}
@@ -7263,11 +7264,22 @@ class TestNamesComeOutEvenWhenTheOrderDiffers(unittest.TestCase):
             self.assertIn("--names-from-crc", said, said[-900:])
             self.assertNotIn("切り分けの位置がずれている", crc_line, crc_line)
 
-            # 2. 中身が空 → 「切り分けの位置そのもの」がずれている
-            b = os.path.join(tmp, "EMPTY")
+            # 2. 位置がずれている → 「切り分けの位置そのもの」がずれている
+            #
+            # **材料を作り直した** (#265)。ここは `--break empty` (中身をゼロで
+            # 埋める) を使っていたが、それは「位置がずれている」ではなく
+            # 「中身が無い」。直し方は吸い出し直しで、索引の読み方の話ではない。
+            # 本体を 16 バイトずらして、**中身はあるのに位置だけ違う**形にする
+            b = os.path.join(tmp, "SHIFT")
             make_boku2_sample.build_sample(b)
-            make_boku2_sample.damage(b, "empty")
+            img_path = os.path.join(b, "BOKU2.IMG")
+            with open(img_path, "rb") as fh:
+                img = fh.read()
+            with open(img_path, "wb") as fh:
+                fh.write(img[16:] + img[:16])
             said = check(b)
+            self.assertNotIn("本体の中身がほとんど空です", said,
+                             "材料が弱い: 中身が空になっている (位置の話ではなくなる)")
             crc_line = next(l for l in said.splitlines() if "先頭 128 バイトの検査値が" in l)
             self.assertIn("切り分けの位置がずれている", crc_line, crc_line)
             self.assertNotIn("検査値ファイルの並びが索引と違う", crc_line, crc_line)
@@ -8699,6 +8711,124 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestOneCauseIsNotCountedAsFour(unittest.TestCase):
+    """**原因が 1 つなら、確認事項も 1 件と数えること** (#265).
+
+    #264 の宿題は「あとから足した → を、その前後と並べて読む」だった。#218 で
+    足した「本体の中身がほとんど空です」を、出力ごと上から読み直したら
+    こうなっていた ——
+
+        → 本体の中身がほとんど空です … **この先の診断 (.msg・入れ物・フォント) は当てになりません**
+        → 切り分けた先頭 128 バイトの検査値が 17 件合いません … **切り分けの位置がずれている疑いがあります**
+        → 読めない .msg の例: system/system.msg 先頭 16 バイト 00 00 …
+        → [フォント] system/bk_font.tms は TIM2 として読めません …
+        == 結果: 確認事項 4 件
+
+    1 行目で「この先は当てにならない」と言ったのに、その「当てにならない」段が
+    **満々の自信で 3 件の確認事項を出し**、締めは 4 件と数える。いちばん悪いのは
+    2 行目で、**直し方がまったく違う方向を指している** —— 本当の直し方は
+    「吸い出し直す」なのに、「切り分けの位置がずれている」は**索引の読み方を
+    やり直せ**という意味になる。社長は何日も間違った所を掘ることになる。
+
+    直したあとは、この 3 つは `→` を付けず、字下げして「上の …から来ています」と
+    添える。締めは **確認事項 1 件**。
+    """
+
+    @staticmethod
+    def said(kind: str) -> str:
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            if kind:
+                make_boku2_sample.damage(folder, kind)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    #: 本体が空なら、当たり前に出る「読めません」。原因は 1 つ上にある
+    KNOCK_ON = ("切り分けた先頭", "読めない .msg の例", "[フォント]")
+
+    def test_an_empty_body_is_one_thing_to_fix(self):
+        said = self.said("empty")
+        arrows = [ln for ln in said.splitlines() if ln.startswith("→")]
+        self.assertEqual(len(arrows), 1,
+                         "原因は 1 つなのに → が何本も出ています:\n  " + "\n  ".join(arrows))
+        self.assertIn("本体の中身がほとんど空です", arrows[0])
+        # 締めの数が → の本数と合っていること (#264 と同じ型の食い違いを作らない)
+        self.assertIn("確認事項 1 件", said, f"締めの数が → の本数と合っていません\n{said[-300:]}")
+
+    def test_the_knock_on_lines_are_still_shown_and_blamed(self):
+        """黙らせるのではなく、**どこから来たかを書いて残す**こと.
+
+        消してしまうと、実物で「検査値が何件合わなかったか」が分からなくなる。
+        """
+        import boku2
+        said = self.said("empty")
+        for head in self.KNOCK_ON:
+            line = next((ln for ln in said.splitlines()
+                         if ln.lstrip().startswith(head)), "")
+            self.assertTrue(line, f"「{head}」の行が消えています")
+            self.assertFalse(line.startswith("→"), f"まだ → が付いています: {line[:80]}")
+            self.assertIn(boku2.EMPTY_KNOCK_ON, line,
+                          f"どこから来たかが書いてありません: {line[:120]}")
+
+    def test_the_wrong_cause_is_not_offered(self):
+        """**「切り分けの位置がずれている」と言わない**こと (いちばん高くつく間違い)."""
+        said = self.said("empty")
+        for wrong in ("切り分けの位置がずれている疑い", "切り分けの位置は合っていて",
+                      "もう一度吸い出すと直ることがあります", "並びが違うだけ"):
+            self.assertNotIn(wrong, said,
+                             f"中身が空なのに「{wrong}」と言っています")
+
+    def test_a_real_checksum_problem_still_counts(self):
+        """**中身が入っているときは、今までどおり数える**こと.
+
+        ここを緩めすぎると、本物の「切り分けの位置がずれている」が黙る。
+        `--break crc` (中身はあって検査値だけ食い違う) で確かめる。
+        """
+        said = self.said("crc")
+        self.assertNotIn("本体の中身がほとんど空です", said, "材料が違います (空になっている)")
+        arrows = [ln for ln in said.splitlines() if ln.startswith("→")]
+        self.assertTrue(any("検査値が" in ln for ln in arrows),
+                        "本物の検査値の食い違いが → で出ていません:\n  " + "\n  ".join(arrows))
+        import boku2
+        self.assertNotIn(boku2.EMPTY_KNOCK_ON, said, "空でもないのに空のせいにしています")
+
+    def test_an_unreadable_msg_still_counts_when_the_body_is_there(self):
+        """`--break msg` (中身はあって .msg だけ壊れている) は今までどおり → のまま."""
+        said = self.said("msg")
+        self.assertNotIn("本体の中身がほとんど空です", said, "材料が違います (空になっている)")
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("→ 読めない .msg の例")), "")
+        self.assertTrue(line, f"読めない .msg の → が消えました\n{said[-600:]}")
+
+    def test_the_screen_says_the_same_thing(self):
+        """画面も同じ言葉・同じ数え方にすること (文言は道具の側から取り出す)."""
+        import boku2
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        for part in boku2.EMPTY_KNOCK_ON.split(" —— "):
+            self.assertTrue(part in ui, f"web/app.js に同じ言葉が無い: {part}")
+        # **数え方も同じ**であること。片側だけ数えると、同じ吸い出しで
+        # 「確認事項 1 件」と「4 件」が出る
+        self.assertTrue("problems += blame(" in ui,
+                        "画面が空の吸い出しでも別件として数えています")
+        self.assertTrue("} else if (bodyEmpty) {" in ui,
+                        "画面の検査値の段に、中身が空のときの道がありません")
+        # **→ の一覧集めから漏れないこと** (#179)。組み立ててから → を付けると、
+        # 「道具が出す → を機械で集める」検査から静かに外れる
+        for side, src in (("tools/boku2.py", open(
+                os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8").read()),
+                ("web/app.js", ui)):
+            self.assertTrue("読めない .msg の例" in src, side)
+            i = src.index("読めない .msg の例")
+            self.assertTrue(src[i - 2:i] == "→ ",
+                            f"{side}: 「読めない .msg の例」の → が文の外に出ています")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
@@ -8987,8 +9117,12 @@ class TestDocs(unittest.TestCase):
         for tool in ("boku2.py", "proofread.py", "compare_tsv.py"):
             with open(os.path.join(REPO, "tools", tool), encoding="utf-8") as fh:
                 src = fh.read()
+            # `blame(` は #265 で足した出し方 (本体が空なら → を外して数えない)。
+            # **出す形が 1 つ増えるたびに、集める側も増やすこと** —— 増やさないと
+            # その → だけ静かに見張りの外になる (#179・#229・#239 と同じ穴)
             for m in re.finditer(
-                    r'(?:say\(|return \(|print\(|lines\.append\(|^\s+)(?=f?"(?:\\n)?→ )',
+                    r'(?:say\(|return \(|print\(|lines\.append\(|blame\(|^\s+)'
+                    r'(?=f?"(?:\\n)?→ )',
                     src, re.M):
                 pos, parts = m.end(), []
                 while True:

@@ -3806,6 +3806,11 @@ function crc16Ccitt(b) {
 /** 検査値が合わなかったファイルを名前で何件まで挙げるか (#261。CLI の CRC_BAD_SHOWN) */
 const CRC_BAD_SHOWN = 5;
 
+/** 本体がほとんどゼロ埋めのときに、そこから来ていると分かる行に添える言葉
+ *  (#265。tools/boku2.py の EMPTY_KNOCK_ON と 1 字そろえる) */
+const EMPTY_KNOCK_ON = "**上の「本体の中身がほとんど空です」から来ています** —— "
+  + "直すのはその 1 つなので、別の確認事項として数えていません";
+
 /** 合わなかった項目が固まっているか散らばっているか (#261。CLI の crc_bad_shape と同じ言葉)。
  *  固まっているなら吸い出しがその区間で壊れている (吸い出し直せば直る)。
  *  散らばっているなら切り分けの位置の読み方が外れている (直らない)。 */
@@ -4046,6 +4051,15 @@ async function buildIdxReport() {
   const { idxEntry, dataEntry } = state.idxPair;
   const lines = [];
   let problems = 0;
+  /* **中身が空なら、その先の「読めません」は全部そこから来る** (#265。CLI の
+     check の blame と同じ)。→ を外して字下げにし、どこから来たかを添えて、
+     数にも入れない。呼ぶ側は今までどおり "→ …" の形で渡すこと —— 道具の出す
+     → を機械で集めている検査があり (#179)、組み立ててから → を付けると漏れる */
+  const blame = (line) => {
+    if (!bodyEmpty) { lines.push(line); return 1; }
+    lines.push("  " + line.replace(/^→ /, "") + "。" + EMPTY_KNOCK_ON);
+    return 0;
+  };
   /* **診ていない段**を数える (#175)。→ が 1 本も出なければ「問題なし」と言って
      いたが、それは「全部を診た結果」ではなく「診た分には問題が無かった」でしかない。
      社長は前者の意味で読む。何を診ていないかは、結果の行に必ず出す。
@@ -4151,6 +4165,8 @@ async function buildIdxReport() {
   /* **中身が空なら、形式の話をする前にそれを言う** (#218)。索引だけ正しくて
      中身がゼロの吸い出しは、この先の段を全部「読めない」に見せる。
      文言は tools/boku2.py の check と 1 字そろえる */
+  /* この先の「読めません」は全部ここから来るので、別々の確認事項として数えない (#265) */
+  let bodyEmpty = false;
   {
     const picks = items.filter((it) => it.len >= 16);
     const step = picks.length > BODY_SAMPLE_FILES ? picks.length / BODY_SAMPLE_FILES : 1;
@@ -4164,7 +4180,8 @@ async function buildIdxReport() {
       looked++;
       if (!head.some((v) => v)) empty++;
     }
-    if (looked >= 5 && empty >= looked * 0.9) {
+    bodyEmpty = looked >= 5 && empty >= looked * 0.9;
+    if (bodyEmpty) {
       problems++;
       lines.push(`→ 本体の中身がほとんど空です (覗いた ${looked} 個のうち ${empty} 個がゼロ埋め)。`
         + "吸い出しが途中で切れたか、コピーが終わっていない疑いがあります。"
@@ -4351,6 +4368,13 @@ async function buildIdxReport() {
           lines.push("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/"
             + " --names-from-crc 実物/BOKU2.CRC");
         }
+      } else if (bodyEmpty) {
+        /* **中身が空なら、検査値が合わないのは当たり前** (#265。CLI の crc_report と
+           同じ言葉)。ここで「切り分けの位置がずれている疑い」と言うと、索引の
+           読み方をやり直すほうへ行ってしまう。直すのは吸い出しのほうで、1 つ上にある */
+        lines.push(`  切り分けた先頭 ${CRC_HEAD} バイトの検査値が ${crcNg.toLocaleString()} 件合いません `
+          + `(合う ${crcOk.toLocaleString()} 件 / 見た ${looked.toLocaleString()} 件)。`
+          + "中身が無いのだから合いません。" + EMPTY_KNOCK_ON);
       } else {
         problems++;
         /* **「位置がずれている」と「並び順が違うだけ」を分ける** (#252)。直し方が
@@ -4479,10 +4503,10 @@ async function buildIdxReport() {
       }
     }
     if (badMsg) {
-      problems++;
       /* 先頭から**分かることだけ**を足す (#204)。一括処理 (boku2.py の
-         guess_kind / guess_kind_note) と同じ判定・同じ言葉 */
-      lines.push(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト `
+         guess_kind / guess_kind_note) と同じ判定・同じ言葉。
+         **中身が空なら、読めないのは当たり前** (#265) なので blame が → を外す */
+      problems += blame(`→ 読めない .msg の例: ${badMsg.it.name} 先頭 16 バイト `
         + [...badMsg.head].map((v) => hex(v, 2)).join(" ")
         + guessKindNote(badMsg.head, badMsg.body));
     }
@@ -4661,8 +4685,9 @@ async function buildIdxReport() {
         }
       }
     } else {
-      problems++;
-      lines.push(`→ [フォント] ${it.name} は TIM2 として読めません。先頭 16 バイト ${[...bytes.subarray(0, 16)].map((v) => hex(v, 2)).join(" ")}`);
+      /* **中身が空なら、TIM2 に見えないのは当たり前** (#265。CLI の check と同じ) */
+      problems += blame(`→ [フォント] ${it.name} は TIM2 として読めません。`
+        + `先頭 16 バイト ${[...bytes.subarray(0, 16)].map((v) => hex(v, 2)).join(" ")}`);
     }
   }
 
