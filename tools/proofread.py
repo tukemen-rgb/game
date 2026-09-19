@@ -807,8 +807,12 @@ def main() -> int:
               if scrp.strip_tags(line)]
     if widths and max_width:
         top = max(widths)
+        # **同じ「行」で 2 つの数を言わない** (#255)。上の「N 行をチェック」は
+        # TSV の行数、こちらは**改行で分けたあとの行数**で、練習データでは
+        # 31 と 37 になる。同じ報告の中に「行」の数が 2 つ出ると、素人は
+        # どちらかが間違っていると読む。何を数えたのかを行の中で言う
         print(f"原文の 1 行の幅: 最大 {top:g} / 上限は {max_width:g} "
-              f"(この {len(widths)} 行で測りました)")
+              f"(TSV の {len(rows)} 行を改行で分けた {len(widths)} 行で測りました)")
         if top < max_width:
             print(f"  **上限 {max_width:g} は、原文が一度も使っていない幅です。**"
                   f"この上限のままだと、原文より {max_width - top:g} 文字分まで"

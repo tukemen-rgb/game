@@ -4583,6 +4583,16 @@ class TestProofread(unittest.TestCase):
         self.assertIn(f"上限は {limit:g}", out, "上限を出していない")
         self.assertIn("一度も使っていない幅です", out, "上限が広すぎることを言っていない")
 
+        # 1.5 **同じ報告の中で「行」の数が 2 つ出るなら、何の行かを言う** (#255)。
+        #     上の「N 行をチェック」は TSV の行数、こちらは改行で分けたあとの行数。
+        #     練習データでは 31 と 37 になり、素人はどちらかが誤りだと読む
+        rc, out = run([("いち<BR>に<BR>さん", "いち<BR>に<BR>さん"), ("よん", "よん")])
+        checked = next(l for l in out.splitlines() if "行をチェック" in l)
+        width = next(l for l in out.splitlines() if "原文の 1 行の幅" in l)
+        self.assertIn("2 行をチェック", checked, checked)
+        self.assertIn("TSV の 2 行を改行で分けた 4 行", width,
+                      f"数えた中身を言っていない (2 つの「行」が食い違って見える):\n{width}")
+
         # 2. 原文が上限いっぱいなら、余計なことを言わない
         wide = "あ" * int(limit)
         rc, out = run([(wide, wide)])
@@ -7552,6 +7562,100 @@ class TestTheTableOrderIsNotAssumedToBeThePlacementOrder(unittest.TestCase):
                 ours = [[it["i"], it["at"], it["len"]] for it in (boku2.parse_map(raw) or [])]
                 self.assertTrue(ours, "0 件で緑にしない")
                 self.assertEqual(json.loads(res.stdout), ours)
+
+
+class TestTheMsgReaderAgreesWithThePublicWriter(unittest.TestCase):
+    """**`.msg` の読みを、公開ソースが書いたバイトで確かめる** (#255).
+
+    docs/09 の「実物で確かめたこと」の表で、`.msg` の読みは**向こうのコードを
+    読んだだけ** (#71) の欄だった。`MSG.py` の `repackMsg` は英語化パッチを
+    実際に作っている書き出し側なので、それに**書かせたバイトをこちらで読めば**、
+    読み方が合っているかを実行して確かめられる (#108・#253 と同じやり方)。
+    """
+
+    @staticmethod
+    def repack():
+        import os as _os
+        pub = "/home/user/hilltopworks/bokunonatsuyasumi2"
+        if not _os.path.isdir(pub):
+            return None
+        with open(_os.path.join(pub, "MSG.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        ns = {"MAP_MODE": 0, "MSG_MODE": 1, "OFFSET_ONLY_MODE": 3, "NULL_ENTRY": -1}
+        i = src.index("def repackMsg(")
+        exec(src[i:src.index("\ndef ", i + 10)], ns)
+        return ns["repackMsg"]
+
+    @staticmethod
+    def line(codes: list[int]) -> bytes:
+        import struct
+        return struct.pack("<" + "H" * len(codes), *codes)
+
+    def test_both_strides_read_back_exactly(self):
+        import boku2
+        repack = self.repack()
+        if repack is None:
+            self.skipTest("公開ソースが無い")
+        want = [[5, 6, 7, 0x8000], [8, 0x8001, 9, 0x8000], [10, 0x8000]]
+        lines = [self.line(c) for c in want]
+        for label, mode, stride in (("8 バイト刻み", 1, 8), ("4 バイト刻み", 0, 4)):
+            with self.subTest(case=label):
+                blob = repack(lines, mode)
+                got = boku2.parse_msg(blob, stride)
+                self.assertIsNotNone(got, f"{label}: 公開ソースが書いた .msg を読めない")
+                self.assertEqual([it["codes"] for it in got], want)
+
+    def test_a_null_entry_in_the_four_byte_table_reads_as_an_empty_line(self):
+        import boku2
+        repack = self.repack()
+        if repack is None:
+            self.skipTest("公開ソースが無い")
+        blob = repack([self.line([5, 0x8000]), -1, self.line([9, 0x8000])], 0)
+        got = boku2.parse_msg(blob, 4)
+        self.assertIsNotNone(got)
+        self.assertEqual([it["codes"] for it in got],
+                         [[5, 0x8000], [], [9, 0x8000]])
+
+    def test_the_eight_byte_writer_mangles_null_entries_so_we_refuse_it(self):
+        """**向こうの書き出しは、ここだけ信用しない。** `repackMsg` は 8 バイト刻みでも
+        空の項目に 4 バイトしか書かないので、以降の枠が全部ずれる。
+        読み側 (`readMSG`) は 8 バイト刻みで読むので、そのファイルは壊れている。
+        こちらが `None` を返すのは正しい (向こうの**読み**とは食い違わない)."""
+        import struct
+        import boku2
+        repack = self.repack()
+        if repack is None:
+            self.skipTest("公開ソースが無い")
+        blob = repack([self.line([5, 0x8000]), -1, self.line([9, 0x8000])], 1)
+        n = struct.unpack_from("<I", blob, 0)[0]
+        self.assertEqual(n, 3)
+        # **材料が弱くないこと**: 8 バイト刻みで読むと、位置が表の中を指してしまう
+        # (空の項目に 4 バイトしか書いていないので、以降が 4 バイトずつ手前にずれる)
+        starts = [struct.unpack_from("<I", blob, 4 + i * 8)[0] for i in range(n)]
+        self.assertTrue(any(x and x < 4 + n * 8 for x in starts),
+                        f"材料が弱い: ずれていない {starts}")
+        self.assertIsNone(boku2.parse_msg(blob, 8), "壊れた .msg を読めたと言っている")
+
+    def test_the_offsets_must_go_up_and_be_even(self):
+        """**この 2 つは緩めない** (#254 で入れ物の「順」を外したのと事情が違う)。
+
+        `.msg` は公開ソースの**両側**が昇順を前提にしている ——
+        書き出す `repackMsg` は位置を増やす一方で書き、読む `readMSG` は
+        「次の 0 でない位置」との差をそのまま長さにする (順が逆だと負になる)。
+        偶数も、本文が 2 バイト 1 字である以上そうなる。
+        """
+        import struct
+        import boku2
+        good = (struct.pack("<I", 2) + struct.pack("<II", 20, 4) + struct.pack("<II", 24, 4)
+                + self.line([5, 0x8000]) + self.line([9, 0x8000]))
+        self.assertIsNotNone(boku2.parse_msg(good, 8), "材料が弱い: 正しい形が読めていない")
+        down = bytearray(good)
+        struct.pack_into("<II", down, 4, 24, 4)
+        struct.pack_into("<II", down, 12, 20, 4)
+        self.assertIsNone(boku2.parse_msg(bytes(down), 8), "位置が下がる表を読めたと言っている")
+        odd = bytearray(good)
+        struct.pack_into("<I", odd, 4, 21)
+        self.assertIsNone(boku2.parse_msg(bytes(odd), 8), "奇数の位置を読めたと言っている")
 
 
 class TestBoku2Sample(unittest.TestCase):
