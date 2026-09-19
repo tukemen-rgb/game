@@ -3806,10 +3806,16 @@ function crc16Ccitt(b) {
 /** 検査値が合わなかったファイルを名前で何件まで挙げるか (#261。CLI の CRC_BAD_SHOWN) */
 const CRC_BAD_SHOWN = 5;
 
-/** 本体がほとんどゼロ埋めのときに、そこから来ていると分かる行に添える言葉
- *  (#265。tools/boku2.py の EMPTY_KNOCK_ON と 1 字そろえる) */
-const EMPTY_KNOCK_ON = "**上の「本体の中身がほとんど空です」から来ています** —— "
-  + "直すのはその 1 つなので、別の確認事項として数えていません";
+/** 原因が 1 つ上にあると分かっている行に添える言葉の後ろ半分
+ *  (#265/#266。tools/boku2.py の KNOCK_ON_TAIL と 1 字そろえる) */
+const KNOCK_ON_TAIL = " —— 直すのはその 1 つなので、別の確認事項として数えていません";
+/** 「この行は、上の『…』から来ている」の 1 文 (CLI の knock_on_note と同じ) */
+const knockOnNote = (head) => `**上の「${head}」から来ています**` + KNOCK_ON_TAIL;
+/** 本体がほとんどゼロ埋めのとき (#265) */
+const EMPTY_KNOCK_ON = knockOnNote("本体の中身がほとんど空です");
+/** 索引の読み方が外れているとき (#266)。**こちらのほうが静かに悪い** ——
+ *  中身は読めるので、その先の段が「それらしい数」を自信たっぷりに出してくる */
+const SHAKY_INDEX_KNOCK_ON = knockOnNote("索引が本体の N% しか指していません");
 
 /** 合わなかった項目が固まっているか散らばっているか (#261。CLI の crc_bad_shape と同じ言葉)。
  *  固まっているなら吸い出しがその区間で壊れている (吸い出し直せば直る)。
@@ -4056,10 +4062,13 @@ async function buildIdxReport() {
      数にも入れない。呼ぶ側は今までどおり "→ …" の形で渡すこと —— 道具の出す
      → を機械で集めている検査があり (#179)、組み立ててから → を付けると漏れる */
   const blame = (line) => {
-    if (!bodyEmpty) { lines.push(line); return 1; }
-    lines.push("  " + line.replace(/^→ /, "") + "。" + EMPTY_KNOCK_ON);
+    if (!knockOn) { lines.push(line); return 1; }
+    lines.push("  " + line.replace(/^→ /, "") + "。" + knockOn);
     return 0;
   };
+  /* この先の「読めません」の原因が 1 つ上にあると分かっているなら、その言葉
+     (#265/#266)。空なら今までどおり 1 件ずつ数える */
+  let knockOn = "";
   /* **診ていない段**を数える (#175)。→ が 1 本も出なければ「問題なし」と言って
      いたが、それは「全部を診た結果」ではなく「診た分には問題が無かった」でしかない。
      社長は前者の意味で読む。何を診ていないかは、結果の行に必ず出す。
@@ -4158,9 +4167,13 @@ async function buildIdxReport() {
     + ` (${(100 * coverage).toFixed(1)}% — 索引が本体をどれだけ使い切っているか。読み方が合っていれば普通は 5 割を超えます)`);
   if (coverage < COVERAGE_MIN) {
     problems++;
+    /* **この先が当てにならないことまで言う** (#266。CLI の check と 1 字そろえる) */
     lines.push(`→ 索引が本体の ${(100 * coverage).toFixed(1)}% しか指していません。`
-      + "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。この行と下の先頭 64 バイトを報告してください");
+      + "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。"
+      + "**この先の診断 (検査値・.msg・入れ物・フォント) は当てになりません。**"
+      + "この行と下の先頭 64 バイトを報告してください");
     lines.push("   " + [...b.subarray(0, 64)].map((v) => hex(v, 2)).join(" "));
+    knockOn = SHAKY_INDEX_KNOCK_ON;
   }
   /* **中身が空なら、形式の話をする前にそれを言う** (#218)。索引だけ正しくて
      中身がゼロの吸い出しは、この先の段を全部「読めない」に見せる。
@@ -4183,6 +4196,8 @@ async function buildIdxReport() {
     bodyEmpty = looked >= 5 && empty >= looked * 0.9;
     if (bodyEmpty) {
       problems++;
+      /* 索引の読み方が先に外れているなら、原因はそちら (先に出たほうを指す) */
+      knockOn = knockOn || EMPTY_KNOCK_ON;
       lines.push(`→ 本体の中身がほとんど空です (覗いた ${looked} 個のうち ${empty} 個がゼロ埋め)。`
         + "吸い出しが途中で切れたか、コピーが終わっていない疑いがあります。"
         + "この先の診断 (.msg・入れ物・フォント) は当てになりません。"
@@ -4368,13 +4383,14 @@ async function buildIdxReport() {
           lines.push("     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/"
             + " --names-from-crc 実物/BOKU2.CRC");
         }
-      } else if (bodyEmpty) {
-        /* **中身が空なら、検査値が合わないのは当たり前** (#265。CLI の crc_report と
-           同じ言葉)。ここで「切り分けの位置がずれている疑い」と言うと、索引の
-           読み方をやり直すほうへ行ってしまう。直すのは吸い出しのほうで、1 つ上にある */
+      } else if (knockOn) {
+        /* **原因が 1 つ上にあると分かっているなら、別の原因を並べない**
+           (#265/#266。CLI の crc_report と同じ言葉)。ここで「切り分けの位置が
+           ずれている疑い」や「もう一度吸い出すと直ることがあります」と言うと、
+           社長はそちらへ行ってしまう */
         lines.push(`  切り分けた先頭 ${CRC_HEAD} バイトの検査値が ${crcNg.toLocaleString()} 件合いません `
           + `(合う ${crcOk.toLocaleString()} 件 / 見た ${looked.toLocaleString()} 件)。`
-          + "中身が無いのだから合いません。" + EMPTY_KNOCK_ON);
+          + "切り分けた中身が**そもそも取れていない**ので、合わなくて当然です。" + knockOn);
       } else {
         problems++;
         /* **「位置がずれている」と「並び順が違うだけ」を分ける** (#252)。直し方が

@@ -8711,6 +8711,131 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestAShakyIndexReadIsOneCauseToo(unittest.TestCase):
+    """**索引の読み方が外れているときも、原因は 1 つと数えること** (#266).
+
+    #265 の宿題は「同じ形を `→ 索引が本体の N% しか指していません` (#96) の
+    あとの段でも探す」だった。探したら、**こちらのほうが悪かった**。
+
+    レコードの「長さ」の欄を小さくした索引 (読み方が外れている形) で診ると:
+
+        → 索引が本体の 2.1% しか指していません。索引の読み方 … が外れている疑いがあります
+        → 切り分けた先頭 128 バイトの検査値が 19 件合いません … **切り分けの位置がずれている疑いがあります**
+           合わない 19 件は索引の 0 番目から 19 番目に**固まっています**。…
+           **もう一度吸い出すと直ることがあります**
+           ただし**名前の顔ぶれは同じ**。**並びが違うだけ**で、同じディスクのものとみてよいです
+        → 読めない .msg の例: …
+        == 結果: 確認事項 3 件
+
+    #218 の「中身が空」は「**この先の診断は当てになりません**」と断っていたのに、
+    こちらは断っていなかった。**中身が読める分、静かに悪い** —— その先の段が
+    「それらしい数」を自信たっぷりに出してくる。しかも
+    「**もう一度吸い出すと直ることがあります**」は**ただの誤りで**、吸い出しは
+    無事なのに何時間もかけて取り直させる。「並びが違うだけ」も誤り。
+    """
+
+    @staticmethod
+    def shaky(folder: str) -> None:
+        """レコードの長さの欄を小さくして、索引の読み方が外れた形にする.
+
+        **中身は空にしない** —— 空にすると #265 の「中身が空」の話になって、
+        ここで見たい「読めるのに読み方が違う」形でなくなる。
+        """
+        import struct
+        import boku2
+        path = os.path.join(folder, "BOKU2.IDX")
+        with open(path, "rb") as fh:
+            idx = bytearray(fh.read())
+        n = (boku2.dfi_rec_end(bytes(idx)) - 16) // 16
+        for i in range(n):
+            at = 16 + i * 16
+            ln = struct.unpack_from("<I", idx, at + 12)[0]
+            if ln:
+                struct.pack_into("<I", idx, at + 12, max(16, ln // 40))
+        with open(path, "wb") as fh:
+            fh.write(bytes(idx))
+
+    @classmethod
+    def said(cls) -> str:
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            cls.shaky(folder)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_the_material_is_what_we_think(self):
+        """前提: 索引の読み方が外れていて、**中身は空になっていない**こと."""
+        said = self.said()
+        self.assertIn("しか指していません", said, "索引の読み方が外れた形になっていない")
+        self.assertNotIn("本体の中身がほとんど空です", said,
+                         "材料が弱い: 中身が空になっている (#265 の話になってしまう)")
+
+    def test_it_says_the_rest_is_not_trustworthy(self):
+        """**この先が当てにならないことまで言う**こと (#218 は言っていた)."""
+        line = next((ln for ln in self.said().splitlines()
+                     if ln.startswith("→ 索引が本体の")), "")
+        self.assertTrue(line, "索引の → が出ていない")
+        self.assertIn("この先の診断", line,
+                      f"この先が当てにならないことを言っていません: {line}")
+
+    def test_one_cause_is_one_item(self):
+        said = self.said()
+        arrows = [ln for ln in said.splitlines() if ln.startswith("→")]
+        self.assertEqual(len(arrows), 1,
+                         "原因は 1 つなのに → が何本も出ています:\n  " + "\n  ".join(arrows))
+        self.assertIn("確認事項 1 件", said, f"締めの数が合っていません\n{said[-300:]}")
+
+    def test_the_wrong_advice_is_gone(self):
+        """**吸い出しは無事なのに「取り直せ」と言わない**こと (いちばん高くつく)."""
+        said = self.said()
+        for wrong in ("もう一度吸い出すと直ることがあります",
+                      "切り分けの位置がずれている疑い", "並びが違うだけ",
+                      "吸い出しがその区間で壊れている"):
+            self.assertNotIn(wrong, said, f"索引の読み方の話なのに「{wrong}」と言っています")
+
+    def test_the_knock_on_lines_are_still_shown_and_blamed(self):
+        import boku2
+        said = self.said()
+        for head in ("切り分けた先頭", "読めない .msg の例"):
+            line = next((ln for ln in said.splitlines()
+                         if ln.lstrip().startswith(head)), "")
+            self.assertTrue(line, f"「{head}」の行が消えています")
+            self.assertFalse(line.startswith("→"), f"まだ → が付いています: {line[:80]}")
+            self.assertIn(boku2.SHAKY_INDEX_KNOCK_ON, line,
+                          f"どこから来たかが書いてありません: {line[:120]}")
+
+    def test_a_healthy_dump_is_untouched(self):
+        """**普通の吸い出しでは何も変わらない**こと (緩めすぎていない)."""
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            out = io.StringIO()
+            rc = boku2.check(folder, out=out)
+            said = out.getvalue()
+        self.assertEqual(rc, 0, f"普通の吸い出しで問題ありになった\n{said[-600:]}")
+        self.assertNotIn(boku2.KNOCK_ON_TAIL, said, "原因が無いのに「そこから来ている」と言っている")
+
+    def test_the_screen_says_the_same_thing(self):
+        import boku2
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue(boku2.KNOCK_ON_TAIL in ui, "web/app.js に同じ後ろ半分が無い")
+        self.assertTrue("索引が本体の N% しか指していません" in ui,
+                        "web/app.js に索引の言葉が無い")
+        self.assertTrue("この先の診断 (検査値・.msg・入れ物・フォント) は当てになりません" in ui,
+                        "画面が「この先は当てにならない」と言っていない")
+        self.assertTrue("knockOn = SHAKY_INDEX_KNOCK_ON;" in ui,
+                        "画面が索引の → を原因として覚えていない")
+
+
 class TestOneCauseIsNotCountedAsFour(unittest.TestCase):
     """**原因が 1 つなら、確認事項も 1 件と数えること** (#265).
 
@@ -8810,14 +8935,15 @@ class TestOneCauseIsNotCountedAsFour(unittest.TestCase):
         import boku2
         with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
             ui = fh.read()
-        for part in boku2.EMPTY_KNOCK_ON.split(" —— "):
-            self.assertTrue(part in ui, f"web/app.js に同じ言葉が無い: {part}")
+        self.assertTrue(boku2.KNOCK_ON_TAIL in ui, "web/app.js に同じ後ろ半分が無い")
+        self.assertTrue('knockOnNote("本体の中身がほとんど空です")' in ui,
+                        "web/app.js が同じ言葉を組み立てていない")
         # **数え方も同じ**であること。片側だけ数えると、同じ吸い出しで
         # 「確認事項 1 件」と「4 件」が出る
         self.assertTrue("problems += blame(" in ui,
                         "画面が空の吸い出しでも別件として数えています")
-        self.assertTrue("} else if (bodyEmpty) {" in ui,
-                        "画面の検査値の段に、中身が空のときの道がありません")
+        self.assertTrue("} else if (knockOn) {" in ui,
+                        "画面の検査値の段に、原因が 1 つ上にあるときの道がありません")
         # **→ の一覧集めから漏れないこと** (#179)。組み立ててから → を付けると、
         # 「道具が出す → を機械で集める」検査から静かに外れる
         for side, src in (("tools/boku2.py", open(
