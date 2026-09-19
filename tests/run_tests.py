@@ -7873,6 +7873,167 @@ class TestOurChecksumMatchesThePublicOne(unittest.TestCase):
                             boku2.crc16_ccitt(long_))
 
 
+class TestOneOddLetterDoesNotThrowAwayEveryName(unittest.TestCase):
+    """**変な字 1 つで、そこから先の名前を全部捨てない** (#258).
+
+    名前は 0 区切りで並んでいるので、**字が変でも枠は壊れない** —— 公開ソースの
+    `getFileNames` も `ReadString` で 0 まで読むだけで、字の中身を見ていない。
+    こちらは 0x21〜0x7E 以外を見た瞬間に読むのをやめていたので、**6 個目に
+    空白が 1 つ入っているだけで、そこから先の名前が全部 `#N`** になっていた。
+    社長の実物はまさに名前が付かない吸い出しだった (#1・#3)。
+
+    ただし**ずれた名前は `#N` より悪い** (それらしく見えるのに全部別のファイルを
+    指す)。先頭が根の `/` で、名前とレコードがそろっていると分かるときだけ
+    先へ進み、そうでなければ今までどおり変な字の所で止まる。
+    """
+
+    @staticmethod
+    def build(names: list[str], rooted: bool = True) -> bytes:
+        """[(名前)] から索引を作る。rooted なら先頭に根の `/` を足す."""
+        import struct
+        rows = (["/"] + names) if rooted else list(names)
+        idx = bytearray(b"DFI\0" + struct.pack("<III", len(rows), 0, 0))
+        for i, _n in enumerate(rows):
+            is_dir = 1 if (rooted and i == 0) else 0
+            more = 1 if i < len(rows) - 1 else 0
+            idx += struct.pack("<HHIII", is_dir, more, 0, 1 + i, 16)
+        for n in rows:
+            idx += n.encode("latin-1") + b"\0"
+        return bytes(idx)
+
+    @staticmethod
+    def named(idx: bytes) -> list[str]:
+        import boku2
+        return [e["path"] for e in boku2.read_dfi(idx, 1 << 30)
+                if not os.path.basename(e["path"]).startswith("#")]
+
+    def test_a_space_in_the_sixth_name_keeps_the_rest(self):
+        names = [f"f{i:03d}.msg" if i != 5 else "f005 x.msg" for i in range(30)]
+        got = self.named(self.build(names))
+        # **材料が弱くないこと**: 昔はここで 5 件しか残らなかった
+        self.assertEqual(len(got), 29, f"残ったのは {len(got)} 件: {got[:8]}")
+        self.assertIn("f029.msg", got, "最後の名前まで残っていない")
+        self.assertNotIn("f005 x.msg", got, "変な字の入った名前は使わない (#N に戻す)")
+
+    def test_a_bad_first_name_still_keeps_the_rest(self):
+        names = [("\x81bad.msg" if i == 0 else f"f{i:03d}.msg") for i in range(30)]
+        got = self.named(self.build(names))
+        self.assertEqual(len(got), 29, f"残ったのは {len(got)} 件")
+
+    def test_names_that_do_not_start_at_the_root_stop_as_before(self):
+        """**ずれた名前は `#N` より悪い。** 先頭が `/` でなければ、そろっている
+        確かめようが無いので、今までどおり変な字の所で止まる."""
+        names = [f"f{i:03d}.msg" if i != 5 else "f005 x.msg" for i in range(30)]
+        got = self.named(self.build(names, rooted=False))
+        self.assertEqual(len(got), 5, f"止まらずに先へ進んでいる: {len(got)} 件")
+
+    def test_junk_is_refused_at_least_as_much_as_before(self):
+        """**要らないものを名前と言わない力を落としていない。** でたらめな置き場で、
+        新しい読み方が昔の読み方より多く受け入れることが無いこと (#254 と同じ筋で、
+        緩める前に測る)."""
+        import random
+        import struct
+        import boku2
+
+        def old_rule(idx: bytes, rec_end: int, rec_count: int) -> list:
+            """昔の読み方: 変な字を見た所で全部やめる."""
+            out, q = [], rec_end
+            while len(out) < rec_count and q < len(idx):
+                end = idx.find(b"\0", q)
+                if end < 0:
+                    break
+                x = idx[q:end]
+                if len(x) > 127 or any(c < 0x21 or c > 0x7E for c in x):
+                    break
+                out.append(x)
+                q = end + 1
+            return out
+
+        rnd = random.Random(258)
+        worse, new_hits, old_hits = 0, 0, 0
+        for _ in range(300):
+            idx = bytearray(b"DFI\0" + struct.pack("<III", 30, 0, 0))
+            for i in range(30):
+                idx += struct.pack("<HHIII", 0, 1 if i < 29 else 0, 0, 1 + i, 16)
+            idx += bytes(rnd.randrange(256) for _ in range(4096))
+            rec_end = 16 + 30 * 16
+            new = boku2.read_dfi_names(bytes(idx), rec_end, 30)
+            old = old_rule(bytes(idx), rec_end, 30)
+            new_hits += bool(new)
+            old_hits += bool(old)
+            if len(new) > len(old):
+                worse += 1
+        self.assertEqual(worse, 0,
+                         f"でたらめを昔より多く名前と言った回が {worse} / 300")
+        self.assertLessEqual(new_hits, old_hits,
+                             f"受け入れた回が増えている ({old_hits} → {new_hits})")
+        # **材料が弱くないこと**: でたらめを丸ごと名前と言う道は元々ほとんど無い
+        self.assertLess(new_hits, 15, f"でたらめを {new_hits} / 300 で名前と言っている")
+
+    def test_it_says_which_letter_stopped_it(self):
+        """止まったときは**どこで**止まったかを言う (#202 の約束は残す)."""
+        import boku2
+        names = [f"f{i:03d}.msg" if i != 5 else "f005 x.msg" for i in range(30)]
+        stop = boku2.dfi_name_stop(self.build(names, rooted=False))
+        self.assertTrue(stop, "止まったことに気づいていない")
+        self.assertEqual(stop["nth"], 6, stop)
+        self.assertEqual(stop["byte"], 0x20, stop)
+        note = boku2.dfi_name_stop_note(stop)
+        self.assertIn("6 個目", note)
+        self.assertIn("0x20", note)
+
+    def test_a_junk_area_says_so_differently(self):
+        """置き場そのものが違うときは、**別の言い方**で言う (止まったのではない)."""
+        import struct
+        import boku2
+        idx = bytearray(b"DFI\0" + struct.pack("<III", 30, 0, 0))
+        for i in range(30):
+            idx += struct.pack("<HHIII", 1 if i == 0 else 0, 1 if i < 29 else 0, 0, 1 + i, 16)
+        idx += b"/\0" + b"".join(bytes([0x81, 0x82]) + b"\0" for _ in range(29))
+        stop = boku2.dfi_name_stop(bytes(idx))
+        self.assertTrue(stop and stop.get("kind") == "junk", stop)
+        note = boku2.dfi_name_stop_note(stop)
+        self.assertIn("名前らしくありません", note, note)
+        self.assertIn("名前は 1 つも使っていません", note, note)
+
+    def test_the_two_sides_read_names_the_same_way(self):
+        import json
+        import shutil
+        import subprocess
+        import boku2
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node が無い")
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        i = app.index("function readDfiNames(")
+        src = ("const NAME_CLEAN_RATIO = 0.9;"
+               "const ascii=(b)=>{let t='';for(const c of b)t+=String.fromCharCode(c);return t;};"
+               + app[i:app.index("\n}\n", i) + 3])
+        cases = {
+            "空白が 1 つ": self.build([f"f{i:03d}.msg" if i != 5 else "f005 x.msg"
+                                        for i in range(30)]),
+            "根が無い": self.build([f"f{i:03d}.msg" if i != 5 else "f005 x.msg"
+                                     for i in range(30)], rooted=False),
+            "きれい": self.build([f"f{i:03d}.msg" for i in range(30)]),
+        }
+        for label, idx in cases.items():
+            with self.subTest(case=label):
+                rec_end = 16
+                while (rec_end + 16 <= len(idx)
+                       and (idx[rec_end] | (idx[rec_end + 1] << 8)) in (0, 1)):
+                    rec_end += 16
+                rec = (rec_end - 16) // 16
+                script = (src + f"\nconst b=Uint8Array.from({json.dumps(list(idx))});"
+                                f"console.log(JSON.stringify(readDfiNames(b,{rec_end},{rec})));")
+                res = subprocess.run([node, "-e", script], capture_output=True,
+                                     text=True, cwd=REPO)
+                self.assertEqual(res.returncode, 0, res.stderr[-500:])
+                ours = boku2.read_dfi_names(idx, rec_end, rec)
+                self.assertEqual(json.loads(res.stdout), ours)
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 

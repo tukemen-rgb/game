@@ -70,6 +70,55 @@ TIM2_PIXEL_KIND = {
 
 # ---------- 索引 (DFI) ----------
 
+#: 名前の並びを「読めた」と見なす下限 (#258)。**枠どおりに読めた名前のうち、
+#: 0x21〜0x7E だけでできているものの割合**。でたらめな置き場を名前と言わないための重し。
+#: 5000 通りのでたらめで測ると、この重しで受け入れるのは 0 件 (枠の数も見るため)
+NAME_CLEAN_RATIO = 0.9
+
+
+def read_dfi_names(idx: bytes, rec_end: int, rec_count: int) -> list[str]:
+    """レコードの直後に並ぶ名前を読む (#258).
+
+    **変な字が 1 つあっただけで、そこから先を全部捨てない。** 名前は 0 区切りで
+    並んでいるので、字が変でも**枠は壊れない** —— 公開ソースの `getFileNames` も
+    `ReadString` で 0 まで読むだけで、字の中身は見ていない。
+    こちらは 0x21〜0x7E 以外を見た瞬間に読むのをやめていたので、**5 個目に
+    空白が 1 つ入っているだけで、2000 個の名前が全部 `#N` になっていた**
+    (合成索引で測ると 50 個中 5 個しか付かない)。社長の実物はまさに
+    名前が付かない吸い出しだった (#1・#3)。
+
+    字の善し悪しは**1 つずつではなく全体で**見る。枠どおりに読めた名前のうち
+    `NAME_CLEAN_RATIO` 以上がきれいなら全部使い、そうでなければ
+    「ここは名前の置き場ではない」として 1 つも使わない (今までと同じ `#N`)。
+    """
+    raw: list[bytes] = []
+    q = rec_end
+    while len(raw) < rec_count and q < len(idx):
+        end = idx.find(b"\0", q)
+        if end < 0 or end - q > 127:
+            break                          # 枠が壊れている。ここで止める
+        raw.append(idx[q:end])
+        q = end + 1
+    if not raw:
+        return []
+    ok = [bool(x) and all(0x21 <= c <= 0x7E for c in x) for x in raw]
+    # **先頭の名前が根の `/` のときだけ、変な字を飛ばして先へ進む。**
+    # 公開ソースの `createDirPath` も先頭を `/` として扱っているので、そこが
+    # 合っていれば**名前の並びとレコードの並びがそろっている**と見てよい。
+    # そろっていないのに先へ進むと、**`#N` より悪いもの** —— それらしく見えるのに
+    # 全部別のファイルを指す名前 —— ができる。そのときは今までどおり、
+    # 変な字を見た所で読むのをやめる (そこまでの名前は使う)
+    if raw[0] != b"/":
+        stop = next((i for i, good in enumerate(ok) if not good), len(raw))
+        raw, ok = raw[:stop], ok[:stop]
+        return [x.decode("ascii") for x in raw]
+    if sum(ok) < len(raw) * NAME_CLEAN_RATIO or (rec_count >= 2 and len(raw) < 2):
+        return []
+    # **変な字の入った名前だけを空にする。** 60 字の記号の羅列を名前として出すより、
+    # その 1 件だけ `#N` に戻すほうが役に立つ。まわりの名前は残る
+    return [x.decode("ascii") if good else "" for x, good in zip(raw, ok)]
+
+
 def read_dfi(idx: bytes, data_size: int, rule: str = "flag") -> list[dict]:
     """レコードを歩いて {path, at, len} の一覧にする。ブラウザ側 readDfi と同じ規則.
 
@@ -98,17 +147,7 @@ def read_dfi(idx: bytes, data_size: int, rule: str = "flag") -> list[dict]:
         rec_end += 16
     rec_count = (rec_end - 16) // 16
 
-    names: list[str] = []
-    q = rec_end
-    while len(names) < rec_count and q < len(idx):
-        end = idx.find(b"\0", q)
-        if end < 0:
-            break
-        s = idx[q:end]
-        if len(s) > 127 or any(c < 0x21 or c > 0x7E for c in s):
-            break
-        names.append(s.decode("ascii"))
-        q = end + 1
+    names = read_dfi_names(idx, rec_end, rec_count)
 
     entries: list[dict] = []
     stack: list[tuple[str, int]] = []
@@ -199,19 +238,37 @@ def dfi_name_stop(idx: bytes) -> dict | None:
             break
         rec_end += 16
     rec_count = (rec_end - 16) // 16
-    q, n = rec_end, 0
-    while n < rec_count and q < len(idx):
+    # **変な字は「止まった」ではない** (#258)。0 区切りの枠が壊れたときだけ止まる。
+    # 字が変でも枠は壊れないので、そこから先の名前も読める (`read_dfi_names`)
+    raw: list[bytes] = []
+    q = rec_end
+    while len(raw) < rec_count and q < len(idx):
         end = idx.find(b"\0", q)
-        if end < 0:
-            return {"at": q, "nth": n + 1, "byte": None, "head": ""}
-        s = idx[q:end]
-        bad = next((i for i, c in enumerate(s) if c < 0x21 or c > 0x7E), None)
-        if len(s) > 127 or bad is not None:
-            return {"at": q + (bad or 0), "nth": n + 1,
-                    "byte": s[bad] if bad is not None else None,
-                    "head": s[:bad].decode("ascii", "replace") if bad else ""}
-        n += 1
+        if end < 0 or end - q > 127:
+            return {"at": q, "nth": len(raw) + 1, "byte": None, "head": "",
+                    "kind": "frame"}
+        raw.append(idx[q:end])
         q = end + 1
+    if not raw:
+        return None
+    ok = [bool(x) and all(0x21 <= c <= 0x7E for c in x) for x in raw]
+    if raw[0] != b"/":
+        # 先頭が根の `/` でないので、変な字を見た所で読むのをやめている。
+        # **どこでやめたか**を指す (#202)。名前の置き場の先頭ではなく、そこ
+        nth = next((i for i, good in enumerate(ok) if not good), None)
+        if nth is None:
+            return None
+        at = rec_end + sum(len(x) + 1 for x in raw[:nth])
+        s = raw[nth]
+        bad = next((i for i, c in enumerate(s) if c < 0x21 or c > 0x7E), None)
+        if bad is None:                    # 長さ 0 の名前 (使えない字ではない)
+            return {"at": at, "nth": nth + 1, "byte": None, "head": "", "kind": "char"}
+        return {"at": at + bad, "nth": nth + 1, "byte": s[bad],
+                "head": s[:bad].decode("ascii") if bad else "", "kind": "char"}
+    if not read_dfi_names(idx, rec_end, rec_count):
+        # 枠は読めたのに、名前らしくない。**置き場の見当そのものが違う**
+        return {"at": rec_end, "nth": len(raw), "byte": None, "head": "",
+                "kind": "junk", "clean": sum(ok), "read": len(raw)}
     return None
 
 
@@ -219,12 +276,18 @@ def dfi_name_stop_note(stop: dict | None) -> str:
     """`dfi_name_stop` を 1 行の案内にする (#202)."""
     if not stop:
         return ""
+    if stop.get("kind") == "junk":
+        # 枠は読めたのに名前らしくない。**置き場の見当そのものが違う** (#258)
+        return (f"   名前の置き場と思った所が、名前らしくありません: "
+                f"0 区切りで {stop['read']} 個読めましたが、**ふつうの名前は "
+                f"{stop['clean']} 個**でした。位置 0x{stop['at']:X} から 64 バイトを"
+                "報告してください (名前は 1 つも使っていません)")
     where = f"位置 0x{stop['at']:X}"
-    what = (f"使えない字 0x{stop['byte']:02X} があります" if stop["byte"] is not None
+    what = (f"使えない字 0x{stop['byte']:02X} があります" if stop.get("byte") is not None
             else "名前の終わりの 0 が見つかりません")
-    near = f" (そこまでは `{stop['head']}` と読めています)" if stop["head"] else ""
+    near = f" (そこまでは `{stop['head']}` と読めています)" if stop.get("head") else ""
     return (f"   名前は **{stop['nth']} 個目で止まっています**: {where} に {what}{near}。"
-            "**そこから先の名前は読んでいません。** その 1 バイトの前後 64 バイトを"
+            "**そこから先の名前は読んでいません。** その前後 64 バイトを"
             "報告してください (名前の置き場の先頭ではなく、ここ)")
 
 

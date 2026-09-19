@@ -4677,22 +4677,40 @@ function dfiNameStop(idx) {
     recEnd += 16;
   }
   const recCount = (recEnd - 16) / 16;
-  let q = recEnd, n = 0;
-  while (n < recCount && q < idx.length) {
+  /* **変な字は「止まった」ではない** (#258)。0 区切りの枠が壊れたときだけ止まる
+     (CLI の dfi_name_stop と同じ判定・同じ言葉) */
+  const raw = [];
+  let q = recEnd;
+  while (raw.length < recCount && q < idx.length) {
     let end = q;
-    while (end < idx.length && idx[end] !== 0) end++;
-    if (end >= idx.length) return { at: q, nth: n + 1, byte: null, head: "" };
-    let bad = -1;
-    for (let i = q; i < end; i++) {
-      if (idx[i] < 0x21 || idx[i] > 0x7E) { bad = i - q; break; }
+    while (end < idx.length && idx[end] !== 0 && end - q <= 127) end++;
+    if (end - q > 127 || end >= idx.length) {
+      return { at: q, nth: raw.length + 1, kind: "frame" };
     }
-    if (end - q > 127 || bad >= 0) {
-      return { at: q + (bad > 0 ? bad : 0), nth: n + 1,
-               byte: bad >= 0 ? idx[q + bad] : null,
-               head: bad > 0 ? String.fromCharCode(...idx.subarray(q, q + bad)) : "" };
-    }
-    n++;
+    raw.push(idx.subarray(q, end));
     q = end + 1;
+  }
+  if (!raw.length) return null;
+  const ok = raw.map((a) => a.length > 0 && a.every((c) => c >= 0x21 && c <= 0x7E));
+  if (!(raw[0].length === 1 && raw[0][0] === 0x2F)) {
+    /* 先頭が根の `/` でないので、変な字を見た所で読むのをやめている。どこでやめたか */
+    const nth = ok.indexOf(false);
+    if (nth < 0) return null;
+    let at = recEnd;
+    for (let i = 0; i < nth; i++) at += raw[i].length + 1;
+    const a = raw[nth];
+    let bad = 0;
+    while (bad < a.length && a[bad] >= 0x21 && a[bad] <= 0x7E) bad++;
+    if (bad >= a.length) {                 /* 長さ 0 の名前 (使えない字ではない) */
+      return { at, nth: nth + 1, byte: null, head: "", kind: "char" };
+    }
+    return { at: at + bad, nth: nth + 1, byte: a[bad], kind: "char",
+             head: bad ? String.fromCharCode(...a.subarray(0, bad)) : "" };
+  }
+  if (!readDfiNames(idx, recEnd, recCount).length) {
+    /* 枠は読めたのに名前らしくない。**置き場の見当そのものが違う** */
+    return { at: recEnd, nth: raw.length, kind: "junk",
+             clean: ok.filter(Boolean).length, read: raw.length };
   }
   return null;
 }
@@ -4700,14 +4718,50 @@ function dfiNameStop(idx) {
 /** `dfiNameStop` を 1 行の案内にする (CLI と同じ言葉)。 */
 function dfiNameStopNote(stop) {
   if (!stop) return "";
+  if (stop.kind === "junk") {
+    return `   名前の置き場と思った所が、名前らしくありません: `
+      + `0 区切りで ${stop.read} 個読めましたが、**ふつうの名前は ${stop.clean} 個**でした。`
+      + `位置 0x${stop.at.toString(16).toUpperCase()} から 64 バイトを`
+      + "報告してください (名前は 1 つも使っていません)";
+  }
   const where = `位置 0x${stop.at.toString(16).toUpperCase()}`;
-  const what = stop.byte !== null
+  const what = stop.byte !== undefined && stop.byte !== null
     ? `使えない字 0x${stop.byte.toString(16).toUpperCase().padStart(2, "0")} があります`
     : "名前の終わりの 0 が見つかりません";
   const near = stop.head ? ` (そこまでは \`${stop.head}\` と読めています)` : "";
   return `   名前は **${stop.nth} 個目で止まっています**: ${where} に ${what}${near}。`
-    + "**そこから先の名前は読んでいません。** その 1 バイトの前後 64 バイトを"
+    + "**そこから先の名前は読んでいません。** その前後 64 バイトを"
     + "報告してください (名前の置き場の先頭ではなく、ここ)";
+}
+
+/** 名前の並びを「読めた」と見なす下限 (#258)。tools/boku2.py の NAME_CLEAN_RATIO と同じ */
+const NAME_CLEAN_RATIO = 0.9;
+
+/** レコードの直後に並ぶ名前を読む (#258。tools/boku2.py の read_dfi_names と同じ)。
+ *  **変な字が 1 つあっただけで、そこから先を全部捨てない。** 名前は 0 区切りなので
+ *  字が変でも枠は壊れない (公開ソースの getFileNames も 0 まで読むだけ)。
+ *  ただし**先頭が根の `/` のときだけ**先へ進む —— そろっていないのに進むと、
+ *  #N より悪いもの (それらしく見えて全部別のファイルを指す名前) ができる。 */
+function readDfiNames(idx, recEnd, recCount) {
+  const raw = [];
+  let q = recEnd;
+  while (raw.length < recCount && q < idx.length) {
+    let n = 0;
+    while (q + n < idx.length && idx[q + n] !== 0 && n <= 127) n++;
+    if (n > 127 || q + n >= idx.length) break;                 /* 枠が壊れている */
+    raw.push(idx.subarray(q, q + n));
+    q += n + 1;
+  }
+  if (!raw.length) return [];
+  const ok = raw.map((a) => a.length > 0 && a.every((c) => c >= 0x21 && c <= 0x7E));
+  if (!(raw[0].length === 1 && raw[0][0] === 0x2F)) {
+    let stop = ok.indexOf(false);
+    if (stop < 0) stop = raw.length;
+    return raw.slice(0, stop).map((a) => ascii(a));
+  }
+  const clean = ok.filter(Boolean).length;
+  if (clean < raw.length * NAME_CLEAN_RATIO || (recCount >= 2 && raw.length < 2)) return [];
+  return raw.map((a, i) => (ok[i] ? ascii(a) : ""));
 }
 
 function readDfi(idx, dataSize, rule) {
@@ -4738,19 +4792,12 @@ function readDfi(idx, dataSize, rule) {
   const recCount = (recEnd - 16) / 16;
   if (recCount < 8) return null;
 
-  const names = [];
-  let q = recEnd;
-  while (names.length < recCount && q < idx.length) {
-    let n = 0;
-    while (q + n < idx.length && idx[q + n] !== 0) {
-      const c = idx[q + n];
-      if (c < 0x21 || c > 0x7E || n >= 127) { n = -1; break; }
-      n++;
-    }
-    if (n < 0 || q + n >= idx.length) break;                   /* 名前でないものに当たった */
-    names.push(ascii(idx.subarray(q, q + n)));
-    q += n + 1;
-  }
+  /* **変な字が 1 つあっただけで、そこから先を全部捨てない** (#258。CLI の
+     read_dfi_names と同じ)。名前は 0 区切りなので、字が変でも枠は壊れない ——
+     公開ソースの getFileNames も 0 まで読むだけで字の中身を見ていない。
+     字の善し悪しは 1 つずつではなく全体で見て、きれいな割合が足りなければ
+     「ここは名前の置き場ではない」として 1 つも使わない */
+  const names = readDfiNames(idx, recEnd, recCount);
 
   /* フォルダの入れ子。+2 の値 (u16) は「同じフォルダにまだ項目が続くか」。
      ファイルで 0 なら、そのフォルダの最後の項目なので一つ上に戻る。
