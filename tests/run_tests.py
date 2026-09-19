@@ -8732,6 +8732,99 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestTheStrongerEvidenceWins(unittest.TestCase):
+    """**目安より、ゲーム自身の検査値を先に見ること** (#271).
+
+    #270 の宿題どおり、**実物なみの比**の合成データ (ファイル 1,900 件 /
+    `.msg` 600 件) を作って `check` を通したら、2 行が正面からぶつかりました。
+
+        → 索引が本体の 3.4% しか指していません。索引の読み方 … が外れている疑いが
+           あります。**この先の診断 (検査値・.msg・入れ物・フォント) は当てになりません。**
+        …
+          切り分けた先頭 128 バイトの検査値: **1,900 件すべて合いました**
+          (**位置も中身も合っている**という、いちばん強い裏付けです)
+
+    使い切りの割合は**こちらが決めた目安**、検査値は**ゲーム自身が持っている
+    答え合わせ**で、位置も中身も確かめます。**目安のほうを根拠に、本物の裏付けを
+    黙らせていた** —— しかも #266 で足した仕組みのせいで、検査値・`.msg`・
+    フォントの段が全部「上から来ています」と字下げになり、いちばん強い証拠が
+    いちばん目立たない所へ押し込まれていました。
+
+    実物の `BOKU2.IMG` は 2.6 GB 近くあり、詰め物も入ります。**使い切りが低い
+    吸い出しは実物で普通に起こり得る**ので、この道は必ず通ります。
+    """
+
+    @staticmethod
+    def said(kind=None) -> str:
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            if kind:
+                make_boku2_sample.damage(folder, kind)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_a_matching_checksum_overrules_the_coverage_rule(self):
+        said = self.said("sparse")
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("→ 索引が本体の")), "")
+        self.assertTrue(line, f"使い切りの → が出ていない\n{said[-800:]}")
+        # 前提: 検査値は本当に全部合っていること
+        self.assertIn("件すべて合いました", said, "材料が弱い: 検査値が合っていない")
+        self.assertIn("検査値は全部合っています", line,
+                      f"強いほうの証拠に触れていません: {line}")
+        self.assertNotIn("この先の診断", line,
+                         f"検査値が全部合っているのに「この先は当てにならない」: {line}")
+
+    def test_the_rest_is_not_pushed_into_the_small_print(self):
+        """**この先の段を字下げに落とさない**こと (いちばん強い証拠が埋もれる)."""
+        import boku2
+        said = self.said("sparse")
+        self.assertNotIn(boku2.SHAKY_INDEX_KNOCK_ON, said,
+                         "検査値が全部合っているのに、この先の段を黙らせています")
+        # 検査値の段が → でも字下げでもなく、今までどおりの裏付けとして出ること
+        self.assertIn("いちばん強い裏付けです", said,
+                      "いちばん強い裏付けの行が消えています")
+
+    def test_a_really_wrong_index_still_says_so(self):
+        """**検査値が合わないときは、今までどおり**言うこと (緩めすぎていない)."""
+        import boku2
+        said = self.said("length")
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("→ 索引が本体の")), "")
+        self.assertTrue(line, "使い切りの → が出ていない")
+        self.assertIn("この先の診断", line, f"警告が消えています: {line}")
+        self.assertIn(boku2.SHAKY_INDEX_KNOCK_ON, said,
+                      "この先の段を原因に結び付けなくなっています")
+
+    def test_a_couple_of_matches_do_not_flip_the_verdict(self):
+        """**たまたま数件合っただけ**では、判定をひっくり返さないこと.
+
+        `CRC_SURE_MIN` 件そろって初めて「全部合っている」と言う。
+        """
+        import boku2
+        self.assertGreaterEqual(boku2.CRC_SURE_MIN, 10,
+                                "少ない件数で判定がひっくり返ります")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        try:
+            import boku2
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools"))
+        self.assertTrue(f"const CRC_SURE_MIN = {boku2.CRC_SURE_MIN};" in ui,
+                        "web/app.js の CRC_SURE_MIN が違う")
+        # **言葉があるだけでは足りない** —— `crcAllOk` の道に繋がっていること
+        self.assertTrue("if (crcAllOk) {\n      lines.push(`→ 索引が本体の " in ui,
+                        "画面が検査値を見ずに「この先は当てにならない」と言い続けています")
+
+
 class TestTheTextContainersGetAVerdictToo(unittest.TestCase):
     """**文言の入れ物の段にも、読めたかどうかを言わせる** (#270).
 
@@ -10576,6 +10669,9 @@ class TestDamageDrill(unittest.TestCase):
         # **文言の入れ物だけが読めない形** (#270)。ここは長らく見出しと名前
         # だけで、読めたかどうかを一度も言っていなかった
         "box": "文言の入れ物が 1 つも読めません",
+        # **目安と本物の裏付けがぶつかる形** (#271)。検査値が全部合っているので、
+        # 「この先は当てになりません」と言ってはいけない
+        "sparse": "ゲーム自身の検査値は全部合っています",
     }
 
     def test_each_damage_kind_is_diagnosed(self):

@@ -1276,6 +1276,9 @@ REAL_INDEX_RECORDS_MIN = 1000
 #: 索引が本体をどれだけ使い切っていれば「読めている」とみなすか。
 #: ブラウザ側 (analyzeIndex) が候補から外す線と同じ 2 割にそろえてある
 COVERAGE_MIN = 0.2
+#: 検査値が「全部合った」と言ってよい最少の件数 (#271)。2〜3 件そろっただけで
+#: 使い切りの判定をひっくり返すと、**たまたま合った**だけの吸い出しを通してしまう
+CRC_SURE_MIN = 20
 
 
 def parse_glyph_table(text: str) -> list:
@@ -2272,6 +2275,27 @@ EMPTY_KNOCK_ON = knock_on_note("本体の中身がほとんど空です")
 SHAKY_INDEX_KNOCK_ON = knock_on_note("索引が本体の N% しか指していません")
 
 
+def crc_match_counts(crc: dict, entries: list, img) -> tuple[int, int]:
+    """切り分けた先頭 `CRC_HEAD` バイトの検査値が、**何件合って何件合わないか** (#271).
+
+    `crc_report` の中だけで数えていたのを外に出した。**索引が本体をどれだけ
+    使っているか**の判定より先にこの数が要る —— 検査値が全部合っているなら、
+    切り分けは位置も中身も正しい。使い切りの割合は**目安**でしかないので、
+    そちらを根拠に「この先の診断は当てになりません」と言ってはいけない。
+    """
+    ok = ng = 0
+    for i, e in enumerate(entries[:CRC_CHECK_FILES]):
+        slot = crc["slots"][i] if i < len(crc["slots"]) else i
+        if slot >= len(crc["crcs"]):
+            continue
+        img.seek(e["at"])
+        if crc16_ccitt(img.read(min(e["len"], CRC_HEAD))) == crc["crcs"][slot]:
+            ok += 1
+        else:
+            ng += 1
+    return ok, ng
+
+
 def crc_report(crc: dict, entries: list, img, rec_count: int,
                names_missing: bool = False,
                knock_on: str = "") -> tuple[list, int]:
@@ -2546,21 +2570,48 @@ def check(folder: str, out=sys.stdout) -> int:
     # 疑いが濃い。数字だけ出して判定に使っていなかったので、12% でも「問題なし」と
     # 言っていた (#96)。基準の 2 割は、ブラウザ側が候補から外す線と同じ
     coverage = used / max(1, img_size)
+    # **判定の前に、強い証拠があるかを見ておく** (#271)。数えるだけで何も言わない
+    crc_all_ok = False
+    crc_probe = next((os.path.join(folder, n) for n in os.listdir(folder)
+                      if n.lower() == "boku2.crc"), None)
+    if crc_probe and coverage < COVERAGE_MIN:
+        try:
+            with open(crc_probe, "rb") as fh:
+                probe_crc = read_crc_file(fh.read())
+            if probe_crc:
+                with open(img_path, "rb") as probe:
+                    ok_n, ng_n = crc_match_counts(probe_crc, entries, probe)
+                crc_all_ok = ok_n >= CRC_SURE_MIN and ng_n == 0
+        except OSError:
+            crc_all_ok = False
     say(f"[本体] {img_size:,} バイト / 索引が指す合計 {used:,} バイト "
         f"({100 * coverage:.1f}% — 索引が本体をどれだけ使い切っているか。"
         "読み方が合っていれば普通は 5 割を超えます)")
     if coverage < COVERAGE_MIN:
         problems += 1
-        # **この先が当てにならないことまで言う** (#266)。#218 の「中身が空」は
-        # そう言っていたのに、こちらは言っていなかった。**こちらのほうが静かに
-        # 悪い** —— 中身は読めるので、この先の段が「それらしい数」を自信たっぷりに
-        # 出してくる (文字表のマスの数、足りない字数、続きの捜索…)
-        say(f"→ 索引が本体の {100 * coverage:.1f}% しか指していません。"
-            "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。"
-            "**この先の診断 (検査値・.msg・入れ物・フォント) は当てになりません。**"
-            "この行と下の先頭 64 バイトを報告してください")
-        say("   " + idx[:64].hex(" ").upper())
-        knock_on = SHAKY_INDEX_KNOCK_ON
+        # **強い証拠のほうを先に見る** (#271)。使い切りの割合は**目安**で、
+        # ゲーム自身の検査値は**位置も中身も**確かめる本物の裏付け。実物なみの
+        # 合成データ (1900 件) で回したら、この 2 つが正面からぶつかった ——
+        # 「3.4% しか指していません。**この先の診断は当てになりません**」の
+        # すぐ下で「検査値: 1,900 件すべて合いました (**いちばん強い裏付け**)」。
+        # 目安のほうを根拠に、本物の裏付けを黙らせてはいけない
+        if crc_all_ok:
+            say(f"→ 索引が本体の {100 * coverage:.1f}% しか指していません。"
+                "ただし**ゲーム自身の検査値は全部合っています** (下の [検査値] の段)。"
+                "**位置も中身も合っている**ので、切り分けの読み方は正しく、"
+                "**本体に索引が指していない所が多い**という話です "
+                "(詰め物か、この道具が読んでいない別の索引)。この行ごと報告してください")
+        else:
+            # **この先が当てにならないことまで言う** (#266)。#218 の「中身が空」は
+            # そう言っていたのに、こちらは言っていなかった。**こちらのほうが静かに
+            # 悪い** —— 中身は読めるので、この先の段が「それらしい数」を自信たっぷりに
+            # 出してくる (文字表のマスの数、足りない字数、続きの捜索…)
+            say(f"→ 索引が本体の {100 * coverage:.1f}% しか指していません。"
+                "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。"
+                "**この先の診断 (検査値・.msg・入れ物・フォント) は当てになりません。**"
+                "この行と下の先頭 64 バイトを報告してください")
+            say("   " + idx[:64].hex(" ").upper())
+            knock_on = SHAKY_INDEX_KNOCK_ON
     # **中身が空なら、形式の話をする前にそれを言う** (#218)。索引だけ正しくて
     # 中身がゼロの吸い出しは、この先の段 (.msg・入れ物・フォント) を全部
     # 「読めない」に見せる。原因は 1 つ上にあるので、先に名指しする

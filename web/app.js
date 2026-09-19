@@ -3821,6 +3821,22 @@ const EMPTY_KNOCK_ON = knockOnNote("本体の中身がほとんど空です");
 /** 索引の読み方が外れているとき (#266)。**こちらのほうが静かに悪い** ——
  *  中身は読めるので、その先の段が「それらしい数」を自信たっぷりに出してくる */
 const SHAKY_INDEX_KNOCK_ON = knockOnNote("索引が本体の N% しか指していません");
+/** 検査値が「全部合った」と言ってよい最少の件数 (#271。CLI の CRC_SURE_MIN) */
+const CRC_SURE_MIN = 20;
+
+/** 切り分けた先頭 CRC_HEAD バイトの検査値が、何件合って何件合わないか
+ *  (#271。CLI の crc_match_counts と同じ数え方) */
+async function crcMatchCounts(crc, items, file, base) {
+  let ok = 0, ng = 0;
+  for (let i = 0; i < Math.min(items.length, CRC_CHECK_FILES); i++) {
+    const slot = i < crc.slots.length ? crc.slots[i] : i;
+    if (slot >= crc.crcs.length) continue;
+    const it = items[i];
+    const head = await readRange(file, base + it.at, Math.min(it.len, CRC_HEAD));
+    if (crc16Ccitt(head) === crc.crcs[slot]) ok++; else ng++;
+  }
+  return { ok, ng };
+}
 
 /** 合わなかった項目が固まっているか散らばっているか (#261。CLI の crc_bad_shape と同じ言葉)。
  *  固まっているなら吸い出しがその区間で壊れている (吸い出し直せば直る)。
@@ -4175,13 +4191,33 @@ async function buildIdxReport() {
     + ` (${(100 * coverage).toFixed(1)}% — 索引が本体をどれだけ使い切っているか。読み方が合っていれば普通は 5 割を超えます)`);
   if (coverage < COVERAGE_MIN) {
     problems++;
-    /* **この先が当てにならないことまで言う** (#266。CLI の check と 1 字そろえる) */
-    lines.push(`→ 索引が本体の ${(100 * coverage).toFixed(1)}% しか指していません。`
-      + "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。"
-      + "**この先の診断 (検査値・.msg・入れ物・フォント) は当てになりません。**"
-      + "この行と下の先頭 64 バイトを報告してください");
-    lines.push("   " + [...b.subarray(0, 64)].map((v) => hex(v, 2)).join(" "));
-    knockOn = SHAKY_INDEX_KNOCK_ON;
+    /* **強い証拠のほうを先に見る** (#271。CLI の check と 1 字そろえる)。
+       使い切りの割合は目安で、ゲーム自身の検査値は位置も中身も確かめる本物の
+       裏付け。目安を根拠に、本物の裏付けを黙らせてはいけない */
+    let crcAllOk = false;
+    const crcProbe = state.entries.find((e) => /boku2\.crc$/i.test(e.name));
+    if (crcProbe) {
+      const probe = readCrcFile(await readRange(crcProbe.file, crcProbe.offset, crcProbe.size));
+      if (probe) {
+        const { ok, ng } = await crcMatchCounts(probe, items, dataEntry.file, dataEntry.offset);
+        crcAllOk = ok >= CRC_SURE_MIN && ng === 0;
+      }
+    }
+    if (crcAllOk) {
+      lines.push(`→ 索引が本体の ${(100 * coverage).toFixed(1)}% しか指していません。`
+        + "ただし**ゲーム自身の検査値は全部合っています** (下の [検査値] の段)。"
+        + "**位置も中身も合っている**ので、切り分けの読み方は正しく、"
+        + "**本体に索引が指していない所が多い**という話です "
+        + "(詰め物か、この道具が読んでいない別の索引)。この行ごと報告してください");
+    } else {
+      /* **この先が当てにならないことまで言う** (#266。CLI の check と 1 字そろえる) */
+      lines.push(`→ 索引が本体の ${(100 * coverage).toFixed(1)}% しか指していません。`
+        + "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。"
+        + "**この先の診断 (検査値・.msg・入れ物・フォント) は当てになりません。**"
+        + "この行と下の先頭 64 バイトを報告してください");
+      lines.push("   " + [...b.subarray(0, 64)].map((v) => hex(v, 2)).join(" "));
+      knockOn = SHAKY_INDEX_KNOCK_ON;
+    }
   }
   /* **中身が空なら、形式の話をする前にそれを言う** (#218)。索引だけ正しくて
      中身がゼロの吸い出しは、この先の段を全部「読めない」に見せる。
