@@ -2248,7 +2248,7 @@ def crc_name_overlap_lines(got: dict) -> list[str]:
     return out
 
 
-def crc_bad_shape(bad_at: list[int], looked: int) -> str:
+def crc_bad_shape(bad_at: list[int], looked: int, with_cause: bool = True) -> str:
     """合わなかった項目が**固まっているか散らばっているか** (#261).
 
     直し方がまるで違う。**固まっている**なら吸い出しがその区間で壊れている
@@ -2259,14 +2259,17 @@ def crc_bad_shape(bad_at: list[int], looked: int) -> str:
     if len(bad_at) < 2:
         return ""
     span = bad_at[-1] - bad_at[0] + 1
+    # `with_cause` が偽なら、原因は呼ぶ側が → の行で言い切っている (#275)。
+    # ここで別の言い方を足すと、2 行で違うことを言うことになる
     if span <= len(bad_at) * 1.5:
         return (f"   合わない {len(bad_at):,} 件は**索引の {bad_at[0]:,} 番目から "
-                f"{bad_at[-1]:,} 番目に固まっています**。吸い出しがその区間で"
-                "壊れている疑いがあるので、**もう一度吸い出すと直ることがあります**")
+                f"{bad_at[-1]:,} 番目に固まっています**"
+                + ("。吸い出しがその区間で壊れている疑いがあるので、"
+                   "**もう一度吸い出すと直ることがあります**" if with_cause else ""))
     return (f"   合わない {len(bad_at):,} 件は**索引じゅうに散らばっています** "
-            f"({bad_at[0]:,} 番目〜{bad_at[-1]:,} 番目 / 見た {looked:,} 件)。"
-            "吸い出しではなく**切り分けの位置の読み方**が外れている疑いがあります "
-            "(吸い出し直しても直りません)")
+            f"({bad_at[0]:,} 番目〜{bad_at[-1]:,} 番目 / 見た {looked:,} 件)"
+            + ("。吸い出しではなく**切り分けの位置の読み方**が外れている疑いがあります "
+               "(吸い出し直しても直りません)" if with_cause else ""))
 
 
 #: 原因が 1 つ上にあると分かっている行に添える言葉の後ろ半分 (#265/#266)。
@@ -2398,17 +2401,23 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
     first_bad = None
     bad_at: list[int] = []            # 合わなかった項目の**索引での番号** (#261)
     bad_names: list[str] = []
+    bad_zero = 0                      # そのうち**ゼロ埋め**だった数 (#275)
     for i, e in enumerate(entries[:CRC_CHECK_FILES]):
         slot = crc["slots"][i] if i < len(crc["slots"]) else i
         if slot >= len(crc["crcs"]):
             continue
         img.seek(e["at"])
-        got = crc16_ccitt(img.read(min(e["len"], CRC_HEAD)))
+        head_bytes = img.read(min(e["len"], CRC_HEAD))
+        got = crc16_ccitt(head_bytes)
         if got == crc["crcs"][slot]:
             ok += 1
         else:
             ng += 1
             bad_at.append(i)
+            # **合わなかったのが「ゼロ埋め」なら、原因は決まる** (#275)。
+            # 切り分けの位置の話ではなく、**その分がまだ吸い出せていない**
+            if head_bytes and not any(head_bytes):
+                bad_zero += 1
             if len(bad_names) < CRC_BAD_SHOWN:
                 bad_names.append(e["path"])
             if first_bad is None:
@@ -2495,18 +2504,32 @@ def crc_report(crc: dict, entries: list, img, rec_count: int,
             if not names_missing and any(crc["names"]):
                 lines += crc_name_overlap_lines(crc_name_overlap(crc, entries))
         else:
+            # **合わなかった分が「ゼロ埋め」なら、原因は決まっている** (#275)。
+            # 吸い出しが途中で切れた形で、**切り分けの位置の話ではない**。
+            # 今までは → の行で「位置がずれている疑い」と言い、その次の行で
+            # 「固まっています。もう一度吸い出すと直ることがあります」と言って
+            # いた —— **2 行で別の原因**を出し、しかも社長が読んで報告するのは
+            # 上の行のほう (#264 と同じ型)。実物でいちばん起こりやすいのは
+            # 「吸い出しが途中で切れた」で、そこを取り違えると何日も無駄になる
+            cause = "切り分けの位置がずれている疑いがあります。"
+            if bad_zero * 2 >= ng:
+                cause = (f"そのうち **{bad_zero:,} 件はゼロ埋め**です —— "
+                         "**吸い出しが途中で切れた形**で、切り分けの位置の話では"
+                         "ありません。**もう一度吸い出してください**。")
             lines.append(f"→ 切り分けた先頭 {CRC_HEAD} バイトの検査値が {ng:,} 件合いません "
                          f"(合う {ok:,} 件 / 見た {looked:,} 件)。"
                          f"例: {first_bad[0]} はこちら 0x{first_bad[1]:04X} / "
                          f"検査値ファイル 0x{first_bad[2]:04X}。"
-                         "切り分けの位置がずれている疑いがあります。この行ごと報告してください")
+                         + cause + "この行ごと報告してください")
             # **どのファイルが合わないかを名指しする** (#261)。公開ソースの
             # `getCRCdict` は合わなかったファイルを全部名指しする。1 件だけでは
             # 「どこが壊れているか」が分からない
             if len(bad_names) > 1:
                 lines.append(f"   合わないファイル: {', '.join(bad_names)}"
                              + (f" ほか {ng - len(bad_names):,} 件" if ng > len(bad_names) else ""))
-            shape = crc_bad_shape(bad_at, looked)
+            # 原因を → の行で言い切ったときは、位置だけを言う (#275)。
+            # 同じ原因を 2 度書かない
+            shape = crc_bad_shape(bad_at, looked, with_cause=bad_zero * 2 < ng)
             if shape:
                 lines.append(shape)
             # **並びが合わなくても、顔ぶれは比べられる** (#262)。ここは

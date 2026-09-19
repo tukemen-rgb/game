@@ -315,7 +315,7 @@ python3 tools/compare_tsv.py work/all.tsv work/BOKU2SAMPLE/answer.tsv
 
 実物では、練習データのように「問題なし」とは限らない。`check` が `→` の行を出したとき、
 それが索引・本体・.msg・フォント・入れ物のどの段で外れたかを読めるようになる練習。
-壊し方は 13 通り (`--break` の選択肢)。
+壊し方は 14 通り (`--break` の選択肢)。
 
 ```text
 python3 tools/make_boku2_sample.py --break idx  --out work/BROKEN   # 索引の先頭 (DFI ではなくなる)
@@ -331,6 +331,7 @@ python3 tools/make_boku2_sample.py --break crcname --out work/BROKEN # BOKU2.CRC
 python3 tools/make_boku2_sample.py --break length --out work/BROKEN # 索引のレコードの長さの欄を小さく
 python3 tools/make_boku2_sample.py --break box  --out work/BROKEN   # 文言の入れ物 (diary.bin など) の中身
 python3 tools/make_boku2_sample.py --break sparse --out work/BROKEN # BOKU2.IMG の後ろに詰め物を足す
+python3 tools/make_boku2_sample.py --break halfrip --out work/BROKEN # BOKU2.IMG の後半をゼロにする
 python3 tools/boku2.py check work/BROKEN                            # 終了コードは 1 (問題あり)
 ```
 
@@ -339,7 +340,7 @@ python3 tools/boku2.py check work/BROKEN                            # 終了コ�
 `→` は 1 本しか出ず、あとの段は「上の『…』から来ています」と字下げで出ます。
 **吸い出し直しでは直りません** (ディスクは無事で、読み方のほうが違う)。
 
-やること (13 通りそれぞれで):
+やること (14 通りそれぞれで):
 
 1. `check` の出力から `→` の行を書き出す。「先頭 16 バイト …」のような手がかりが
    付いていれば、それも一緒に
@@ -351,7 +352,7 @@ python3 tools/boku2.py check work/BROKEN                            # 終了コ�
 3. 構造探査台にも同じ `work/BROKEN` を読ませ、「報告用の要約」に **同じ行** が出る
    ことを確かめる (ブラウザと一括処理は同じ診断を出す)
 
-**確認:** 13 通りとも `→` の行が 1 つ以上出て、`== 結果` が「確認事項 N 件」になる
+**確認:** 14 通りとも `→` の行が 1 つ以上出て、`== 結果` が「確認事項 N 件」になる
 (「問題なし」にならない)。`idx` だけは索引が読めないので、そこで診断が止まる (それが正しい)。
 
 要点: 実物で最初に貼るのはこの出力 ([10-僕夏2の手順.md](../docs/10-僕夏2の手順.md) の

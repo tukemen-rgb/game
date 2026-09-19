@@ -8732,6 +8732,91 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestAHalfFinishedRipIsNamedAsSuch(unittest.TestCase):
+    """**吸い出しが途中で切れた形を、そう言うこと** (#275).
+
+    #274 の宿題は「3 段目 (こちらが決めた目安) の残り」。`BODY_SAMPLE_FILES`
+    (30 個覗いて 9 割がゼロなら「中身がほとんど空」) を見たら、**全部ゼロでも
+    位置ずれでもない中間**が抜けていました。本体の後半だけをゼロにした吸い出し
+    —— 実物でいちばん起こりやすい「途中で切れた」形 —— で:
+
+        → 切り分けた先頭 128 バイトの検査値が 5 件合いません … 
+           **切り分けの位置がずれている疑いがあります**。この行ごと報告してください
+           合わない 5 件は索引の 13 番目から 17 番目に**固まっています**。
+           吸い出しがその区間で壊れている疑いがあるので、**もう一度吸い出すと直ることがあります**
+
+    **2 行で別の原因**を言い、しかも社長が読んで報告するのは `→` の行のほう
+    (#264 と同じ型)。「位置がずれている」は**索引の読み方をやり直せ**という
+    意味なので、本当の直し方 (吸い出し直し) から遠ざかります。
+
+    決め手は手元にありました —— **合わなかったファイルがゼロ埋めかどうか**。
+    検査値を数えるときに同じバイトを読んでいるので、ただで分かります。
+    """
+
+    @staticmethod
+    def said(kind=None) -> str:
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            if kind:
+                make_boku2_sample.damage(folder, kind)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_the_material_is_the_middle_case(self):
+        """前提: 「中身がほとんど空」でも「全部合う」でもない形であること."""
+        said = self.said("halfrip")
+        self.assertNotIn("本体の中身がほとんど空です", said,
+                         "材料が違います (全部ゼロになっている)")
+        self.assertIn("件合いません", said, "材料が違います (検査値が全部合っている)")
+
+    def test_the_arrow_names_the_rip_not_the_split(self):
+        said = self.said("halfrip")
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("→ 切り分けた先頭")), "")
+        self.assertTrue(line, f"検査値の → が出ていない\n{said[-900:]}")
+        self.assertIn("件はゼロ埋め", line, f"ゼロ埋めに触れていません: {line[:160]}")
+        self.assertIn("吸い出しが途中で切れた形", line, line[:160])
+        self.assertNotIn("切り分けの位置がずれている疑い", line,
+                         f"ゼロ埋めなのに位置のせいにしています: {line[:160]}")
+
+    def test_the_two_lines_do_not_give_two_causes(self):
+        """→ の行が原因を言い切ったら、次の行は**位置だけ**を言うこと (#264 と同じ型)."""
+        said = self.said("halfrip")
+        shape = next((ln for ln in said.splitlines() if "固まっています" in ln), "")
+        self.assertTrue(shape, "どこに固まっているかを言っていない")
+        self.assertNotIn("もう一度吸い出すと直ることがあります", shape,
+                         f"上の行と別の言い方で同じ原因を繰り返しています: {shape}")
+
+    def test_a_real_split_problem_still_says_so(self):
+        """**中身があるのに合わない**ときは、今までどおり位置を疑うこと."""
+        said = self.said("crc")          # 検査値を 1 つ変えただけ (中身は無事)
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("→ 切り分けた先頭")), "")
+        self.assertTrue(line, f"検査値の → が出ていない\n{said[-900:]}")
+        self.assertIn("切り分けの位置がずれている疑い", line,
+                      f"本物の位置ずれを言わなくなりました: {line[:160]}")
+        self.assertNotIn("ゼロ埋め", line, line[:160])
+
+    def test_a_healthy_dump_says_nothing_about_it(self):
+        said = self.said()
+        self.assertNotIn("件はゼロ埋め", said, "無事な吸い出しでゼロ埋めと言っています")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue("crcBadZero * 2 >= crcNg" in ui,
+                        "画面がゼロ埋めを見ていません")
+        self.assertTrue("crcBadShape(crcBadAt, looked, crcBadZero * 2 < crcNg)" in ui,
+                        "画面が 2 行で別の原因を言い続けています")
+        self.assertTrue("if (head.length && !head.some((v) => v)) crcBadZero++;" in ui,
+                        "画面がゼロ埋めを数えていません")
+
+
 class TestTheContinuationIsHuntedWithTheGridWeFound(unittest.TestCase):
     """**続きは「1 枚目と同じ升目」で探すこと** (#274).
 
@@ -11027,6 +11112,8 @@ class TestDamageDrill(unittest.TestCase):
         # **目安と本物の裏付けがぶつかる形** (#271)。検査値が全部合っているので、
         # 「この先は当てになりません」と言ってはいけない
         "sparse": "ゲーム自身の検査値は全部合っています",
+        # **吸い出しが途中で切れた形** (#275)。→ の行が原因を取り違えていた
+        "halfrip": "件はゼロ埋め",
     }
 
     def test_each_damage_kind_is_diagnosed(self):

@@ -3892,19 +3892,21 @@ function crcNameOverlapLines(got) {
   return out;
 }
 
-function crcBadShape(badAt, looked) {
+function crcBadShape(badAt, looked, withCause = true) {
   if (badAt.length < 2) return "";
   const span = badAt[badAt.length - 1] - badAt[0] + 1;
+  /* `withCause` が偽なら、原因は呼ぶ側が → の行で言い切っている (#275。CLI と同じ) */
   if (span <= badAt.length * 1.5) {
     return `   合わない ${badAt.length.toLocaleString()} 件は**索引の ${badAt[0].toLocaleString()} 番目から `
-      + `${badAt[badAt.length - 1].toLocaleString()} 番目に固まっています**。吸い出しがその区間で`
-      + "壊れている疑いがあるので、**もう一度吸い出すと直ることがあります**";
+      + `${badAt[badAt.length - 1].toLocaleString()} 番目に固まっています**`
+      + (withCause ? "。吸い出しがその区間で壊れている疑いがあるので、"
+                     + "**もう一度吸い出すと直ることがあります**" : "");
   }
   return `   合わない ${badAt.length.toLocaleString()} 件は**索引じゅうに散らばっています** `
     + `(${badAt[0].toLocaleString()} 番目〜${badAt[badAt.length - 1].toLocaleString()} 番目 / `
-    + `見た ${looked.toLocaleString()} 件)。`
-    + "吸い出しではなく**切り分けの位置の読み方**が外れている疑いがあります "
-    + "(吸い出し直しても直りません)";
+    + `見た ${looked.toLocaleString()} 件)`
+    + (withCause ? "。吸い出しではなく**切り分けの位置の読み方**が外れている疑いがあります "
+                   + "(吸い出し直しても直りません)" : "");
 }
 
 function crcNameByValue(crc) {
@@ -4386,7 +4388,7 @@ async function buildIdxReport() {
          あるなら中身は取れていて並びだけが違う (CLI の crc_report と同じ判定) */
       const crcTable = new Set(crc.crcs);
       const crcByValue = crcNameByValue(crc);
-      let badInTable = 0, nameable = 0;
+      let badInTable = 0, nameable = 0, crcBadZero = 0;
       for (let i = 0; i < Math.min(items.length, CRC_CHECK_FILES); i++) {
         const slot = i < crc.slots.length ? crc.slots[i] : i;
         if (slot >= crc.crcs.length) continue;
@@ -4398,6 +4400,8 @@ async function buildIdxReport() {
         else {
           crcNg++;
           crcBadAt.push(i);
+          /* **合わなかったのが「ゼロ埋め」なら、原因は決まる** (#275。CLI と同じ) */
+          if (head.length && !head.some((v) => v)) crcBadZero++;
           if (crcBadNames.length < CRC_BAD_SHOWN) crcBadNames.push(it.name);
           if (crcTable.has(got)) badInTable++;
           if (crcByValue.has(got)) nameable++;
@@ -4480,18 +4484,25 @@ async function buildIdxReport() {
             for (const ln of crcNameOverlapLines(crcNameOverlap(crc, items))) lines.push(ln);
           }
         } else {
+          /* **合わなかった分がゼロ埋めなら、原因は決まっている** (#275。CLI と同じ言葉)。
+             吸い出しが途中で切れた形で、切り分けの位置の話ではない */
+          const cause = crcBadZero * 2 >= crcNg
+            ? `そのうち **${crcBadZero.toLocaleString()} 件はゼロ埋め**です —— `
+              + "**吸い出しが途中で切れた形**で、切り分けの位置の話ではありません。"
+              + "**もう一度吸い出してください**。"
+            : "切り分けの位置がずれている疑いがあります。";
           lines.push(`→ 切り分けた先頭 ${CRC_HEAD} バイトの検査値が ${crcNg.toLocaleString()} 件合いません `
             + `(合う ${crcOk.toLocaleString()} 件 / 見た ${looked.toLocaleString()} 件)。`
             + `例: ${crcBad.name} はこちら 0x${hex(crcBad.got, 4)} / `
             + `検査値ファイル 0x${hex(crcBad.want, 4)}。`
-            + "切り分けの位置がずれている疑いがあります。この行ごと報告してください");
+            + cause + "この行ごと報告してください");
           /* **どのファイルが合わないかを名指しする** (#261。CLI の crc_report と同じ) */
           if (crcBadNames.length > 1) {
             lines.push(`   合わないファイル: ${crcBadNames.join(", ")}`
               + (crcNg > crcBadNames.length
                  ? ` ほか ${(crcNg - crcBadNames.length).toLocaleString()} 件` : ""));
           }
-          const shape = crcBadShape(crcBadAt, looked);
+          const shape = crcBadShape(crcBadAt, looked, crcBadZero * 2 < crcNg);
           if (shape) lines.push(shape);
           if (idxNamesOk && crc.names.some((x) => x)) {
             for (const ln of crcNameOverlapLines(crcNameOverlap(crc, items))) lines.push(ln);

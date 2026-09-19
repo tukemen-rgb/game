@@ -355,6 +355,9 @@ DAMAGE = {
     # 使い切りの割合 (目安) と、ゲーム自身の検査値 (本物の裏付け) が正面から
     # ぶつかる形。どちらを信じるかで助言がまるで変わる
     "sparse": "BOKU2.IMG の後ろに詰め物を足す (索引は正しいのに使い切りが低い)",
+    # **吸い出しが途中で切れた形** (#275)。実物でいちばん起こりやすい壊れ方なのに、
+    # 「中身がほとんど空」(全部ゼロ) でも「位置がずれている」でもない中間だった
+    "halfrip": "BOKU2.IMG の後半をゼロにする (吸い出しが途中で切れた形)",
 }
 
 
@@ -386,6 +389,16 @@ def damage(out_dir: str, kind: str) -> str:
             fh.seek(rec_end)
             fh.write(b"\xff" * (len(idx) - rec_end))
         return f"BOKU2.IDX の名前の置き場 (0x{rec_end:X} から最後まで) を FF で埋めた"
+    if kind == "halfrip":
+        # **前半は無事、後半だけがゼロ。** 全部ゼロ (`empty`) にすると
+        # 「中身がほとんど空です」で片付くが、実物で多いのはこちらの中間の形。
+        # 検査値は前半が合って後半が合わないので、**固まった合わない群**になる
+        size = os.path.getsize(img_path)
+        cut = size // 2
+        with open(img_path, "r+b") as fh:
+            fh.seek(cut)
+            fh.write(b"\0" * (size - cut))
+        return f"BOKU2.IMG の後半 {size - cut:,} バイト (0x{cut:X} から) を 0 にした"
     if kind == "sparse":
         # **索引も中身もそのまま、本体だけを大きくする。** 検査値は全部合うのに
         # 使い切りが 2 割を切る。目安のほうを根拠に「この先は当てにならない」と
