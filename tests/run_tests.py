@@ -8467,6 +8467,103 @@ class TestTheNameLineupIsComparedWithoutRelyingOnOrder(unittest.TestCase):
         self.assertTrue(all(ours), "0 件で緑にしない")
 
 
+class TestTheFirstHourTableMatchesWhatTheToolDoes(unittest.TestCase):
+    """**手順書が道具より古くなっていないこと** (#263).
+
+    docs/10 の「実物が届いた日の最初の 1 時間」の表は、社長が実物を前にして
+    いちばん最初に読む所。ところが #252・#261・#262 で `[検査値]` の段の答えが
+    **3 通りに分かれた**のに、表は「どちらかが出なければ … **先へ進まない**」の
+    ままだった —— **道具が「先へ進んでよい、こう打て」と言っている場合に、
+    手順書は「進むな」と言っていた**。
+
+    この検査は、表の行が道具の出す**3 つの結果すべて**に触れていることを見る。
+    道具の側の文言から引くので、片方だけ変えると落ちる。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "docs", "10-僕夏2の手順.md"), encoding="utf-8") as fh:
+            cls.doc = fh.read()
+        cls.rows = [l for l in cls.doc.splitlines() if l.startswith("| 〜")]
+
+    def row(self, head: str) -> str:
+        got = [r for r in self.rows if r.startswith(f"| {head} ")]
+        self.assertEqual(len(got), 1, f"{head} の行が {len(got)} 本ある")
+        return got[0]
+
+    def test_the_table_is_the_shape_we_think(self):
+        """前提の確認: 表が拾えていること (0 行で緑にしない)."""
+        self.assertGreaterEqual(len(self.rows), 8, self.rows)
+        self.assertTrue(any("check" in r for r in self.rows))
+
+    def test_the_checksum_row_covers_all_three_answers(self):
+        """`[検査値]` の段は 3 通りに分かれる。**進んでよい場合**が抜けていない."""
+        row = self.row("〜8 分")
+        for phrase, why in (
+                ("見つかります", "並びが違うだけ (進んでよい) の場合が書いていない"),
+                ("並びが違う", "並びの話だと書いていない"),
+                ("--names-from-crc", "打つコマンドが書いていない"),
+                ("固まって", "吸い出しが壊れている場合が書いていない"),
+                ("もう一度吸い出す", "吸い出し直しで直ることが書いていない"),
+                ("先へ進まない", "本当に止まるべき場合が書いていない")):
+            self.assertIn(phrase, row, f"〜8 分の行: {why}\n{row}")
+
+    def test_the_unpack_row_does_not_require_a_perfect_checksum(self):
+        """#252 以降、検査値が全部合っていなくても名前は付く."""
+        row = self.row("〜20 分")
+        self.assertIn("--names-from-crc", row, row)
+        self.assertIn("全部は合っていなくても", row,
+                      f"「全部合っていれば」の条件が残っている:\n{row}")
+
+    def test_the_phrases_are_things_the_tool_really_prints(self):
+        """表が引用している文言を、**道具に実際に出させて**確かめる.
+
+        「見つかります」「固まって」は #261・#262 で足した文言。手順書だけを
+        直して道具を直し忘れる (または逆) を防ぐ。
+        """
+        import struct
+        import subprocess
+        import boku2
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 並びだけ逆の検査値ファイル → 「見つかります」「並びが違う」が出る
+            a = os.path.join(tmp, "REV")
+            make_boku2_sample.build_sample(a)
+            path = os.path.join(a, "BOKU2.CRC")
+            with open(path, "rb") as fh:
+                raw = bytearray(fh.read())
+            n, dir_start = struct.unpack_from("<5I", raw, 0)[:2]
+            e = boku2.CRC_ENTRY
+            items = [bytes(raw[dir_start + i * e: dir_start + (i + 1) * e]) for i in range(n)]
+            for i, it in enumerate(reversed(items)):
+                raw[dir_start + i * e: dir_start + (i + 1) * e] = it
+            with open(path, "wb") as fh:
+                fh.write(bytes(raw))
+            said = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "boku2.py"), "check", a],
+                capture_output=True, text=True, cwd=REPO).stdout
+            for phrase in ("見つかります", "並びが違う", "--names-from-crc"):
+                self.assertIn(phrase, said, f"道具が「{phrase}」と言っていない")
+
+            # 本体の一区間だけを潰す → 「固まって」が出る
+            b = os.path.join(tmp, "RUN")
+            make_boku2_sample.build_sample(b)
+            img_path = os.path.join(b, "BOKU2.IMG")
+            with open(img_path, "rb") as fh:
+                img = bytearray(fh.read())
+            with open(os.path.join(b, "BOKU2.IDX"), "rb") as fh:
+                for entry in boku2.read_dfi(fh.read(), len(img))[5:12]:
+                    img[entry["at"]:entry["at"] + 16] = b"\xAA" * 16
+            with open(img_path, "wb") as fh:
+                fh.write(bytes(img))
+            said = subprocess.run(
+                [sys.executable, os.path.join(REPO, "tools", "boku2.py"), "check", b],
+                capture_output=True, text=True, cwd=REPO).stdout
+            for phrase in ("固まって", "もう一度吸い出す"):
+                self.assertIn(phrase, said, f"道具が「{phrase}」と言っていない")
+
+
 class TestBoku2Sample(unittest.TestCase):
     """docs/10 の手順を、練習用データ (tools/make_boku2_sample.py) で最後まで通す."""
 
