@@ -358,6 +358,9 @@ DAMAGE = {
     # **吸い出しが途中で切れた形** (#275)。実物でいちばん起こりやすい壊れ方なのに、
     # 「中身がほとんど空」(全部ゼロ) でも「位置がずれている」でもない中間だった
     "halfrip": "BOKU2.IMG の後半をゼロにする (吸い出しが途中で切れた形)",
+    # **0x8002 の読み方が一覧に頼っている形** (#280)。一覧に無いファイルに 0x8002 を
+    # 入れると、待ち時間として次の 1 字を食ってしまい、本文が黙って 1 字欠ける
+    "altbreak": "一覧に無い .msg に 0x8002 を入れる (ページ送りか待ち時間か決まらない)",
 }
 
 
@@ -389,6 +392,25 @@ def damage(out_dir: str, kind: str) -> str:
             fh.seek(rec_end)
             fh.write(b"\xff" * (len(idx) - rec_end))
         return f"BOKU2.IDX の名前の置き場 (0x{rec_end:X} から最後まで) を FF で埋めた"
+    if kind == "altbreak":
+        # `system.msg` (一覧に無い) の本文の 1 字を 0x8002 に変える。
+        # 待ち時間として読むと次の 1 字が消え、ページ送りとして読むと残る
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import boku2 as _b
+        with open(img_path, "r+b") as fh:
+            img = bytearray(fh.read())
+            for e in _b.read_dfi(idx, len(img)):
+                if _b.plain_name(e["path"]) != "system.msg":
+                    continue
+                at = e["at"]
+                # 本文の 2 番目の字を 0x8002 にする (先頭は表なので触らない)
+                for q in range(at + 16, at + min(e["len"], 256) - 4, 2):
+                    if 0 < (img[q] | (img[q + 1] << 8)) < _b.FONT_GLYPHS \
+                            and 0 < (img[q + 2] | (img[q + 3] << 8)) < _b.FONT_GLYPHS:
+                        img[q], img[q + 1] = 0x02, 0x80
+                        fh.seek(0); fh.write(bytes(img))
+                        return f"BOKU2.IMG の system/system.msg の位置 0x{q - at:X} を 0x8002 にした"
+        raise SystemExit("altbreak: 変えられる字が見つからない")
     if kind == "halfrip":
         # **前半は無事、後半だけがゼロ。** 全部ゼロ (`empty`) にすると
         # 「中身がほとんど空です」で片付くが、実物で多いのはこちらの中間の形。

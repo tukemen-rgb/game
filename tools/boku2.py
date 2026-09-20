@@ -1195,6 +1195,39 @@ def is_alt_break(name: str) -> bool:
     return plain_name(name) in ALT_BREAK_FILES
 
 
+def alt_break_doubt(raw: bytes, name: str, glyphs) -> tuple[int, str, str] | None:
+    """`0x8002` の読み方が**一覧に頼っている**ファイルで、2 通りの読みを並べる (#280).
+
+    `ALT_BREAK_FILES` は公開ソースから借りた 7 つの名前で、**実物で確かめたことは
+    一度も無い**。一覧に無いファイルが同じ読み方だった場合、`0x8002` の次の 2 バイトを
+    **待ち時間として食ってしまい、本文が 1 字ずつ欠ける** —— しかも欠けたまま
+    それらしい日本語が出るので、**誰も気づけない**。
+
+    見分けは中身では付かない (練習データで測ると、待ち時間の値も本文の文字番号と
+    同じ番号を取る)。だから当てずっぽうで決めず、**2 通りを並べて見せる**。
+    どちらが日本語として通るかは、人が見れば分かる。
+
+    @returns 一覧に無くて `0x8002` を持つなら (個数, 待ち時間として読んだ例,
+             ページ送りとして読んだ例)。それ以外は None
+    """
+    if is_alt_break(name):
+        return None
+    count = sum(1 for i in range(0, len(raw) - 1, 2)
+                if raw[i] | (raw[i + 1] << 8) == 0x8002)
+    if not count:
+        return None
+    for alt in (False, True):
+        rows = text_rows_bytes(raw, plain_name(name), glyphs, alt=alt)
+        if alt:
+            other = rows
+        else:
+            first = rows
+    for a, b in zip(first, other):
+        if a[-1] != b[-1]:
+            return count, a[-1], b[-1]
+    return None
+
+
 def decode(codes: list[int], glyphs: list[str] | None, tags: bool = True, alt: bool = False) -> str:
     """ブラウザ側 bokuMsgText と同じ。tags=True で校正ツールの書き方 (<BR> / <WAIT:xx>).
 
@@ -2939,6 +2972,13 @@ def check(folder: str, out=sys.stdout) -> int:
                 f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探しました。"
                 "この行ごと報告してください")
         ok_msg, first_bad = 0, None
+        alt_doubt = None                 # 0x8002 の読み方が決まらないファイル (#280)
+        # **文字表は先に読んでおく** (#280)。2 通りの読みを並べて見せる行は、
+        # 日本語で出さないと「どちらが通るか」を見比べられない。下の [文字表] の
+        # 段でも同じものを使う (2 度読まない)
+        font_txt = next((os.path.join(folder, n) for n in os.listdir(folder)
+                         if n.lower() == "font.txt"), None)
+        folder_glyphs = load_font(font_txt) if font_txt else None
         looked_msgs = min(MSG_CHECK_FILES, len(msgs))
         msg_used: set[int] = set()
         len_ok, len_ng = 0, 0            # 8 バイト刻みの後ろ 4 バイト (項目のバイト長) が合うか
@@ -2954,6 +2994,13 @@ def check(folder: str, out=sys.stdout) -> int:
                     len_ng += 1
                 # 文字表の確認用に、使われている番号も拾っておく (文字表なしの復号は [番号] の形)
                 msg_used |= used_numbers_of(b, e["path"])
+                # **0x8002 の読み方が一覧に頼っていることを言う** (#280)
+                # **名前が読めていないときは言わない** (#280)。名前が `#0` `#1` …
+                # では、どのファイルも「一覧に無い」ことになってしまう (#279 と同じ)
+                if alt_doubt is None and named >= len(entries) * NAME_LIST_TRUST:
+                    alt_doubt = alt_break_doubt(b, e["path"], folder_glyphs)
+                    if alt_doubt:
+                        alt_doubt = (e["path"], *alt_doubt)
             elif first_bad is None:
                 first_bad = (e, b[:16], b)
         if msgs:
@@ -2989,11 +3036,22 @@ def check(folder: str, out=sys.stdout) -> int:
                     say(f"→ 位置表の長さの欄が {len_ng} 件合いません。8 バイト刻みの後ろ 4 バイトが"
                         "その項目のバイト長だ、という読みがこの作品では違うかもしれません"
                         " (合わない分は位置だけで読んでいます)。この行ごと報告してください")
-            if first_bad:
-                e, head, body = first_bad
-                # **中身が空なら、読めないのは当たり前** (#265)。blame が外す
-                problems += blame(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト "
-                                  f"{head.hex(' ').upper()}{guess_kind_note(head, body)}")
+        if alt_doubt:
+            path, count, as_wait, as_break = alt_doubt
+            problems += blame(
+                f"→ {path} に **0x8002 が {count:,} 個**あります。この一覧 "
+                f"({', '.join(sorted(ALT_BREAK_FILES))}) に無いので**待ち時間 + 次の "
+                "2 バイト**として読みましたが、一覧は英語化パッチの公開ソースから"
+                "借りたもので、**実物で確かめていません**。ページ送りとして読むと"
+                "**本文が 1 字ずつ変わります**。どちらが日本語として通るかを見て、"
+                "この 2 行ごと報告してください")
+            say(f"   待ち時間として: {as_wait[:40]}")
+            say(f"   ページ送りとして: {as_break[:40]}")
+        if first_bad:
+            e, head, body = first_bad
+            # **中身が空なら、読めないのは当たり前** (#265)。blame が外す
+            problems += blame(f"→ 読めない .msg の例: {e['path']} 先頭 16 バイト "
+                              f"{head.hex(' ').upper()}{guess_kind_note(head, body)}")
         # **見出しは、その下の行の持ち主でなければならない** (#270)。この見出しは
         # 長らく `.msg` の数の行と統計の行の**あいだ**にあったので、
         # 「先頭 30 件のうち読めた形: 12 件」「位置表の長さの欄: …」という
@@ -3114,9 +3172,8 @@ def check(folder: str, out=sys.stdout) -> int:
             say(glyph_range_note(max(used_here), "と".join(unseen), cells_here))
             if nums_too_big:
                 problems += 1
-        font_txt = next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == "font.txt"), None)
         if font_txt:
-            glyphs = load_font(font_txt) or []
+            glyphs = folder_glyphs or []
             missing = sorted(u for u in used_here if u >= len(glyphs) or glyphs[u] is None)
             say(f"[文字表] font.txt: {sum(1 for g in glyphs if g)} 字 / 本文で使われている番号 "
                 f"{len(used_here)} 種 ({' / '.join(used_by)}) のうち"

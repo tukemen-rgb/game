@@ -8739,6 +8739,83 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestTheTwoReadingsOfTheBreakCodeAreShown(unittest.TestCase):
+    """**`0x8002` の読み方が一覧に頼っていることを、黙っていないこと** (#280).
+
+    `ALT_BREAK_FILES` —— `0x8002` を「引数の無いページ送り」として読むファイル
+    7 つ —— も公開ソースから借りた一覧で、**実物で確かめたことは一度も無い**。
+    一覧に無いファイルが同じ読み方だと、`0x8002` の次の 2 バイトを**待ち時間として
+    食い、本文が 1 字ずつ欠ける**。しかも欠けたままそれらしい日本語が出る:
+
+        待ち時間として:   あみ<WAIT:48>しをつかまえる
+        ページ送りとして: あみ<BREAK>むしをつかまえる
+
+    **「む」が消えている。** 訳す人は最後まで気づけない。
+
+    中身では見分けが付かない (練習データで測ると、待ち時間の値も本文の文字番号と
+    同じ番号を取る) ので、**当てずっぽうで決めず、2 通りを並べて見せる**。
+    どちらが日本語として通るかは、人が見れば分かる。
+    """
+
+    @staticmethod
+    def said(kind=None) -> str:
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            if kind:
+                make_boku2_sample.damage(folder, kind)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_both_readings_are_shown(self):
+        said = self.said("altbreak")
+        rows = said.splitlines()
+        i = next((k for k, ln in enumerate(rows) if "0x8002 が" in ln and ln.startswith("→")), None)
+        self.assertIsNotNone(i, f"2 通りの読みを並べていません\n{said[-900:]}")
+        wait = next((ln for ln in rows[i:i + 3] if ln.lstrip().startswith("待ち時間として:")), "")
+        brk = next((ln for ln in rows[i:i + 3] if ln.lstrip().startswith("ページ送りとして:")), "")
+        self.assertTrue(wait and brk, f"2 行が出ていない:\n{chr(10).join(rows[i:i + 3])}")
+        self.assertNotEqual(wait.split(":", 1)[1], brk.split(":", 1)[1],
+                            "2 通りが同じ文になっています (並べる意味が無い)")
+        # **日本語で出すこと。** `[10][71]` のままでは、どちらが通るか見比べられない
+        self.assertNotIn("[", brk, f"文字表を使っていません: {brk}")
+
+    def test_a_listed_file_is_not_doubted(self):
+        """**一覧にあるファイルでは言わない**こと (練習データの `item_info.msg`)."""
+        said = self.said()
+        self.assertNotIn("0x8002 が", said, "一覧にあるファイルまで疑っています")
+
+    def test_nothing_is_said_when_the_names_are_unreadable(self):
+        """名前が `#0` `#1` … の吸い出しでは言わないこと (#279 と同じ理由)."""
+        said = self.said("allnames")
+        self.assertIn("名前が付かないファイルが多い", said, "材料が違います")
+        self.assertNotIn("0x8002 が", said,
+                         "名前が読めないのに「一覧に無い」と言っています")
+
+    def test_the_detector_needs_a_real_difference(self):
+        """**2 通りが同じなら言わない**こと (0x8002 が無いファイルで鳴らない)."""
+        import boku2
+        import make_boku2_sample as M
+        glyphs = M.glyph_table()
+        plain = M.build_msg([M.encode("はじめから", glyphs)], 8)
+        self.assertIsNone(boku2.alt_break_doubt(plain, "system.msg", None),
+                          "0x8002 が無いのに疑っています")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue("function altBreakDoubt(bytes, name, glyphs, parsed) {" in ui,
+                        "画面に同じ判定がありません")
+        self.assertTrue("   待ち時間として: ${altDoubt.asWait.slice(0, 40)}" in ui,
+                        "画面が 2 通りを並べていません")
+        self.assertTrue("NAME_LIST_TRUST) {" in ui,
+                        "画面が名前の読めない吸い出しでも言い続けています")
+
+
 class TestAContainerNotOnTheBorrowedListIsNotSilentlyDropped(unittest.TestCase):
     """**名前の一覧に無い文言の入れ物を、黙って落とさないこと** (#279).
 
@@ -11615,6 +11692,8 @@ class TestDamageDrill(unittest.TestCase):
         "sparse": "ゲーム自身の検査値は全部合っています",
         # **吸い出しが途中で切れた形** (#275)。→ の行が原因を取り違えていた
         "halfrip": "件はゼロ埋め",
+        # **0x8002 の読み方が一覧に頼っている形** (#280)。2 通りを並べて見せる
+        "altbreak": "0x8002 が 1 個",
     }
 
     def test_each_damage_kind_is_diagnosed(self):

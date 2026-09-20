@@ -4561,7 +4561,10 @@ async function buildIdxReport() {
       + `名前 (\`.msg\` / ${CONTAINERS.join(", ")}) でも、中身の形でも `
       + `${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探しました。この行ごと報告してください`);
   }
-  let okMsg = 0, badMsg = null, lenOk = 0, lenNg = 0;
+  let okMsg = 0, badMsg = null, lenOk = 0, lenNg = 0, altDoubt = null;
+  /* 貼ってある文字表。2 通りの読みを並べる行を日本語で出すのに要る (#280) */
+  const reportGlyphs = $("msgglyphs").value.trim()
+    ? parseGlyphTable($("msgglyphs").value) : null;
   const msgUsed = new Set();                                    /* 読めた .msg で使われている文字番号 */
   const sjisDecode = DECODERS.sjis ? (x) => DECODERS.sjis.decode(x) : null;
   for (const it of msgs.slice(0, MSG_CHECK_FILES)) {
@@ -4574,7 +4577,23 @@ async function buildIdxReport() {
       /* **入れ物なら中まで降りる** (#230)。平らな .msg として読むと、部品の
          位置表が文字番号に見えてしまう (CLI の text_rows_bytes と同じ道を通る) */
       for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) msgUsed.add(c);
+      /* **0x8002 の読み方が一覧に頼っていることを言う** (#280。CLI と同じ) */
+      /* **名前が読めていないときは言わない** (#280。CLI と同じ) */
+      if (!altDoubt && (c.named_ok || 0) >= items.length * NAME_LIST_TRUST) {
+        const doubt = altBreakDoubt(bytes, it.name, reportGlyphs, r);
+        if (doubt) altDoubt = { name: it.name, ...doubt };
+      }
     } else if (!badMsg) badMsg = { it, head: bytes.subarray(0, 16), body: bytes };
+  }
+  if (altDoubt) {
+    problems += blame(`→ ${altDoubt.name} に **0x8002 が ${altDoubt.count.toLocaleString()} 個**`
+      + `あります。この一覧 (${[...ALT_BREAK_FILES].sort().join(", ")}) に無いので`
+      + "**待ち時間 + 次の 2 バイト**として読みましたが、一覧は英語化パッチの公開ソースから"
+      + "借りたもので、**実物で確かめていません**。ページ送りとして読むと"
+      + "**本文が 1 字ずつ変わります**。どちらが日本語として通るかを見て、"
+      + "この 2 行ごと報告してください");
+    lines.push(`   待ち時間として: ${altDoubt.asWait.slice(0, 40)}`);
+    lines.push(`   ページ送りとして: ${altDoubt.asBreak.slice(0, 40)}`);
   }
   if (msgs.length) {
     const looked = Math.min(MSG_CHECK_FILES, msgs.length);
@@ -6582,6 +6601,25 @@ const ALT_BREAK_FILES = new Set(["turi_info.msg", "phot_info.msg", "okan_info.ms
    付くフォルダがある (公開ソースの SJIS_FILES)。tools/boku2.py の plain_name と同じ */
 function plainName(name) {
   return String(name || "").split(/[\\/]/).pop().replace(/~\d+$/, "").toLowerCase();
+}
+
+/** `0x8002` の読み方が**一覧に頼っている**ファイルで、2 通りの読みを並べる
+ *  (#280。CLI の alt_break_doubt と同じ)。一覧は公開ソースから借りた 7 つの名前で、
+ *  実物で確かめたことは一度も無い。一覧に無いファイルが同じ読み方だと、
+ *  0x8002 の次の 2 バイトを待ち時間として食い、本文が 1 字ずつ欠ける */
+function altBreakDoubt(bytes, name, glyphs, parsed) {
+  if (isAltBreak(name)) return null;
+  let count = 0;
+  for (let i = 0; i + 1 < bytes.length; i += 2) {
+    if ((bytes[i] | (bytes[i + 1] << 8)) === 0x8002) count++;
+  }
+  if (!count || !parsed || !parsed.items) return null;
+  for (const it of parsed.items) {
+    const asWait = bokuMsgText(it.codes, glyphs, true, false);
+    const asBreak = bokuMsgText(it.codes, glyphs, true, true);
+    if (asWait !== asBreak) return { count, asWait, asBreak };
+  }
+  return null;
 }
 
 function isAltBreak(name) {
