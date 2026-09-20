@@ -1369,6 +1369,10 @@ async function fullScan(entry, patterns, onProgress) {
 /* @extract-start index-analyzer */
 /** 索引が本体をどれだけ使い切っていれば「読めている」とみなすか (tools/boku2.py と同じ) */
 const COVERAGE_MIN = 0.2;
+/** 診断で「索引の読み方が外れている」と言う下限 (#277。CLI の COVERAGE_SECT_MIN)。
+ *  **セクタに丸めた**使い切りの割合に当てる。丸めない割合だと、小さいファイル
+ *  ばかりの無事な吸い出し (極小 16 バイトなら 0.8%) まで読み方を疑ってしまう */
+const COVERAGE_SECT_MIN = 0.5;
 const IDX_SKIPS = [0, 4, 8, 12, 16, 32];
 const IDX_RECS = [4, 8, 12, 16, 20, 24, 32];
 const IDX_MULTS = [1, 2048];
@@ -4222,22 +4226,31 @@ async function buildIdxReport() {
   lines.push(`最初の名前: ${items.slice(0, 5).map((it) => it.name).join(" / ")}`);
   const used = items.reduce((s, it) => s + it.len, 0);
   const coverage = used / Math.max(1, dataEntry.size);
+  /* **判定はセクタに丸めた側でする** (#277。CLI の check と 1 字そろえる)。
+     ファイルはセクタ境界に並ぶので、小さいファイルばかりの吸い出しでは丸めない
+     割合がいくらでも下がる —— 無事なのに読み方を疑われていた */
+  const usedSect = items.reduce((s, it) => s + Math.ceil(it.len / SECTOR) * SECTOR, 0);
+  const coverageSect = usedSect / Math.max(1, dataEntry.size);
   lines.push(`[本体] ${dataEntry.size.toLocaleString()} バイト / 索引が指す合計 ${used.toLocaleString()} バイト`
-    + ` (${(100 * coverage).toFixed(1)}% — 索引が本体をどれだけ使い切っているか。読み方が合っていれば普通は 5 割を超えます)`);
-  if (coverage < COVERAGE_MIN) {
+    + ` (${(100 * coverage).toFixed(1)}% — 索引が本体をどれだけ使い切っているか。`
+    + `セクタ (${SECTOR} バイト) に丸めると ${(100 * coverageSect).toFixed(1)}%。`
+    + "読み方が合っていれば、丸めたほうは普通は 5 割を超えます)");
+  if (coverageSect < COVERAGE_SECT_MIN) {
     problems++;
     /* **強い証拠のほうを先に見る** (#271。CLI の check と 1 字そろえる)。
        使い切りの割合は目安で、ゲーム自身の検査値は位置も中身も確かめる本物の
        裏付け。目安を根拠に、本物の裏付けを黙らせてはいけない */
     if (crcAllOk) {
-      lines.push(`→ 索引が本体の ${(100 * coverage).toFixed(1)}% しか指していません。`
+      lines.push(`→ 索引が本体の ${(100 * coverageSect).toFixed(1)}% (セクタに丸めて) しか`
+        + "指していません。"
         + "ただし**ゲーム自身の検査値は全部合っています** (下の [検査値] の段)。"
         + "**位置も中身も合っている**ので、切り分けの読み方は正しく、"
         + "**本体に索引が指していない所が多い**という話です "
         + "(詰め物か、この道具が読んでいない別の索引)。この行ごと報告してください");
     } else {
       /* **この先が当てにならないことまで言う** (#266。CLI の check と 1 字そろえる) */
-      lines.push(`→ 索引が本体の ${(100 * coverage).toFixed(1)}% しか指していません。`
+      lines.push(`→ 索引が本体の ${(100 * coverageSect).toFixed(1)}% (セクタに丸めて) しか`
+        + "指していません。"
         + "索引の読み方 (レコードの長さ・位置の単位) が外れている疑いがあります。"
         + "**この先の診断 (検査値・.msg・入れ物・フォント) は当てになりません。**"
         + "この行と下の先頭 64 バイトを報告してください");

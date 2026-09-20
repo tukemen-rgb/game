@@ -8739,6 +8739,113 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestTheCoverageRuleIsMeasuredOnSectors(unittest.TestCase):
+    """**使い切りの割合は、セクタに丸めてから見ること** (#277).
+
+    #276 の宿題は 3 段目の `COVERAGE_MIN` (0.2)。合成データで測ったら、
+    **「読み方が違う」ではなく「ファイルが小さい」を捕まえていた**。
+    正しく読めているのに:
+
+        実物なみの大きさ (中央値 1,952 バイト) … そのまま 72.0% / セクタ丸め 100%
+        小さいファイルばかり (100〜400 バイト) … そのまま 12.3% / セクタ丸め 100%
+        極小 (16 バイト)                      … そのまま  0.8% / セクタ丸め 100%
+
+    下の 2 つは**無事な吸い出しなのに警告が出て**、しかも #266 の仕組みで
+    その先の段が全部黙らされていた。一方、読み方が本当に違う索引
+    (`--break length`) はセクタ丸めで **30.0%** にしかならない。
+
+    ファイルはセクタ境界に並ぶので、**丸めた合計は本体を埋めるはず**。
+    だから丸めた側で見れば、正しい読みと違う読みがきれいに分かれる。
+    """
+
+    @staticmethod
+    def dump(folder: str, sizes: list) -> None:
+        """与えた大きさのファイルを、セクタ境界に並べた吸い出しを作る."""
+        import struct
+        os.makedirs(os.path.join(folder, "MAP"), exist_ok=True)
+        n = len(sizes)
+        recs, at, img = [(1, 1, 0, 0)], 0, bytearray()
+        for i, size in enumerate(sizes):
+            recs.append((0, 1 if i < n - 1 else 0, at // 2048, size))
+            block = (size + 2047) // 2048 * 2048
+            img += bytes(block)
+            at += block
+        idx = b"DFI\0" + struct.pack("<I", 0x100) + b"\0" * 8
+        for kind, more, lba, size in recs:
+            idx += struct.pack("<HHIII", kind, more, 0x8130, lba, size)
+        idx += b"/\0" + b"".join(f"f{i:04d}.bin\0".encode() for i in range(n))
+        for name, blob in (("BOKU2.IDX", idx), ("BOKU2.IMG", bytes(img))):
+            with open(os.path.join(folder, name), "wb") as fh:
+                fh.write(blob)
+
+    @classmethod
+    def said(cls, sizes) -> str:
+        import io
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            cls.dump(folder, sizes)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_small_files_are_not_called_a_misread(self):
+        """**小さいファイルばかりの無事な吸い出しで警告を出さない**こと."""
+        import boku2
+        for label, sizes in (("小さい (100〜400 バイト)", [200] * 300),
+                             ("極小 (16 バイト)", [16] * 300)):
+            with self.subTest(case=label):
+                said = self.said(sizes)
+                body = next(ln for ln in said.splitlines() if ln.startswith("[本体]"))
+                # 前提: 丸めない割合は本当に低いこと (材料が弱くないか)
+                raw = float(body.split("(")[1].split("%")[0])
+                self.assertLess(raw, 100 * boku2.COVERAGE_MIN,
+                                f"材料が弱い: 丸めない割合が {raw}% もある")
+                self.assertNotIn("しか指していません", said,
+                                 f"{label}: 無事な吸い出しに警告を出しています")
+                self.assertNotIn(boku2.SHAKY_INDEX_KNOCK_ON, said,
+                                 f"{label}: その先の段を黙らせています")
+
+    def test_a_real_misread_still_fires(self):
+        """**読み方が本当に違うときは、今までどおり**言うこと."""
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            make_boku2_sample.damage(folder, "length")
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            said = out.getvalue()
+        self.assertIn("しか指していません", said, "本物の読み違いを見逃しました")
+        self.assertIn("セクタに丸めて", said, "どちらの割合で言っているか書いていない")
+
+    def test_both_numbers_are_shown(self):
+        """**丸めた側だけにしない。** 2 つ並べて、どちらで判定したかを言うこと."""
+        body = next(ln for ln in self.said([200] * 300).splitlines()
+                    if ln.startswith("[本体]"))
+        self.assertIn("セクタ (2048 バイト) に丸めると", body, body)
+        self.assertIn("丸めたほうは普通は 5 割を超えます", body, body)
+
+    def test_the_line_separates_the_two_worlds(self):
+        """線が、正しい読み (丸めて 100%) と違う読み (丸めて 30%) の**あいだ**にあること."""
+        import boku2
+        self.assertLess(0.30, boku2.COVERAGE_SECT_MIN,
+                        "線が低すぎて、本物の読み違いを通します")
+        self.assertLess(boku2.COVERAGE_SECT_MIN, 0.95,
+                        "線が高すぎて、隙間のある吸い出しまで疑います")
+
+    def test_the_number_is_the_same_on_both_sides(self):
+        import boku2
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue(f"const COVERAGE_SECT_MIN = {boku2.COVERAGE_SECT_MIN};" in ui,
+                        "web/app.js の線が違う")
+        self.assertTrue("if (coverageSect < COVERAGE_SECT_MIN) {" in ui,
+                        "画面が丸めない割合で判定し続けています")
+
+
 class TestLooseningTheNameGateIsMeasured(unittest.TestCase):
     """**名前の重しを 9 割から 3 割に下げたことを、測って裏付ける** (#276).
 
