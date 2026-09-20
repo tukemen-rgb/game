@@ -5729,10 +5729,51 @@ class TestDisassembler(unittest.TestCase):
     自分で書いた逆アセンブラの正しさは、自分では確かめられません。
     答えは tests/mips_cases.json に固めてあります (作り直すときは
     tests/gen_mips_cases.py)。
+
+    **ものさしが緩かった** (#286)。題材は 2,466 件で**動かない**のに、
+    判定は「一致が 8 割を超えること」だった。実際の一致は 2,199 件 (89.2%) で、
+    床は 1,973 件 —— **226 件 (9%) ぶん、黙って壊せる**。しかも逆アセンブラには
+    「知らない命令は `.word` と言う」という逃げ道があるので、壊れ方は
+    **静かに減る**方向に出る。`addu` が読めなくなっても床には当たらない。
+
+    動かない題材を割合で測る理由が無いので、**内訳を 1 件ずつ固めた**:
+
+    | | 件数 | なぜ一致しないのか |
+    | --- | --- | --- |
+    | 一致 | 2,199 | — |
+    | R5900 独自 | 155 | `lq` / `sq` / `lqc2` / `sqc2`。capstone は MIPS32 として読むので `ext` `ldc2` `andi.b` などになる |
+    | `.word` | 112 | **R5900 に無い命令**。MSA (`bnz.h` `bz.v` …)、`jalx` (MIPS16)、`lsa` / `dlsa` (r6)、`bc3f` (COP3)、`lwxc1` / `ldxc1` (MIPS IV の添字つき FPU 読み)、`synci`、`sdbbp` |
+
+    **逃がし方も締めた。** 前は「オペコードが 4 つのどれかなら食い違ってよい」
+    という**まるごとの免除**だった。その中でこちらが何と読んでいるかは見て
+    いないので、`lq` を `nop` と読む間違いも素通りする。今はこちらの呼び名が
+    4 つのどれかであることまで見る。`.word` のほうも、capstone の呼び名が
+    **記録した一覧にある**ときだけ許す —— 新しく `.word` に落ちた命令
+    (= 本物の穴) は落ちる。
     """
 
-    # capstone は MIPS32 として読むので、R5900 独自のオペコードは食い違って正しい
+    #: capstone は MIPS32 として読むので、R5900 独自のオペコードは食い違って正しい。
+    #: **ただし、こちらが何と読んでいるかまで見る** (#286)
     R5900_ONLY = {0x1E, 0x1F, 0x36, 0x3E}
+
+    #: 上のオペコードで、こちらが出してよい呼び名 (R5900 の 128 ビット読み書き)
+    R5900_NAMES = {"lq", "sq", "lqc2", "sqc2"}
+
+    #: `.word` と言ってよい相手 —— **R5900 に無い命令** (#286)。
+    #: MSA は `.` 付きの名前なので接頭辞で見る。ここに無いものが `.word` に
+    #: 落ちたら、それは逆アセンブラの穴なので落とす
+    NOT_ON_R5900 = {"jalx", "synci", "sdbbp", "lsa", "dlsa", "movf", "movt",
+                    "lwxc1", "ldxc1", "swxc1", "sdxc1", "msub.s", "madd.s",
+                    "nmadd.s", "nmsub.s", "recip.s", "rsqrt.s", "prefx",
+                    "bc3f", "bc3t", "bc3fl", "bc3tl"}
+
+    #: MSA (MIPS SIMD)。R5900 には無い。`bnz.h` `ld.d` `adds_u.d` のような形
+    MSA_HEADS = ("bz.", "bnz.", "ld.", "st.", "adds_", "subs_", "dpadd_", "dpsub_",
+                 "shf.", "andi.", "ori.", "xori.", "nori.", "bmnzi.", "bmzi.",
+                 "bseli.", "repl.")
+
+    #: 実測 (#286)。題材は動かないので、割合ではなく件数で固める
+    WANT = {"matched": 2199, "r5900": 155, "word": 112}
 
     @classmethod
     def setUpClass(cls):
@@ -5746,22 +5787,55 @@ class TestDisassembler(unittest.TestCase):
         with open(path, encoding="utf-8") as fh:
             cls.golden = json.load(fh)
 
-    def test_mnemonics_match_capstone(self):
-        wrong = []
-        matched = 0
-        for word, want in self.golden["cases"]:
-            mn, _ops = self.elfdump.decode(word, self.golden["addr"])
+    @classmethod
+    def sort_cases(cls) -> tuple[dict, list, list]:
+        """題材を「一致 / R5900 独自 / `.word`」に分け、**逃がし方も確かめる**.
+
+        戻り値は (件数, 食い違い, 逃がせなかったもの)。
+        """
+        count = {"matched": 0, "r5900": 0, "word": 0}
+        wrong, unexplained = [], []
+        for word, want in cls.golden["cases"]:
+            mn, _ops = cls.elfdump.decode(word, cls.golden["addr"])
             if mn == want:
-                matched += 1
-            elif (word >> 26) in self.R5900_ONLY:
-                pass                      # R5900 独自。食い違って正しい
+                count["matched"] += 1
+            elif (word >> 26) in cls.R5900_ONLY:
+                # **まるごと免除しない** (#286)。こちらの呼び名まで見る
+                if mn not in cls.R5900_NAMES:
+                    unexplained.append(f"0x{word:08X} R5900 のオペコードなのに "
+                                       f"こちら={mn} (capstone={want})")
+                else:
+                    count["r5900"] += 1
             elif mn == ".word":
-                pass                      # 知らない命令。嘘をつくよりましな態度
+                # **知らない命令だから黙った、で通さない** (#286)。
+                # R5900 に無い命令のときだけ許す
+                if want in cls.NOT_ON_R5900 or want.startswith(cls.MSA_HEADS):
+                    count["word"] += 1
+                else:
+                    unexplained.append(f"0x{word:08X} capstone={want} を "
+                                       "`.word` に落としています (R5900 にある命令)")
             else:
                 wrong.append(f"0x{word:08X} capstone={want} こちら={mn}")
+        return count, wrong, unexplained
+
+    def test_mnemonics_match_capstone(self):
+        count, wrong, unexplained = self.sort_cases()
         self.assertFalse(wrong, "capstone と食い違う命令:\n  " + "\n  ".join(wrong[:20]))
-        self.assertGreater(matched, len(self.golden["cases"]) * 0.8,
-                           f"一致が {matched} 件しかありません")
+        self.assertFalse(unexplained,
+                         "食い違いを説明できていません:\n  " + "\n  ".join(unexplained[:20]))
+
+    def test_the_counts_are_pinned_not_a_percentage(self):
+        """**動かない題材を割合で測らない** (#286).
+
+        床が 8 割だったので、`addu` が `.word` に落ちても 226 件ぶんは
+        気づけなかった。件数で固めれば、1 件動いただけで名前が出る。
+        """
+        count, _wrong, _unexplained = self.sort_cases()
+        self.assertEqual(count, self.WANT,
+                         f"内訳が変わりました: {count} (記録は {self.WANT})。"
+                         "逆アセンブラを直したのなら、この数と上の表を測り直すこと")
+        self.assertEqual(sum(count.values()), len(self.golden["cases"]),
+                         "内訳の合計が題材の数と合いません (分け方に漏れがある)")
 
     def test_reads_the_practice_boot_elf(self):
         path = os.path.join(REPO, "work", "BOOT.ELF")
@@ -5826,8 +5900,18 @@ class TestLzss(unittest.TestCase):
                              f"round-trip 失敗 (len={len(s)})")
 
     def test_compression_actually_shrinks_repeats(self):
+        """**動かない材料を割合で測らない** (#286).
+
+        床は「半分より小さいこと」だったが、実際は **13.8%** (720 → 99 バイト)。
+        36 ポイントぶん黙って悪くなれる床で、しかも理由が書いていなかった
+        (assert に言葉も無かった)。材料は動かないので件数で固める。
+        """
         rep = ("こんにちは、" * 60).encode("cp932")
-        self.assertLess(len(self.lzss.compress(rep)), len(rep) * 0.5)
+        packed = self.lzss.compress(rep)
+        self.assertEqual((len(rep), len(packed)), (720, 99),
+                         f"圧縮の効きが変わりました ({len(rep)} → {len(packed)} バイト)。"
+                         "圧縮側を直したのなら、この数を測り直すこと")
+        self.assertEqual(self.lzss.decompress(packed), rep, "縮んでも戻らない")
 
     def test_scan_finds_text_block(self):
         text = "きょうはいいてんきです。むしとりにいこう。".encode("cp932") * 10
