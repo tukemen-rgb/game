@@ -18,6 +18,9 @@ import struct
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scrp                                                  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "work" / "BOOT.ELF"
 
@@ -242,7 +245,7 @@ def main() -> int:
     OUT.write_bytes(data)
 
     _, addrs = build_rodata()
-    print(f"{OUT.relative_to(REPO)} を書きました ({len(data):,} バイト)")
+    print(f"{scrp.said_path(OUT)} を書きました ({len(data):,} バイト)")
     print()
     print("答え合わせ用:")
     print(f"  入口 (entry)      0x{BASE:08X}")
@@ -259,7 +262,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import scrp
-
     scrp.cli_main(main)

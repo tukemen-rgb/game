@@ -199,14 +199,14 @@ def main() -> int:
         for ch in glyph_order:
             fh.write(ch + "\n")
 
-    print(f"{os.path.relpath(sjis_path, REPO)}   {len(sjis_bin):6,} バイト  "
+    print(f"{scrp.said_path(sjis_path)}   {len(sjis_bin):6,} バイト  "
           f"({len(texts)} メッセージ, Shift-JIS)")
-    print(f"{os.path.relpath(custom_path, REPO)}  {len(custom_bin):6,} バイト  "
+    print(f"{scrp.said_path(custom_path)}  {len(custom_bin):6,} バイト  "
           f"({len(texts)} メッセージ, 独自コード)")
-    print(f"{os.path.relpath(table_path, REPO)}   {len(mapping)} エントリ "
+    print(f"{scrp.said_path(table_path)}   {len(mapping)} エントリ "
           f"(1 バイト {sum(1 for k in mapping if len(k) == 1)} / "
           f"2 バイト {sum(1 for k in mapping if len(k) == 2)})")
-    print(f"{os.path.relpath(chars_path, REPO)}  {len(glyph_order)} 文字")
+    print(f"{scrp.said_path(chars_path)}  {len(glyph_order)} 文字")
 
     if not args.no_font:
         font_path = args.font_path or next((p for p in FONT_CANDIDATES if os.path.exists(p)), None)
@@ -223,7 +223,7 @@ def main() -> int:
                 font_out = os.path.join(args.outdir, "FONT.BIN")
                 with open(font_out, "wb") as fh:
                     fh.write(font_bin)
-                print(f"{os.path.relpath(font_out, REPO)}     {len(font_bin):6,} バイト  "
+                print(f"{scrp.said_path(font_out)}     {len(font_bin):6,} バイト  "
                       f"({len(glyph_order)} グリフ x 32 バイト, 16x16 1bpp)")
 
     ptr_preview = scrp.read_archive(custom_path).pointers[:4]

@@ -650,6 +650,33 @@ def optional_module_error(module: str, instead: str = "") -> "ScrpError":
     return ScrpError(text)
 
 
+def said_path(path) -> str:
+    """**打った場所から見て本当の道筋**にする (#288).
+
+    この一式の道具は 2 通りに分かれていた。`work/` を**スクリプトの場所から**
+    決めて書くもの (`make_*.py`) と、**打った場所から**読むもの
+    (`elfdump.py` / `hexdump.py` …)。リポジトリの根で打つかぎり同じ所を指すが、
+    別の場所で打つと割れる:
+
+        $ cd ~/どこか
+        $ python3 ~/game/tools/make_elf.py
+        work/BOOT.ELF を書きました        ← **嘘**。書いたのは ~/game/work/
+        $ python3 ~/game/tools/elfdump.py work/BOOT.ELF
+        エラー: ファイルがありません: work/BOOT.ELF
+          練習データはまだ作られていません。先にこれを実行してください:
+            python3 tools/make_elf.py     ← **もう実行した**
+
+    言われたとおりにして直らない、といういちばん困る形 (#83 と同じ)。
+    打った場所の下にあるなら短く、外にあるなら**絶対の道筋**で言う。
+    """
+    import os
+
+    full = os.path.abspath(str(path))
+    here = os.path.abspath(os.curdir)
+    rel = os.path.relpath(full, here)
+    return rel if not rel.startswith("..") else full
+
+
 def missing_file_help(path: str) -> str:
     """無いファイルが練習データなら、それを作るコマンドを返す.
 
@@ -663,7 +690,19 @@ def missing_file_help(path: str) -> str:
     name = os.path.basename(path)
     cmd = MAKERS.get(name)
     if cmd:
-        return f"練習データはまだ作られていません。先にこれを実行してください:\n  {cmd}"
+        made = f"練習データはまだ作られていません。先にこれを実行してください:\n  {cmd}"
+        # **もう作ってある所を先に言う** (#288)。`make_*.py` は自分の置き場の
+        # `work/` に書くので、別の場所で打つと「作ったのに無い」になる。
+        # そこで作り方だけを言うと、**言われたとおりにして直らない** ——
+        # もう一度走らせても、書かれるのはやはり向こうの `work/` なので。
+        here = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "work", name)
+        if os.path.exists(here) and os.path.abspath(path) != here:
+            return (f"この一式の練習データは {said_path(here)} にあります "
+                    "(道具は自分の置き場の work/ に作ります)。\n"
+                    "  その道筋ごと渡すか、リポジトリの根で打ってください。\n"
+                    f"  自分の work/ に作り直すなら: {cmd}")
+        return made
     if os.sep + "work" + os.sep in os.sep + path or path.startswith("work" + os.sep):
         made = "、".join(sorted(MAKERS))
         return (f"work/ は生成物と自分の作業ファイルの置き場です。{name} を作る道具は"

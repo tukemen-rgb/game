@@ -542,7 +542,7 @@ def main() -> None:
     args = ap.parse_args()
     answer = build_sample(args.out)
     n = sum(len(v) for v in answer.values())
-    print(f"{args.out}: BOKU2.IDX / BOKU2.IMG / MAP/*.BIN / font.txt / answer.tsv ({n} 行)")
+    print(f"{scrp.said_path(args.out)}: BOKU2.IDX / BOKU2.IMG / MAP/*.BIN / font.txt / answer.tsv ({n} 行)")
     if args.damage:
         print("壊した: " + damage(args.out, args.damage))
         print(f"次: python3 tools/boku2.py check {args.out} で、→ の行を読む練習 (exercises 課題 9)")

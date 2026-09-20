@@ -106,9 +106,9 @@ def main() -> int:
     with open(img_path, "wb") as fh:
         fh.write(body)
 
-    print(f"{os.path.relpath(idx_path, REPO)}  {len(idx):,} バイト "
+    print(f"{scrp.said_path(idx_path)}  {len(idx):,} バイト "
           f"(ヘッダ 8 + {len(records)} 件 x 16)")
-    print(f"{os.path.relpath(img_path, REPO)}  {len(body):,} バイト "
+    print(f"{scrp.said_path(img_path)}  {len(body):,} バイト "
           f"({len(body) // SECTOR} セクタ)")
     print()
     print("  正解: レコード 16 バイト / 先頭 8 バイトを飛ばす / "

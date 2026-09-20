@@ -1402,7 +1402,7 @@ def main() -> int:
 
     errors = sum(1 for m in data["messages"] for f in m["findings"]["translation"]
                  if f["severity"] == "ERROR")
-    print(f"{args.out}: {len(html):,} バイト")
+    print(f"{scrp.said_path(args.out)}: {len(html):,} バイト")
     print(f"  メッセージ {len(data['messages'])} 件 / グリフ {len(data['glyphs']['chars'])} 字 / "
           f"訳文の ERROR {errors} 件")
     print(f"  題材: {data['source']}")

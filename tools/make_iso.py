@@ -252,7 +252,7 @@ def main() -> int:
     with open(args.out, "wb") as fh:
         fh.write(image)
 
-    print(f"{args.out}: {len(image):,} バイト ({total_sectors} セクタ x {SECTOR})")
+    print(f"{scrp.said_path(args.out)}: {len(image):,} バイト ({total_sectors} セクタ x {SECTOR})")
     print(f"  ボリューム名 {args.volume_id}")
     print(f"  0x{LBA_PVD * SECTOR:X} ボリューム記述子 / 0x{LBA_ROOT * SECTOR:X} ルート")
     for name, blob, at in placed_root:

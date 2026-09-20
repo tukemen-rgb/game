@@ -8757,6 +8757,113 @@ class TestTheFirstHourTableMatchesWhatTheToolDoes(unittest.TestCase):
                 self.assertIn(phrase, said, f"道具が「{phrase}」と言っていない")
 
 
+class TestThePathsTheToolsPrintAreTrueFromWhereYouStand(unittest.TestCase):
+    """**「書きました」と言った道筋が、打った場所から見ると無かった** (#288).
+
+    この一式の道具は 2 通りに分かれていました。`work/` を**スクリプトの
+    置き場から**決めて書くもの (`make_*.py`) と、**打った場所から**読むもの
+    (`elfdump.py` / `hexdump.py` …)。リポジトリの根で打つかぎり同じ所を
+    指すので、ずっと気づきませんでした。別の場所で打つとこうなります:
+
+        $ cd ~/どこか
+        $ python3 ~/game/tools/make_elf.py
+        work/BOOT.ELF を書きました        ← **嘘**。書いたのは ~/game/work/
+        $ python3 ~/game/tools/elfdump.py work/BOOT.ELF
+        エラー: ファイルがありません: work/BOOT.ELF
+          練習データはまだ作られていません。先にこれを実行してください:
+            python3 tools/make_elf.py     ← **もう実行した**
+
+    **言われたとおりにして直らない** —— #83 で潰したのと同じ形が、
+    別の入口から戻ってきていました。しかも 6 つの `make_*.py` のうち
+    **3 つが短い道筋、3 つが絶対の道筋**と、言い方自体がばらばらでした。
+
+    直し: `scrp.said_path` で**打った場所から見て本当の道筋**を言う
+    (下にあるなら短く、外にあるなら絶対の道筋で)。読む側の案内も、
+    その名前が一式の `work/` にあるなら**そこを指す**。
+    """
+
+    MAKERS = ("make_sample.py", "make_archive.py", "make_elf.py",
+              "make_boku2_sample.py", "make_iso.py", "make_viewer.py")
+
+    @staticmethod
+    def first_line(tool: str, cwd: str) -> str:
+        import subprocess
+
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tools", tool)],
+                             capture_output=True, text=True, cwd=cwd)
+        out = (res.stdout + res.stderr).splitlines()
+        return out[0] if out else ""
+
+    def test_from_the_repo_root_the_short_path_is_kept(self):
+        """**材料を弱くしない**。根で打てば今までどおり `work/…` と短く出ること."""
+        for tool in self.MAKERS:
+            with self.subTest(tool=tool):
+                said = self.first_line(tool, REPO)
+                self.assertTrue(said.startswith("work" + os.sep) or said.startswith("work/"),
+                                f"{tool}: 根で打ったのに短い道筋になっていない: {said}")
+
+    def test_from_elsewhere_the_path_is_one_you_can_open(self):
+        """別の場所で打ったら、**そこから開ける道筋**を言うこと."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for tool in self.MAKERS:
+                with self.subTest(tool=tool):
+                    said = self.first_line(tool, tmp)
+                    got = said.split()[0].rstrip(":")
+                    self.assertTrue(os.path.isabs(got),
+                                    f"{tool}: 打った場所から見えない道筋を言っている: {said}")
+                    self.assertTrue(os.path.exists(got),
+                                    f"{tool}: 言った道筋にものが無い: {said}")
+
+    def test_the_reader_points_at_the_file_that_already_exists(self):
+        """読む側が「作ってください」と言い続けないこと (もう作ってある)."""
+        import subprocess
+
+        made = os.path.join(REPO, "work", "BOOT.ELF")
+        problem = ensure_practice("work/BOOT.ELF", "make_elf.py")
+        if problem:
+            self.skipTest(problem)
+        with tempfile.TemporaryDirectory() as tmp:
+            res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "elfdump.py"),
+                                  "work/BOOT.ELF"], capture_output=True, text=True, cwd=tmp)
+            said = res.stdout + res.stderr
+            self.assertEqual(res.returncode, 1, said)
+            self.assertTrue(made in said, f"もう作ってある所を指していない:\n{said}")
+            self.assertFalse("練習データはまだ作られていません" in said,
+                             f"作ってあるのに「作ってください」と言っています:\n{said}")
+
+    def test_it_still_says_how_to_make_it_when_there_is_none(self):
+        """**緩めた分を測る**。案内は 2 通りに分かれ、どちらも作り方を言う.
+
+        頼まれた道筋が**一式の `work/` そのもの**なら、無いのは本当に
+        作っていないから —— 今までどおり (#79) 作り方だけを言う。
+        **別の `work/`** を指していて一式のほうにあるなら、そこを指したうえで
+        作り方も言う (向こうで作り直したいこともある)。
+        """
+        import scrp
+
+        made = os.path.join(REPO, "work", "SCRIPT.BIN")
+        problem = ensure_practice("work/SCRIPT.BIN", "make_sample.py")
+        if problem:
+            self.skipTest(problem)
+
+        # 1. 一式の work/ そのものを指している → 作り方だけ (#79 のまま)
+        same = scrp.missing_file_help(made)
+        self.assertTrue("make_sample.py" in same, same)
+        self.assertFalse("にあります" in same,
+                         f"自分自身を「あちらにあります」と言っています: {same}")
+
+        # 2. 別の work/ を指していて、一式のほうにはある → 場所と作り方の両方
+        with tempfile.TemporaryDirectory() as tmp:
+            other = scrp.missing_file_help(os.path.join(tmp, "work", "SCRIPT.BIN"))
+            self.assertTrue(scrp.said_path(made) in other, other)
+            self.assertTrue("make_sample.py" in other,
+                            f"作り直し方を言っていない: {other}")
+
+        # 3. 一式が作らない名前には、今までどおり別の案内 (#83)
+        mine = scrp.missing_file_help(os.path.join("work", "qa_fixed.tsv"))
+        self.assertTrue("自分で用意するファイル" in mine, mine)
+
+
 class TestTheMissingGlyphTableSaysWhereToLook(unittest.TestCase):
     """**`check` と `text` が、同じ `font.txt` を別の場所で探していた** (#287).
 
