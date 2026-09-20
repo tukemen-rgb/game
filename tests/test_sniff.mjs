@@ -8,7 +8,7 @@ const src = fs.readFileSync(path.join(repo, "web", "app.js"), "utf8");
 const s = src.indexOf("/* @extract-start sniff */");
 const e = src.indexOf("/* @extract-end sniff */");
 if (s < 0 || e < 0) { console.error("app.js に sniff マーカーが無い"); process.exit(2); }
-const m = new Function(src.slice(s, e) + "\nreturn { sniffKind, sniffSummary, MAGICS };")();
+const m = new Function(src.slice(s, e) + "\nreturn { sniffKind, sniffSummary, MAGICS, NO_MAGIC_EXTS };")();
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 const bytes = (str, pad = 64) => {
@@ -105,9 +105,33 @@ const boxWithImage = container(2, 12, true);
 for (let i = 0; i < 4; i++) boxWithImage[0x50 + i] = "TIM2".charCodeAt(i);
 if (m.sniffKind(boxWithImage, "tile", 4096).ext !== "parts") fail("入れ物より埋まった TIM2 を優先した");
 
-/* 4. 集計は多い順 */
-const sum = m.sniffSummary([{ ext: "tm2" }, { ext: "packed" }, { ext: "tm2" }, { ext: "bin" }, { ext: "tm2" }, { ext: "packed" }]);
-if (sum !== "tm2 3 · packed 2 · bin 1") fail(`集計が違う: ${sum}`);
+/* 4. 集計は多い順。**確かめたものと当て推量を分けて数える** (#281) */
+const sum = m.sniffSummary([
+  { ext: "tm2", sure: true }, { ext: "packed", sure: false }, { ext: "tm2", sure: true },
+  { ext: "bin", sure: false }, { ext: "tm2", sure: true }, { ext: "packed", sure: false },
+]);
+if (sum !== "tm2 3 · packed 2 (すべて見当) · bin 1 (すべて見当)") fail(`集計が違う: ${sum}`);
+/* 混ざっていたら「うち見当 N」。全部確かめたものなら何も付けない */
+const mixed = m.sniffSummary([{ ext: "tm2", sure: true }, { ext: "tm2", sure: false },
+                              { ext: "tm2", sure: true }]);
+if (mixed !== "tm2 3 (うち見当 1)") fail(`混ざった集計が違う: ${mixed}`);
+const allSure = m.sniffSummary([{ ext: "vag", sure: true }, { ext: "vag", sure: true }]);
+if (allSure !== "vag 2") fail(`確かめたものに見当と書いた: ${allSure}`);
+/* 1 件も確かめられていないときは種類ごとに書かない (同じ断りを何度も言わない)。
+   そのときは呼び手の「確かめられたものはありません」の 1 文が受け持つ */
+const noneSure = m.sniffSummary([{ ext: "bin", sure: false }, { ext: "txt", sure: false },
+                                 { ext: "bin", sure: false }]);
+if (noneSure !== "bin 2 · txt 1") fail(`全部見当のときに印を重ねた: ${noneSure}`);
+
+/* 4.5 「確かめようがない」と書く相手が、本当に目印を持たないこと (#281)。
+   画面は「.msg にも入れ物にも先頭の目印が無い」と言い切るので、
+   その根拠 —— 魔法数の表にその種類が無いこと —— をここで押さえる */
+for (const ext of m.NO_MAGIC_EXTS) {
+  if (m.MAGICS.some((mg) => mg.ext === ext)) fail(`${ext} は魔法数の表にある (確かめようがある)`);
+}
+for (const ext of ["msg", "parts"]) {
+  if (!m.NO_MAGIC_EXTS.includes(ext)) fail(`${ext} が「目印の無い種類」に入っていない`);
+}
 
 /* 5. 表の魔法数は全部 4 バイト以上で重複しない */
 const seen = new Set();
@@ -118,4 +142,4 @@ for (const mg of m.MAGICS) {
   seen.add(key);
 }
 
-console.log(`OK  魔法数 ${magicCases.length + 1} 種 · 圧縮の見当 6 件 · 性質からの見当 ${Object.keys(byClass).length + 2} 件 · 入れ物と埋まった TIM2 12 件 · 集計`);
+console.log(`OK  魔法数 ${magicCases.length + 1} 種 · 圧縮の見当 6 件 · 性質からの見当 ${Object.keys(byClass).length + 2} 件 · 入れ物と埋まった TIM2 12 件 · 集計 4 件 · 目印の無い種類`);

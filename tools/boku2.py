@@ -434,7 +434,7 @@ def classify_block(s: dict | None) -> str:
     return "tile"
 
 
-def guess_kind(head: bytes) -> str:
+def guess_kind(head: bytes, body: bytes | None = None) -> str:
     """読めなかったファイルの先頭から、**分かることだけ**を言う (#204).
 
     `check` は読めない `.msg` の先頭 16 バイトを見せて終わっていた。
@@ -444,6 +444,12 @@ def guess_kind(head: bytes) -> str:
 
     分からないときは**黙る** (空文字)。当てずっぽうを足すと、16 進だけの
     ほうがまだましになる。
+
+    `body` (ファイル全体) を渡すと、**先頭だけでは言えないこと**を言わなく
+    なる (#281)。16 バイト見ただけで「中身がありません」と言い切っていた。
+    `.msg` は件数の u32 で始まるので、**先頭がゼロなだけのファイルは普通に
+    ある**。4KB の本文を抱えたファイルに「中身がありません」と書いて渡せば、
+    社長はそのファイルを調べるのをやめる。
     """
     if not head:
         return ""
@@ -451,9 +457,14 @@ def guess_kind(head: bytes) -> str:
         if head.startswith(magic):
             return label
     if all(b == 0 for b in head):
+        if body is not None and any(body):
+            return f"先頭 {len(head)} バイトがゼロ (この先に中身はあります)"
         return "ゼロ埋め (中身がありません)"
     if all(b == head[0] for b in head):
-        return f"同じバイト (0x{head[0]:02X}) の繰り返し (詰め物か、壊れています)"
+        same = f"同じバイト (0x{head[0]:02X}) の繰り返し"
+        if body is not None and any(b != head[0] for b in body):
+            return f"先頭 {len(head)} バイトが{same} (この先は違います)"
+        return f"{same} (詰め物か、壊れています)"
     # 先頭 16 バイトの散らばりだけで「圧縮らしい」とまでは言えない。
     # 言えるのは「文字ではない」ことくらいなので、そこで止める
     if all(b < 0x09 or (0x0E <= b < 0x20) or b == 0x7F for b in head):
@@ -471,8 +482,11 @@ def guess_kind_note(head: bytes, body: bytes | None = None) -> str:
     16 バイトでは何も言えないが、数 KB あれば「圧縮らしい」「波形らしい」
     までは言える (画面の「性質を地図にする」と同じ判定)。
     それでも分からなければ黙る —— 「不明」と書いても何も足さない。
+
+    **ファイル全体を `guess_kind` にも渡す** (#281)。先頭 16 バイトだけで
+    「中身がありません」と言い切らせないため。
     """
-    kind = guess_kind(head)
+    kind = guess_kind(head, body)
     if kind:
         known = any(head.startswith(m) for m, _label in MAGICS)
         return (f" ({kind}。**名前は .msg ですが、中身は別のもの**です)" if known

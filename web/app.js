@@ -1074,8 +1074,11 @@ const sniffU32 = (b, p) => (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3
 
 /** 読めなかったファイルの先頭から、**分かることだけ**を言う (#204)。
  * **一括処理 (boku2.py の guess_kind) と同じ判定・同じ言葉**にしておくこと。
- * 分からないときは黙る —— 当てずっぽうを足すと、16 進だけのほうがまだまし。 */
-function guessKind(head) {
+ * 分からないときは黙る —— 当てずっぽうを足すと、16 進だけのほうがまだまし。
+ *
+ * `body` (ファイル全体) を渡すと、**先頭だけでは言えないこと**を言わなくなる
+ * (#281)。16 バイト見ただけで「中身がありません」と言い切っていた。 */
+function guessKind(head, body) {
   if (!head || !head.length) return "";
   for (const m of MAGICS) {
     if (head.length < m.bytes.length) continue;
@@ -1083,9 +1086,18 @@ function guessKind(head) {
     for (let i = 0; i < m.bytes.length; i++) if (head[i] !== m.bytes[i]) { hit = false; break; }
     if (hit) return m.label;
   }
-  if ([...head].every((b) => b === 0)) return "ゼロ埋め (中身がありません)";
+  if ([...head].every((b) => b === 0)) {
+    if (body && body.some((v) => v !== 0)) {
+      return `先頭 ${head.length} バイトがゼロ (この先に中身はあります)`;
+    }
+    return "ゼロ埋め (中身がありません)";
+  }
   if ([...head].every((b) => b === head[0])) {
-    return `同じバイト (0x${hex(head[0], 2)}) の繰り返し (詰め物か、壊れています)`;
+    const same = `同じバイト (0x${hex(head[0], 2)}) の繰り返し`;
+    if (body && body.some((v) => v !== head[0])) {
+      return `先頭 ${head.length} バイトが${same} (この先は違います)`;
+    }
+    return `${same} (詰め物か、壊れています)`;
   }
   if ([...head].every((b) => b < 0x09 || (b >= 0x0E && b < 0x20) || b === 0x7F)) {
     return "制御コードばかり (文字ではありません)";
@@ -1096,9 +1108,12 @@ function guessKind(head) {
 /** `guessKind` を、報告に足せる形にする (分からなければ空文字)。
  *
  * 先頭 4 バイトで分からないときは、**もっと広く見て性質を言う** (#205)。
- * 一括処理 (boku2.py の guess_kind_note) と同じ判定・同じ言葉。 */
+ * 一括処理 (boku2.py の guess_kind_note) と同じ判定・同じ言葉。
+ *
+ * **ファイル全体を `guessKind` にも渡す** (#281)。先頭 16 バイトだけで
+ * 「中身がありません」と言い切らせないため。 */
 function guessKindNote(head, body) {
-  const kind = guessKind(head);
+  const kind = guessKind(head, body);
   if (kind) {
     const known = MAGICS.some((m) => m.bytes.every((v, i) => head[i] === v));
     return known ? ` (${kind}。**名前は .msg ですが、中身は別のもの**です)` : ` (${kind})`;
@@ -1224,13 +1239,43 @@ function sniffKind(head, cls, size) {
   return { ext: by.ext, label: by.label, sure: false };
 }
 
-/** 見当の集計を「tm2 1200 · packed 400 · bin 51」のような 1 行にする */
+/**
+ * 見当の集計を「tm2 9 (うち見当 1) · msg 4 (すべて見当)」のような 1 行にする。
+ *
+ * **確かめたものと当て推量を分けて数える** (#281)。`sniffKind` は前から
+ * `sure` (先頭の目印で当たったか) を返していて、`tests/test_sniff.mjs` は
+ * それを確かめてすらいたのに、**画面にはどこにも出していなかった**。
+ * 出ていたのは「tm2 1200 · packed 400 · bin 51」という 1 行だけで、
+ * 目印で確かめた 1 件も、バイトの散らばりからの当て推量 1 件も、
+ * **同じ顔で並んでいた**。
+ *
+ * 練習用データ 20 件で数えると **確かめられたのは 8 件だけ**で、
+ * **`.msg` と入れ物 8 件はすべて当て推量**だった —— docs/07 が
+ * 「1951 個の中からテキストを探す」と書いている、**探している当のもの**が
+ * 丸ごと見当の側にいる。それを黙って「msg 4」と書いて渡していた。
+ */
 function sniffSummary(kinds) {
   const count = new Map();
-  for (const k of kinds) count.set(k.ext, (count.get(k.ext) || 0) + 1);
-  return [...count.entries()].sort((a, b) => b[1] - a[1])
-    .map(([ext, n]) => `${ext} ${n}`).join(" · ");
+  for (const k of kinds) {
+    const c = count.get(k.ext) || { n: 0, sure: 0 };
+    c.n++;
+    if (k.sure) c.sure++;
+    count.set(k.ext, c);
+  }
+  /* **1 件も確かめられていないなら、種類ごとに書かない**。どれにも同じ印が
+     並ぶだけで、その後に続く「確かめられたものはありません」の 1 文と同じ
+     ことを 5 回言うことになる。うるさい断り書きは読み飛ばされる */
+  const anySure = kinds.some((k) => k.sure);
+  return [...count.entries()].sort((a, b) => b[1].n - a[1].n)
+    .map(([ext, c]) => ext + " " + c.n
+      + (!anySure || c.sure === c.n ? ""
+         : c.sure ? ` (うち見当 ${c.n - c.sure})` : " (すべて見当)"))
+    .join(" · ");
 }
+
+/** 先頭の目印で確かめられる形の一覧に、テキストの入れ物は**無い** (#281)。
+ * 「確かめようがない」と書くからには、その根拠をここに置いておく。 */
+const NO_MAGIC_EXTS = ["msg", "parts"];
 /* @extract-end sniff */
 
 function searchBytes(buf, pat, from) {
@@ -5707,11 +5752,26 @@ async function addParts(dataEntry, items, how) {
   renderTree();
   const bareCount = kids.filter((k) => k.bare).length;
   const packed = kinds.filter((k) => k.ext === "packed").length;
+  /* **確かめたものと当て推量を分けて言う** (#281)。この 1 行を見た人は
+     この後「絞り込みに msg と入れる」ところへ進むので、どこまでが
+     確かめた話なのかをここで言っておかないと、見当が事実として伝わる */
+  const sureCount = kinds.filter((k) => k.sure).length;
+  const textKinds = kinds.filter((k) => NO_MAGIC_EXTS.includes(k.ext)).length;
+  const binCount = kinds.filter((k) => k.ext === "bin").length;
   selectEntry(kids[0]).then(() => {
     note.textContent =
       `${dataEntry.name} を${how} ${kids.length} 個に切り分けました`
       + (items.length > kids.length ? ` (長さ 0 の ${items.length - kids.length} 件は除外)` : "")
       + `。中身の見当: ${sniffSummary(kinds)}。`
+      + (sureCount === kinds.length ? ""
+         : `「見当」と付いたものは**中身の形からの当て推量**で、`
+           + `先頭の目印で確かめたものではありません`
+           + (sureCount ? ` (確かめられたのは ${sureCount} 件)` : " (確かめられたものはありません)")
+           + "。末尾に付けた種類も同じです。")
+      + (textKinds ? `テキストの入れ物と見た ${textKinds} 件は、`
+                     + "`.msg` にも入れ物にも**先頭の目印が無い**ので確かめようがありません。"
+                     + "**絞り込みに出てこないテキストがあり得ます**。" : "")
+      + (binCount ? `\`bin\` ${binCount} 件は**種類が分からなかったもの**です。` : "")
       + (crcNamed ? `検査値ファイルの名前を ${crcNamed} 件当てました `
                     + `(その項目の先頭 ${CRC_HEAD} バイトの検査値が合ったものだけ)。` : "")
       + (crcByContent ? `そのうち ${crcByContent} 件は、並び順ではなく中身の検査値から`

@@ -47,8 +47,15 @@ async def main():
         print("filter cleared count:", len(names3), await page.text_content("#treecount"))
         print("errors:", errors)
         await b.close()
+        # **どこまでが確かめた話なのかを言っていること** (#281)。PACK は
+        # 目印のある形を 1 つも持たないので、確かめられるのは 0 件。
+        # 「中身の見当: bin 8 · txt 6 …」だけを渡すと、当て推量が census に見える
+        honest = ("確かめられたものはありません" in cap
+                  and "当て推量" in cap
+                  and "種類が分からなかったもの" in cap)
+        print("honest:", honest)
         ok = (len(suffixed) > 0 and len(names2) < len(names) and len(names3) == len(names)
-              and not errors and "見当" in cap)
+              and not errors and "見当" in cap and honest)
         print("RESULT", "OK" if ok else "NG")
         sys.exit(0 if ok else 1)
 

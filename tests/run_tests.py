@@ -16855,6 +16855,208 @@ class TestTheKindGuessIsCountedOnKnownFiles(unittest.TestCase):
                          f"乱数の {got['rt']} 窓のうち {got['rh']} 窓を入れ物と見た")
 
 
+class TestSixteenBytesDoNotSpeakForTheWholeFile(unittest.TestCase):
+    """**見た範囲より広いことを言わない** (#281).
+
+    `check` が読めない `.msg` の例として出す 1 行は、**先頭 16 バイト**を
+    見て種類を言い添えます。その言葉が「ゼロ埋め (**中身がありません**)」
+    でした。見ているのは 16 バイトなのに、言っているのはファイル全体の話です。
+
+    `.msg` は**件数の u32 で始まる**ので、先頭がゼロなだけのファイルは
+    普通にあります。4KB の本文を抱えたファイルに「中身がありません」と
+    書いて渡せば、社長はそのファイルを調べるのをやめます —— **一番痛い
+    取りこぼしが、道具の一言で起きる**。
+
+    直し: `guess_kind` にファイル全体も渡し、全体がゼロのときだけ
+    「中身がありません」と言う。そうでなければ
+    「先頭 16 バイトがゼロ (この先に中身はあります)」—— どちらも
+    見た範囲の話で、確かめられます。
+    """
+
+    #: 先頭 16 バイトはゼロだが、その先に本文がある (実物の `.msg` の形)
+    ZERO_HEAD_BODY = bytes(16) + b"\x82\xA0" * 2048
+
+    def test_a_zero_head_with_a_body_is_not_called_empty(self):
+        import boku2
+
+        head = bytes(16)
+        got = boku2.guess_kind(head, self.ZERO_HEAD_BODY)
+        self.assertFalse("中身がありません" in got,
+                         f"本文 {len(self.ZERO_HEAD_BODY)} バイトを抱えたファイルに"
+                         f"「中身がありません」と言っています: {got!r}")
+        self.assertTrue("先頭 16 バイトがゼロ" in got, f"見た範囲を言っていない: {got!r}")
+        self.assertTrue("この先に中身はあります" in got, f"先に中身があると言わない: {got!r}")
+        # 報告に載る形でも同じこと
+        note = boku2.guess_kind_note(head, self.ZERO_HEAD_BODY)
+        self.assertFalse("中身がありません" in note, f"報告の行が言い切っている: {note!r}")
+
+    def test_a_really_empty_file_is_still_called_empty(self):
+        """**緩めた分を測る**。本当に全部ゼロなら、今までどおり言い切ること."""
+        import boku2
+
+        got = boku2.guess_kind(bytes(16), bytes(4096))
+        self.assertTrue("中身がありません" in got, f"本当に空なのに黙った: {got!r}")
+        # 中身を渡さないときの言葉は変えない (他の呼び手のため)
+        self.assertTrue("中身がありません" in boku2.guess_kind(bytes(16)))
+
+    def test_the_same_byte_run_is_only_claimed_for_what_was_read(self):
+        import boku2
+
+        head = b"\xFF" * 16
+        mixed = boku2.guess_kind(head, head + b"hello world " * 100)
+        self.assertTrue("先頭 16 バイトが同じバイト (0xFF) の繰り返し" in mixed,
+                        f"見た範囲を言っていない: {mixed!r}")
+        self.assertFalse("詰め物か、壊れています" in mixed,
+                         f"この先が違うのに壊れていると言った: {mixed!r}")
+        whole = boku2.guess_kind(head, b"\xFF" * 4096)
+        self.assertTrue("詰め物か、壊れています" in whole,
+                        f"本当に全部同じなのに黙った: {whole!r}")
+
+    def test_the_browser_says_the_same_words(self):
+        """画面と一括処理で言葉が割れないこと (#204 からの決まり)."""
+        import json
+        import shutil
+        import subprocess
+
+        import boku2
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        cases = [
+            (list(bytes(16)), list(self.ZERO_HEAD_BODY)),
+            (list(bytes(16)), list(bytes(4096))),
+            (list(b"\xFF" * 16), list(b"\xFF" * 16 + b"hello world " * 100)),
+            (list(b"\xFF" * 16), list(b"\xFF" * 4096)),
+        ]
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('function guessKind('),"
+            "b=s.indexOf('const SNIFF_BY_CLASS');"
+            "const hx=(v,n)=>v.toString(16).toUpperCase().padStart(n,'0');"
+            "const MAGICS=[];"
+            "const m=new Function('MAGICS','hex',s.slice(a,b)+"
+            "'\\nreturn {guessKind};')(MAGICS,hx);"
+            f"const list=JSON.parse(process.argv[1]);"
+            "console.log(JSON.stringify(list.map(([h,b2])=>"
+            "m.guessKind(Uint8Array.from(h),Uint8Array.from(b2)))));"
+        )
+        res = subprocess.run([node, "-e", prog, json.dumps(cases)],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, "画面側を動かせない: " + res.stdout + res.stderr)
+        theirs = json.loads(res.stdout)
+        mine = [boku2.guess_kind(bytes(h), bytes(b)) for h, b in cases]
+        self.assertEqual(mine, theirs,
+                         "同じバイトを見て、画面と CLI が違うことを言っています\n"
+                         f"  CLI : {mine}\n  画面: {theirs}")
+
+
+class TestTheKindCensusSeparatesCheckedFromGuessed(unittest.TestCase):
+    """**「tm2 1200 · packed 400」の 1 行が、確かめた話に見えていた** (#281).
+
+    切り分けた後に出る要約は「中身の見当: tm2 1200 · packed 400 · bin 51」
+    でした。`sniffKind` は**先頭の目印で当たったかどうか** (`sure`) を
+    ずっと返していて、`tests/test_sniff.mjs` はそれを確かめてすらいたのに、
+    **画面にはどこにも出していませんでした** (`grep` で 1 件も読み手が無い)。
+    目印で確かめた 1 件も、バイトの散らばりからの当て推量 1 件も、
+    同じ顔で並びます。
+
+    練習用データ 20 件で数えると **確かめられたのは 8 件だけ**。しかも
+    **`.msg` 4 件と入れ物 4 件はすべて当て推量**でした —— docs/07 が
+    「1951 個の中からテキストを探す」と書いている、**探している当のもの**が
+    丸ごと見当の側にいます。そのうえ画面はこの後「絞り込みに `msg` と
+    入れてください」と続けるので、見当が検索の鍵になります。
+
+    直し: 集計に「(すべて見当)」「(うち見当 N)」を付け、`.msg` と入れ物は
+    **先頭の目印が無いので確かめようがない**ことを言う。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IDX", "make_boku2_sample.py")
+        if problem:
+            raise unittest.SkipTest(problem)
+
+    def test_most_of_the_practice_data_is_a_guess(self):
+        """この直しが要る根拠そのものを数える (言いっぱなしにしない)."""
+        rows = TestTheKindGuessIsCountedOnKnownFiles.entries()
+        got = TestTheKindGuessIsCountedOnKnownFiles.guess(rows)
+        sure = [p for (p, _w, _h, _n), g in zip(rows, got) if g["sure"]]
+        self.assertLess(len(sure), len(rows),
+                        "全部が目印で確かめられるなら、この区別は要らない")
+        text = [(p, g) for (p, _w, _h, _n), g in zip(rows, got)
+                if g["ext"] in ("msg", "parts")]
+        self.assertTrue(text, "練習データにテキストの入れ物が無い (題材が変わった)")
+        guessed = [p for p, g in text if not g["sure"]]
+        self.assertEqual(len(guessed), len(text),
+                         "テキストの入れ物が目印で確かめられている "
+                         "(なら「確かめようがない」と書いてはいけない)")
+
+    def test_the_summary_marks_what_was_only_guessed(self):
+        """集計の 1 行そのものに「見当」が出ること."""
+        rows = TestTheKindGuessIsCountedOnKnownFiles.entries()
+        got = TestTheKindGuessIsCountedOnKnownFiles.guess(rows)
+        line = self.summary(got)
+        self.assertTrue("msg 4 (すべて見当)" in line, f"テキストの入れ物に印が無い: {line}")
+        self.assertTrue("parts 4 (すべて見当)" in line, f"入れ物に印が無い: {line}")
+        # 目印で確かめた 8 件には何も付けない (付けたら区別にならない)
+        self.assertTrue("tm2 9 (うち見当 1)" in line,
+                        f"確かめた分と見当の分を分けて数えていない: {line}")
+
+    @staticmethod
+    def summary(kinds) -> str:
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('/* @extract-start sniff */'),"
+            "b=s.indexOf('/* @extract-end sniff */');"
+            "const m=new Function(s.slice(a,b)+'\\nreturn {sniffSummary};')();"
+            "console.log(m.sniffSummary(JSON.parse(process.argv[1])));"
+        )
+        res = subprocess.run([node, "-e", prog, json.dumps(kinds)],
+                            capture_output=True, text=True, cwd=REPO)
+        if res.returncode != 0:
+            raise AssertionError("集計を出せない: " + res.stdout + res.stderr)
+        return res.stdout.strip()
+
+    def test_the_note_after_splitting_says_how_many_were_checked(self):
+        """**関数にあっても、出さなければ意味が無い**。要約の行に繋いであること."""
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertTrue("const sureCount = kinds.filter((k) => k.sure).length;" in src,
+                        "確かめた件数を数えていない")
+        self.assertTrue("sureCount === kinds.length ? \"\"" in src,
+                        "全部確かめたときに断り書きを出さない作りになっていない")
+        self.assertTrue("確かめられたのは ${sureCount} 件" in src,
+                        "確かめた件数を要約の行に出していない")
+        self.assertTrue("先頭の目印が無い**ので確かめようがありません" in src,
+                        "テキストの入れ物が確かめようがないことを言っていない")
+        self.assertTrue("**絞り込みに出てこないテキストがあり得ます**" in src,
+                        "絞り込みが取りこぼし得ることを言っていない")
+        self.assertTrue("種類が分からなかったもの" in src,
+                        "`bin` が「分からなかったもの」だと言っていない")
+
+    def test_the_things_we_call_uncheckable_really_have_no_magic(self):
+        """「確かめようがない」の根拠を、魔法数の表そのもので押さえる."""
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            src = fh.read()
+        got = re.search(r"const NO_MAGIC_EXTS = \[(.*?)\];", src, re.S)
+        self.assertTrue(got, "目印の無い種類の一覧が無い")
+        exts = re.findall(r'"([^"]+)"', got.group(1))
+        self.assertEqual(sorted(exts), ["msg", "parts"], f"一覧が変わった: {exts}")
+        table = re.search(r"const MAGICS = \[(.*?)\n\];", src, re.S)
+        self.assertTrue(table, "魔法数の表が見つからない")
+        for ext in exts:
+            self.assertFalse(f'ext: "{ext}"' in table.group(1),
+                             f"{ext} は魔法数の表にある (確かめようがある)")
+
+
 class TestTheBitDepthGuessIsCounted(unittest.TestCase):
     """1 ドットのビット数の見当が、何通り当たるかを数える (#151).
 
