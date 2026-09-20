@@ -8739,6 +8739,158 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestAContainerNotOnTheBorrowedListIsNotSilentlyDropped(unittest.TestCase):
+    """**名前の一覧に無い文言の入れ物を、黙って落とさないこと** (#279).
+
+    #278 の宿題は「数字ではない決め打ち」。`TEXT_CONTAINERS` —— 文言の入れ物の
+    名前 4 つ —— は英語化パッチの公開ソースから借りた一覧で、**実物で確かめた
+    ことは一度も無い**。一覧に無い入れ物があると `text` は**黙って読み飛ばし、
+    「N 行」と言って終わる**。落ちた分は誰にも分からない。
+
+    公開ソースの `IMG_MAP_FILES` / `IMG_MAP_FILES_TYPE_0` を読み直すと、
+    向こうの一覧はこちらの 4 つより**長い** (`fish\\img\\~fish_on_mem\\11.bin`
+    など)。それらは入れ子の部品なので取り出しの道は通っているが、
+    **一覧そのものが borrowed だという事実は変わらない。**
+
+    そこで、名前で外したファイルも**中身を覗いて**「文言の入れ物として読める」
+    なら数え、`check` と `text` の両方で言うようにした。読むかどうかは
+    `--all-bin` で選べる (既定は今までどおり読まない)。
+    """
+
+    @staticmethod
+    def dump(folder: str, extra_name: str | None) -> None:
+        """一覧に無い名前の入れ物を 1 つ足した吸い出し (`extra_name` が None なら足さない)."""
+        import make_boku2_sample as M
+        os.makedirs(os.path.join(folder, "MAP"), exist_ok=True)
+        glyphs = M.glyph_table()
+        fish = M.build_map([None, M.build_map(
+            [None, None, M.build_msg([M.encode(t, glyphs)
+                                      for t in ["フナ<BR>ぬまにいる", "コイ<BR>かわにいる"]], 8)])])
+        diary = M.build_map([M.build_msg([M.encode("きょうは、", glyphs)], 8)] * 2, rec=12)
+        tree = [(True, 1, "/", None)]
+        if extra_name:
+            tree.append((False, 1, extra_name, fish))
+        tree += [(False, 1, "diary.bin", diary),
+                 (False, 0, "system.msg", M.build_msg([M.encode("はじめから", glyphs)], 8))]
+        idx, img, _ = M.build_dfi(tree)
+        for name, blob in (("BOKU2.IDX", idx), ("BOKU2.IMG", img)):
+            with open(os.path.join(folder, name), "wb") as fh:
+                fh.write(blob)
+
+    @classmethod
+    def said(cls, extra_name) -> str:
+        import io
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            cls.dump(folder, extra_name)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            return out.getvalue()
+
+    def test_check_says_it(self):
+        said = self.said("bug_on_mem.bin")
+        line = next((ln for ln in said.splitlines()
+                     if ln.startswith("→ 名前の一覧")), "")
+        self.assertTrue(line, f"一覧に無い入れ物を黙って落としています\n{said[-900:]}")
+        self.assertIn("bug_on_mem.bin", line, line)
+        self.assertIn("--all-bin", line, line)
+
+    def test_a_listed_container_is_not_reported(self):
+        """**一覧にあるものを二重に言わない**こと (材料を変えて確かめる)."""
+        said = self.said("fish_on_mem.bin")
+        self.assertNotIn("→ 名前の一覧", said,
+                         "一覧にある入れ物まで「一覧に無い」と言っています")
+
+    def test_a_normal_dump_says_nothing(self):
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+        self.assertNotIn("→ 名前の一覧", out.getvalue(),
+                         "練習データで誤って鳴っています")
+
+    def test_nothing_is_said_when_the_names_are_unreadable(self):
+        """**名前が `#0` `#1` … の吸い出しでは言わない**こと.
+
+        どの入れ物も「一覧に無い」ことになってしまい、本当の話
+        (「名前が付かないファイルが多い」) が埋もれる。
+        """
+        import io
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            make_boku2_sample.damage(folder, "allnames")
+            out = io.StringIO()
+            boku2.check(folder, out=out)
+            said = out.getvalue()
+        self.assertIn("名前が付かないファイルが多い", said, "材料が違います")
+        self.assertNotIn("→ 名前の一覧", said,
+                         "名前が読めないのに「一覧に無い」と言っています")
+
+    def test_text_says_it_and_all_bin_reads_it(self):
+        import shutil
+        import subprocess
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            out = os.path.join(tmp, "OUT")
+            run = lambda *a: subprocess.run(  # noqa: E731
+                [sys.executable, os.path.join(REPO, "tools", "boku2.py"), *a],
+                capture_output=True, text=True, cwd=REPO)
+            run("unpack", os.path.join(folder, "BOKU2.IDX"),
+                os.path.join(folder, "BOKU2.IMG"), out)
+            shutil.copy(os.path.join(out, "fish", "img", "fish_on_mem.bin"),
+                        os.path.join(out, "bug_on_mem.bin"))
+            font = os.path.join(folder, "font.txt")
+            plain = run("text", out, "-f", font, "-o", os.path.join(tmp, "a.tsv"))
+            allbin = run("text", out, "-f", font, "-o", os.path.join(tmp, "b.tsv"), "--all-bin")
+        # **「読まなかった」と言っていること**まで見る。言葉だけだと、
+        # 「読みました」の行でも通ってしまう (壊し試験で気づいた)
+        self.assertIn("に無いので読まなかったファイル", plain.stdout, plain.stdout[-400:])
+        self.assertIn("`--all-bin` を足すと読みます", plain.stdout, plain.stdout[-400:])
+        import re
+        got = []
+        for text in (plain.stdout, allbin.stdout):
+            m = re.search(r"(\d+) 行 →", text)
+            self.assertTrue(m, f"行数の行が出ていない: {text[-300:]!r}")
+            got.append(int(m.group(1)))
+        self.assertGreater(got[1], got[0],
+                           f"--all-bin で行が増えていません ({got[0]} → {got[1]})")
+
+    def test_the_detector_does_not_cry_wolf(self):
+        """**でたらめや画像を入れ物と言わない**ことを測る (#254 と同じ手順)."""
+        import random
+        import boku2
+        random.seed(20260920)
+        corpus = {
+            "乱数": lambda: bytes(random.getrandbits(8) for _ in range(4096)),
+            "ゼロ埋め": lambda: bytes(4096),
+            "TIM2 風の画素": lambda: bytes(random.choice([0, 0, 0, 1, 2, 3]) for _ in range(4096)),
+        }
+        for label, make in corpus.items():
+            hit = sum(1 for _ in range(200)
+                      if boku2.looks_like_a_text_container_bytes(make(), "x.bin"))
+            self.assertEqual(hit, 0, f"{label}: 200 通り中 {hit} 件を入れ物と言いました")
+
+    def test_the_screen_says_the_same_thing(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue("function looksLikeATextContainer(bytes, name) {" in ui,
+                        "画面に同じ判定がありません")
+        self.assertTrue("→ 名前の一覧 (${CONTAINERS.join(\", \")}) に無いのに、**文言の" in ui,
+                        "画面が一覧に無い入れ物を黙って落としています")
+        self.assertTrue("NAME_LIST_TRUST ? [] : items" in ui,
+                        "画面が名前の読めない吸い出しでも言い続けています")
+
+
 class TestASmallChecksumFileDoesNotVouchForEverything(unittest.TestCase):
     """**検査値が索引のごく一部しか確かめていないなら、太鼓判を押さないこと** (#278).
 
@@ -11345,7 +11497,13 @@ class TestEverySharedJudgementIsReached(unittest.TestCase):
     #: #267 で `--break length` (索引のレコードの長さの欄を小さくする) を足したら
     #: 通った —— 切れた `.msg` は「先頭が知らない形で、中身の性質でしか言えない」
     #: そのものだった。**逃がした理由は、材料が足りないだけのことが多い** (#190)
-    NOT_FROM_CHECK: dict[str, str] = {}
+    NOT_FROM_CHECK: dict[str, str] = {
+        "looks_like_a_text_container":
+            "`text` / `used` がファイルを名前で拾うときに使う (#279)。`check` は"
+            "本体を開いているので、同じ判定をバイト列の側 "
+            "(`looks_like_a_text_container_bytes`) で呼ぶ。中身の規則はそちらに"
+            "1 つだけあり、こちらは開いて渡すだけ",
+    }
 
     @staticmethod
     def _camel(name: str) -> list:

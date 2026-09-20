@@ -4647,6 +4647,26 @@ async function buildIdxReport() {
     if (!parts) boxBad++; else boxParts += parts.items.length;
     for (const c of bokuUsedNumbers(bytes, isAltBreak(it.name))) boxUsed.add(c);
   }
+  /* **名前の一覧に無い入れ物を、黙って落とさない** (#279。CLI の check と同じ言葉)。
+     一覧は公開ソースから借りた 4 つの名前で、実物で確かめたことは一度も無い */
+  /* **名前が読めていないときは言わない** (#279。CLI の check と同じ)。名前が
+     #0 #1 … の吸い出しでは、どの入れ物も「一覧に無い」ことになってしまう */
+  const offList = [];
+  for (const it of ((c.named_ok || 0) < items.length * NAME_LIST_TRUST ? [] : items)) {
+    const low = plainName(it.base || it.name);
+    if (CONTAINERS.includes(low) || low.endsWith(".msg") || it.len < 16) continue;
+    const bytes = await readRange(dataEntry.file, dataEntry.offset + it.at,
+                                  Math.min(it.len, CONTAINER_HUNT_HEAD));
+    if (looksLikeATextContainer(bytes, it.name)) offList.push(it);
+  }
+  if (offList.length) {
+    problems += blame(`→ 名前の一覧 (${CONTAINERS.join(", ")}) に無いのに、**文言の`
+      + `入れ物として読めるファイルが ${offList.length.toLocaleString()} 件**あります `
+      + `(例: ${offList.slice(0, 3).map((x) => x.name).join(", ")}`
+      + `${offList.length > 3 ? " …" : ""})。一覧は英語化パッチの公開ソースから`
+      + "借りたもので、**実物で確かめていません**。`text` は既定で読まないので、"
+      + "`--all-bin` を足すか、この行ごと報告してください");
+  }
   /* **数を出して、判定まで言う** (#270)。ここは長らく見出しと名前だけで、
      読めたかどうかを一度も言っていなかった (CLI の check と 1 字そろえる) */
   if (boxes.length) {
@@ -5061,11 +5081,26 @@ function dfiNameStopNote(stop) {
     + "報告してください (名前の置き場の先頭ではなく、ここ)";
 }
 
+/** 名前で外したファイルのうち、中身を覗く上限 (#279。CLI の CONTAINER_HUNT_HEAD) */
+const CONTAINER_HUNT_HEAD = 64 * 1024;
+
+/** 名前は一覧に無いが、**中身は文言の入れ物**か (#279。CLI の
+ *  looks_like_a_text_container_bytes と同じ判定)。入れ物として読めて、
+ *  文字番号が取れることまで見る (形だけなら画像や音声の束もあり得る) */
+function looksLikeATextContainer(bytes, name) {
+  /* 弾いているのは「入れ物として読める」と「文字番号が取れる」の 2 つだけ
+     (#279。CLI と同じ)。部品の数は壊し試験で一度も効かなかったので置かない */
+  if (!parseBokuMap(bytes)) return false;
+  return [...bokuUsedNumbers(bytes, isAltBreak(name))].length > 0;
+}
+
 /** 名前の並びを「読めた」と見なす下限 (#258 → #276。tools/boku2.py の
  *  NAME_CLEAN_RATIO と同じ数)。**9 割から 3 割に下げた** —— 9 割では本物の名前でも
  *  1 割壊れていれば 1 つも使わなかった (1,200 件で測ると壊れ 11% で 0 件)。
  *  枠どおりに 2 個以上読めたでたらめは 0〜7% にしかならないので、3 割でも通らない */
 const NAME_CLEAN_RATIO = 0.3;
+/** 「名前の一覧で引く規則」を信じてよい、名前が付いた割合 (#279。CLI の NAME_LIST_TRUST) */
+const NAME_LIST_TRUST = 0.9;
 
 /** レコードの直後に並ぶ名前を読む (#258。tools/boku2.py の read_dfi_names と同じ)。
  *  **変な字が 1 つあっただけで、そこから先を全部捨てない。** 名前は 0 区切りなので

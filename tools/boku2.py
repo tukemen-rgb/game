@@ -83,6 +83,9 @@ TIM2_PIXEL_KIND = {
 #: **1 個しか枠に収まらない**ときで、それは下の「2 個未満なら使わない」で落ちる。
 #: 3 割なら、でたらめは 1 つも通らず、**6 割壊れた本物でも 4 割の名前が残る**。
 NAME_CLEAN_RATIO = 0.3
+#: 「名前の一覧で引く規則」を信じてよい、名前が付いた割合 (#279)。名前が `#0` `#1`
+#: … になっている吸い出しでは、どの入れ物も「一覧に無い」ことになってしまう
+NAME_LIST_TRUST = 0.9
 
 
 def dfi_rec_end(idx: bytes) -> int:
@@ -1738,11 +1741,20 @@ def nothing_picked_note(given: list[str]) -> list[str]:
             "   python3 tools/boku2.py check 実物/ で、どの段で外れているかを診てください"]
 
 
-def expand_inputs(paths: list[str]) -> list[str]:
+def expand_inputs(paths: list[str], skipped: list | None = None,
+                  all_bin: bool = False) -> list[str]:
     """引数のフォルダを中まで辿り、会話の入ったファイルだけを拾う.
 
     切り分けた本体 (OUT/) からは *.msg を、マップの部品 (OUT/maps/*/) からは 1.bin を、
-    マップの入れ物 (MAP/) からはそのままのファイルを。ファイルを直接渡せばそのまま."""
+    マップの入れ物 (MAP/) からはそのままのファイルを。ファイルを直接渡せばそのまま.
+
+    `skipped` を渡すと、**名前で外したのに文言の入れ物として読めた**ファイルを
+    そこに入れる (#279)。`TEXT_CONTAINERS` は公開ソースから借りた 4 つの名前で、
+    **実物で確かめたことは一度も無い**。一覧に無い入れ物があれば、`text` は
+    **黙って読み飛ばして「N 行」と言う** —— 落ちた分は誰にも分からなかった。
+
+    `all_bin=True` なら、その読めたものも読む (`--all-bin`)。
+    """
     out: list[str] = []
     for p in paths:
         if not os.path.isdir(p):
@@ -1752,9 +1764,57 @@ def expand_inputs(paths: list[str]) -> list[str]:
             dirs.sort()
             for f in sorted(files):
                 low = plain_name(f)
+                full = os.path.join(root, f)
                 if low.endswith(".msg") or low == "1.bin" or low in TEXT_CONTAINERS:
-                    out.append(os.path.join(root, f))
+                    out.append(full)
+                elif (skipped is not None or all_bin) and looks_like_a_text_container(full):
+                    # **数えるのは常に。読むかどうかは `all_bin` で決める** (#279)
+                    if skipped is not None:
+                        skipped.append(full)
+                    if all_bin:
+                        out.append(full)
     return out
+
+
+#: 名前で外したファイルのうち、**中身を覗いて文言の入れ物だと分かるもの**を何件
+#: まで覗くか (#279)。実物は 1951 件あるので、全部を開くと遅い
+CONTAINER_HUNT_HEAD = 64 * 1024
+
+
+def looks_like_a_text_container_bytes(raw: bytes, name: str) -> bool:
+    """**中身が文言の入れ物か** (#279)。入れ物として読めて、文字番号が取れること.
+
+    入れ物の形だけなら画像や音声の束もあり得るので、**文字番号が取れる**ことまで
+    見ないと「文言が入っている」とは言えない。
+    """
+    got = parse_map_rec(raw)
+    if not got:
+        return False
+    # **弾いているのはこの 2 つだけ** (#279)。「入れ物として読める」と
+    # 「文字番号が取れる」。部品の数も見ていたが、**壊し試験で一度も効かなかった**
+    # —— 部品が全部空の入れ物はそもそも読めないか、文字番号が 0 になる。
+    # 効かない見張りは置かない (置くと、効いているつもりになる)
+    return bool(used_numbers_of(raw, name))
+
+
+def _read_at(img, at: int, size: int) -> bytes:
+    img.seek(at)
+    return img.read(size)
+
+
+def looks_like_a_text_container(path: str) -> bool:
+    """名前は一覧に無いが、**中身は文言の入れ物**か (#279).
+
+    入れ物として読めて、**部品のどれかから文字番号が取れる**ことまで見る。
+    入れ物の形だけなら画像や音声の束もあり得るので、そこまで見ないと
+    「文言が入っている」とは言えない。
+    """
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(CONTAINER_HUNT_HEAD)
+    except OSError:
+        return False
+    return looks_like_a_text_container_bytes(raw, path)
 
 
 # 本体の中で、会話以外の文言 (日記の雛形・保存画面・出来事の文・釣りの文言) が入っている
@@ -2972,6 +3032,26 @@ def check(folder: str, out=sys.stdout) -> int:
         # 「入れ物として読めた N 件 / 1 番が会話だった N 件」と言い、0 なら →
         # を出すのと比べて、同じ入れ物なのにこちらだけ黙っていた。
         # 実物で日記・保存画面の読み方が外れても、この出力では分からない
+        # **名前の一覧に無い入れ物を、黙って落とさない** (#279)。一覧は公開ソースから
+        # 借りた 4 つの名前で、実物で確かめたことは一度も無い。一覧に無い入れ物が
+        # あれば、`text` はそこを読まずに「N 行」と言う —— 落ちた分は誰にも分からない
+        # **名前が読めていないときは言わない** (#279)。名前が `#0` `#1` … に
+        # なっている吸い出しでは、どの入れ物も「一覧に無い」ことになってしまう。
+        # そのときの本当の話は 1 つ上の「名前が付かないファイルが多い」のほう
+        off_list = [] if named < len(entries) * NAME_LIST_TRUST else [e for e in entries
+                    if plain_name(e["path"]) not in TEXT_CONTAINERS
+                    and not plain_name(e["path"]).endswith(".msg")
+                    and e["len"] >= 16 and looks_like_a_text_container_bytes(
+                        _read_at(img, e["at"], min(e["len"], CONTAINER_HUNT_HEAD)),
+                        e["path"])]
+        if off_list:
+            problems += blame(
+                f"→ 名前の一覧 ({', '.join(TEXT_CONTAINERS)}) に無いのに、**文言の"
+                f"入れ物として読めるファイルが {len(off_list):,} 件**あります "
+                f"(例: {', '.join(e['path'] for e in off_list[:3])}"
+                f"{' …' if len(off_list) > 3 else ''})。一覧は英語化パッチの公開ソースから"
+                "借りたもので、**実物で確かめていません**。`text` は既定で読まないので、"
+                "`--all-bin` を足すか、この行ごと報告してください")
         if boxes:
             looked_boxes = min(MSG_CHECK_FILES, len(boxes))
             say(f"  入れ物として読めた {looked_boxes - box_bad} 件 / "
@@ -3312,6 +3392,11 @@ def main(argv=None) -> int:
     p.add_argument("-f", "--font", action="append")
     p.add_argument("-o", "--out")
     p.add_argument("--keep-voice", action="store_true", help="音声の番号の項目も残す")
+    # **名前の一覧に無い入れ物も読む** (#279)。既定では読まないが、黙って落とさず
+    # 「N 件は文言の入れ物として読めます」と言う。一覧は公開ソースから借りたもので、
+    # 実物で確かめたことは一度も無い
+    p.add_argument("--all-bin", action="store_true",
+                   help="名前の一覧に無いファイルも、文言の入れ物として読めるなら読む")
     p = sub.add_parser("fontlist", help="フォントの並びを校正ツールのフォント一覧にする")
     p.add_argument("font", nargs="+"); p.add_argument("-o", "--out")
     p = sub.add_parser("used", help="本文で使われている文字番号だけを並べる (書き出す手間を減らす)")
@@ -3465,13 +3550,26 @@ def run(args) -> int:
                 print(line, file=sys.stderr)
         rows = []
         given = expand_patterns(args.files)
-        files = expand_inputs(given)
+        # **名前の一覧に無い入れ物を、黙って落とさない** (#279)
+        off_list: list[str] = []
+        files = expand_inputs(given, off_list, all_bin=args.all_bin)
         empty = []
         for f in files:
             got = text_rows(f, glyphs, args.keep_voice)
             if not got:
                 empty.append(f)        # 読めたはずの形なのに 1 行も出なかった
             rows += got
+        if off_list and not args.all_bin:
+            # **黙って落とさない** (#279)。名前の一覧は借り物なので、実物では
+            # 一覧に無い入れ物があり得る。読まなかったぶんを必ず言う
+            print(f"→ 名前の一覧 ({', '.join(TEXT_CONTAINERS)}) に無いので読まなかった"
+                  f"ファイルのうち、**{len(off_list)} 件は文言の入れ物として読めます**"
+                  f" (例: {', '.join(os.path.basename(x) for x in off_list[:3])}"
+                  f"{' …' if len(off_list) > 3 else ''})。"
+                  "一覧は英語化パッチの公開ソースから借りたもので、**実物で確かめて"
+                  "いません**。`--all-bin` を足すと読みます。この行ごと報告してください")
+        elif off_list:
+            print(f"   名前の一覧に無い入れ物 {len(off_list)} 件も読みました (--all-bin)")
         if not rows:
             # 0 行の TSV を黙って作ると、開くまで何も起きていないことに気づけない。
             # 素人が踏むのは「unpack / maps を先に回していない」か「場所違い」(#77)
