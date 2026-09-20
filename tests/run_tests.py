@@ -8036,8 +8036,15 @@ class TestOneOddLetterDoesNotThrowAwayEveryName(unittest.TestCase):
         with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
             app = fh.read()
         i = app.index("function readDfiNames(")
-        src = ("const NAME_CLEAN_RATIO = 0.9;"
-               "const ascii=(b)=>{let t='';for(const c of b)t+=String.fromCharCode(c);return t;};"
+        # **定数と `ascii` は画面の本物を切り出して使う** (#276)。写しを置くと、
+        # 画面を直したときにここだけ古い規則のまま緑になる
+        def lift(head: str) -> str:
+            j = app.index(head)
+            return app[j:app.index("\n", j) + 1]
+
+        src = (lift("const NAME_CLEAN_RATIO =")
+               + app[app.index("function ascii("):
+                     app.index("\n}\n", app.index("function ascii(")) + 3]
                + app[i:app.index("\n}\n", i) + 3])
         cases = {
             "空白が 1 つ": self.build([f"f{i:03d}.msg" if i != 5 else "f005 x.msg"
@@ -8730,6 +8737,123 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
         mirror = re.findall(r'lines\.push\("(→ 名前が付かないファイルが多い[^"]*)"\)', ui)
         self.assertEqual(sorted(mirror), sorted(got),
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
+
+
+class TestLooseningTheNameGateIsMeasured(unittest.TestCase):
+    """**名前の重しを 9 割から 3 割に下げたことを、測って裏付ける** (#276).
+
+    #275 の宿題は 3 段目の `NAME_CLEAN_RATIO` (こちらが決めた目安)。
+    1,200 件の索引で壊れ具合を変えて測ると、**崖**がありました。
+
+        壊れ  5% → 名前 1,140 件
+        壊れ 11% → 名前 **0 件**
+
+    1 件の差で 1,068 件の良い名前が消える。**実物で確かめたことが一度も無い
+    数字**が、名前を全部捨てるかどうかを決めていました。
+
+    下げてよいかは**測ってから**決めます (#254 と同じ手順)。枠どおりに 2 個以上
+    読めたでたらめ —— ゼロ埋め・位置表の u32 の並び・Shift-JIS の文章を 0 で
+    区切ったもの —— は **0〜7%** にしかなりません。乱数や英文が 100% に見えるのは
+    名前が**1 個しか枠に収まらない**ときで、それは「2 個未満なら使わない」で落ちます。
+    """
+
+    @staticmethod
+    def index(bad_frac: float, n: int = 1200) -> tuple[bytes, bytes]:
+        """名前の `bad_frac` に使えない字を混ぜた、実物なみの索引と本体."""
+        import struct
+        names = ["/"] + [(f"f{i:04d}.bin" if i >= int(n * bad_frac)
+                          else f"f{i:04d}\x01.bin") for i in range(n)]
+        recs = [(1, 1, 0, 0)] + [(0, 1 if i < n - 1 else 0, i, 64) for i in range(n)]
+        idx = b"DFI\0" + struct.pack("<I", 0x100) + b"\0" * 8
+        for kind, more, lba, size in recs:
+            idx += struct.pack("<HHIII", kind, more, 0x8130, lba, size)
+        idx += b"".join(x.encode("latin1") + b"\0" for x in names)
+        return idx, bytes(2048 * n)
+
+    @classmethod
+    def named(cls, bad_frac: float) -> tuple[int, int]:
+        import boku2
+        idx, img = cls.index(bad_frac)
+        entries = boku2.read_dfi(idx, len(img))
+        got = sum(1 for e in entries
+                  if not os.path.basename(e["path"]).startswith("#"))
+        return got, len(entries)
+
+    def test_there_is_no_cliff_any_more(self):
+        """**1 割壊れたぐらいで全部捨てない**こと (崖が戻っていないか)."""
+        for bad in (0.05, 0.11, 0.3, 0.6):
+            with self.subTest(bad=bad):
+                got, total = self.named(bad)
+                want = round(total * (1 - bad))
+                self.assertAlmostEqual(got, want, delta=total * 0.02,
+                                       msg=f"壊れ {bad:.0%} で名前が {got}/{total} "
+                                           f"(壊れていない分 {want} 件が残るはず)")
+
+    def test_a_hopeless_name_area_is_still_thrown_away(self):
+        """**緩めすぎない。** 8 割壊れていれば 1 つも使わないこと."""
+        got, total = self.named(0.75)
+        self.assertEqual(got, 0, f"名前らしくないのに {got}/{total} 件使っています")
+
+    def test_junk_never_reaches_the_line(self):
+        """**でたらめが重しを越えないことを、材料を並べて測る** (#254 と同じ手順).
+
+        枠どおりに 2 個以上読めたものだけを数える (1 個しか読めないものは
+        「2 個未満なら使わない」で落ちるので、ここの話ではない)。
+        """
+        import random
+        import struct
+
+        import boku2
+
+        random.seed(20260920)
+        corpus = {
+            "ゼロ埋め": bytes(6000),
+            "位置表 (u32 の並び)": b"".join(struct.pack("<I", random.randrange(1 << 24))
+                                             for _ in range(1500)),
+            "Shift-JIS の文章を 0 で区切ったもの":
+                b"\0".join(("あいうえお" * 3).encode("cp932") for _ in range(300)),
+            "TIM2 風の画素": bytes(random.choice([0, 0, 0, 1, 2, 3]) for _ in range(6000)),
+        }
+        worst = 0.0
+        for label, blob in corpus.items():
+            area = b"/\0" + blob
+            raw, q = [], 0
+            while len(raw) < 300 and q < len(area):
+                end = area.find(b"\0", q)
+                if end < 0 or end - q > 127:
+                    break
+                raw.append(area[q:end])
+                q = end + 1
+            # **材料が弱くないこと**: 枠として 2 個以上読めていること
+            self.assertGreaterEqual(len(raw), 2, f"{label}: 枠が 1 個しか読めていない")
+            clean = sum(1 for x in raw if x and all(0x21 <= c <= 0x7E for c in x))
+            ratio = clean / len(raw)
+            worst = max(worst, ratio)
+            self.assertLess(ratio, boku2.NAME_CLEAN_RATIO,
+                            f"{label}: きれいな割合 {ratio:.0%} が重し "
+                            f"{boku2.NAME_CLEAN_RATIO:.0%} を越えました")
+        # **余裕があること**まで見る。ぎりぎりなら下げすぎ
+        self.assertLess(worst, boku2.NAME_CLEAN_RATIO / 2,
+                        f"でたらめの最大 {worst:.0%} が重しに近すぎます")
+
+    def test_the_number_is_the_same_on_both_sides(self):
+        import boku2
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue(f"const NAME_CLEAN_RATIO = {boku2.NAME_CLEAN_RATIO};" in ui,
+                        f"web/app.js の重しが {boku2.NAME_CLEAN_RATIO} と違う")
+
+    def test_the_renaming_road_still_works(self):
+        """**空白や `:` の入った名前を捨てない**こと (#202 の書き換えの道).
+
+        ここを「名前らしい字だけ」に絞ると、`a:b.bin` のような実物にあり得る
+        名前が `#N` に落ちる —— 一度そう書いて、検査に落ちて気づいた。
+        """
+        import boku2
+        raw = [b"/"] + [f"a{i:03d}.bin".encode() for i in range(20)] + [b"a:b.bin", b"c d.bin"]
+        ok = [bool(x) and all(0x21 <= c <= 0x7E for c in x) for x in raw]
+        self.assertTrue(ok[-2], "`a:b.bin` を名前として認めなくなりました")
+        self.assertGreaterEqual(sum(ok) / len(raw), boku2.NAME_CLEAN_RATIO)
 
 
 class TestAHalfFinishedRipIsNamedAsSuch(unittest.TestCase):
