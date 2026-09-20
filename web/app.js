@@ -3835,6 +3835,10 @@ const EMPTY_KNOCK_ON = knockOnNote("本体の中身がほとんど空です");
 const SHAKY_INDEX_KNOCK_ON = knockOnNote("索引が本体の N% しか指していません");
 /** 検査値が「全部合った」と言ってよい最少の件数 (#271。CLI の CRC_SURE_MIN) */
 const CRC_SURE_MIN = 20;
+/** そのうえで、索引のどれだけを確かめたか (#278。CLI の CRC_SURE_SHARE)。
+ *  件数だけだと、検査値ファイルが 20 件しかなければ索引 1,200 件のうち 1.7% を
+ *  見ただけで「切り分けは正しい」と言い切っていた */
+const CRC_SURE_SHARE = 0.5;
 
 /** 切り分けた先頭 CRC_HEAD バイトの検査値が、何件合って何件合わないか
  *  (#271。CLI の crc_match_counts と同じ数え方) */
@@ -4141,7 +4145,8 @@ async function buildIdxReport() {
       const probe = readCrcFile(await readRange(crcProbe.file, crcProbe.offset, crcProbe.size));
       if (probe) {
         const { ok, ng } = await crcMatchCounts(probe, items, dataEntry.file, dataEntry.offset);
-        crcAllOk = ok >= CRC_SURE_MIN && ng === 0;
+        const lookedAtMost = Math.min(items.length, CRC_CHECK_FILES);
+        crcAllOk = ok >= CRC_SURE_MIN && ng === 0 && ok >= lookedAtMost * CRC_SURE_SHARE;
       }
     }
   }

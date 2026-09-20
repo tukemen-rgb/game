@@ -8739,6 +8739,118 @@ class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):
                          f"画面と道具で言い方が違います\n  道具: {sorted(got)}\n  画面: {sorted(mirror)}")
 
 
+class TestASmallChecksumFileDoesNotVouchForEverything(unittest.TestCase):
+    """**検査値が索引のごく一部しか確かめていないなら、太鼓判を押さないこと** (#278).
+
+    #277 の宿題は 3 段目の最後 `CRC_SURE_MIN` (20)。件数だけで見ていたので、
+    測るとこうなりました。
+
+        検査値   20/1200 ( 1.7%) → 「切り分けは正しい」**True**
+        検査値  200/1200 (16.7%) → 「切り分けは正しい」**True**
+
+    **索引 1,200 件のうち 20 件を見ただけで**、使い切りの警告 (#271) と
+    名前の置き場の警告 (#272) を黙らせていました。検査値ファイルが途中で
+    切れた吸い出し —— 実物で起こり得る形 —— がちょうどこれです。
+
+    件数に加えて**索引のどれだけを確かめたか** (`CRC_SURE_SHARE`) も見ます。
+    """
+
+    @staticmethod
+    def dump(folder: str, n_files: int, crc_files: int) -> None:
+        """索引 `n_files` 件、検査値ファイルは先頭 `crc_files` 件ぶんだけ."""
+        import struct
+        import boku2
+        import make_boku2_sample
+        os.makedirs(os.path.join(folder, "MAP"), exist_ok=True)
+        recs, img = [(1, 1, 0, 0)], bytearray()
+        for i in range(n_files):
+            recs.append((0, 1 if i < n_files - 1 else 0, len(img) // 2048, 64))
+            img += bytes(2048)
+        idx = b"DFI\0" + struct.pack("<I", 0x100) + b"\0" * 8
+        for kind, more, lba, size in recs:
+            idx += struct.pack("<HHIII", kind, more, 0x8130, lba, size)
+        idx += b"/\0" + b"".join(f"f{i:04d}.bin\0".encode() for i in range(n_files))
+        full = make_boku2_sample.build_crc(idx, bytes(img))
+        crc = boku2.read_crc_file(full)
+        e = boku2.CRC_ENTRY
+        names = full[crc["dir_start"]:crc["dir_start"] + crc_files * e]
+        sums = full[crc["crc_at"]:crc["crc_at"] + crc_files * 2]
+        cut = struct.pack("<5I", crc_files, 20, len(names), 20 + len(names), len(sums))
+        for name, blob in (("BOKU2.IDX", idx), ("BOKU2.IMG", bytes(img)),
+                           ("BOKU2.CRC", cut + names + sums)):
+            with open(os.path.join(folder, name), "wb") as fh:
+                fh.write(blob)
+
+    @classmethod
+    def vouches(cls, n_files: int, crc_files: int) -> bool:
+        import boku2
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            cls.dump(folder, n_files, crc_files)
+            with open(os.path.join(folder, "BOKU2.IDX"), "rb") as fh:
+                idx = fh.read()
+            img = os.path.join(folder, "BOKU2.IMG")
+            entries = boku2.read_dfi(idx, os.path.getsize(img))
+            # **材料が弱くないこと**: 検査値は本当に読めて、合っていること
+            with open(os.path.join(folder, "BOKU2.CRC"), "rb") as fh:
+                crc = boku2.read_crc_file(fh.read())
+            self_ok = crc is not None
+            assert self_ok, "検査値ファイルが読めない材料になっている"
+            with open(img, "rb") as fh:
+                ok, ng = boku2.crc_match_counts(crc, entries, fh)
+            assert ok == crc_files and ng == 0, f"材料が弱い: 合う {ok} / 合わない {ng}"
+            return boku2.crc_says_the_split_is_right(folder, entries, img)
+
+    def test_a_sliver_does_not_vouch(self):
+        for crc_files in (20, 200):
+            with self.subTest(crc_files=crc_files):
+                self.assertFalse(self.vouches(1200, crc_files),
+                                 f"索引 1,200 件のうち {crc_files} 件で太鼓判を押しています")
+
+    def test_half_or_more_does_vouch(self):
+        """**半分以上を確かめていれば、今までどおり太鼓判**を押すこと."""
+        for crc_files in (600, 1200):
+            with self.subTest(crc_files=crc_files):
+                self.assertTrue(self.vouches(1200, crc_files),
+                                f"{crc_files} 件確かめても太鼓判を押しません")
+
+    def test_the_small_dump_still_works(self):
+        """**練習データ (20 件) のような小さい吸い出しで止めない**こと.
+
+        件数の下限 (`CRC_SURE_MIN`) と割合は**どちらも**満たす必要があるので、
+        小さい吸い出しでは件数のほうが効く。ここが偽になると #271・#272 の
+        道がまるごと通らなくなる。
+        """
+        import boku2
+        import make_boku2_sample
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(folder)
+            with open(os.path.join(folder, "BOKU2.IDX"), "rb") as fh:
+                idx = fh.read()
+            img = os.path.join(folder, "BOKU2.IMG")
+            entries = boku2.read_dfi(idx, os.path.getsize(img))
+            self.assertTrue(
+                boku2.crc_says_the_split_is_right(folder, entries, img),
+                f"練習データ ({len(entries)} 件) で太鼓判を押さなくなりました")
+
+    def test_the_line_is_between_the_two_worlds(self):
+        import boku2
+        self.assertGreater(boku2.CRC_SURE_SHARE, 0.2,
+                           "割合が低すぎて、ごく一部で太鼓判を押します")
+        self.assertLessEqual(boku2.CRC_SURE_SHARE, 0.9,
+                             "割合が高すぎて、少し欠けただけで裏付けを捨てます")
+
+    def test_the_numbers_are_the_same_on_both_sides(self):
+        import boku2
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue(f"const CRC_SURE_SHARE = {boku2.CRC_SURE_SHARE};" in ui,
+                        "web/app.js の割合が違う")
+        self.assertTrue("ok >= lookedAtMost * CRC_SURE_SHARE;" in ui,
+                        "画面が件数だけで太鼓判を押し続けています")
+
+
 class TestTheCoverageRuleIsMeasuredOnSectors(unittest.TestCase):
     """**使い切りの割合は、セクタに丸めてから見ること** (#277).
 

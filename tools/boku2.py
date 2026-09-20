@@ -1312,6 +1312,12 @@ COVERAGE_SECT_MIN = 0.5
 #: 検査値が「全部合った」と言ってよい最少の件数 (#271)。2〜3 件そろっただけで
 #: 使い切りの判定をひっくり返すと、**たまたま合った**だけの吸い出しを通してしまう
 CRC_SURE_MIN = 20
+#: **そのうえで、索引のどれだけを確かめたか** (#278)。件数だけで見ていたので、
+#: 検査値ファイルが 20 件しかなければ **索引 1,200 件のうち 1.7% を見ただけで**
+#: 「切り分けは正しい」と言い切り、使い切りと名前の置き場の判定を黙らせていた。
+#: 検査値ファイルが途中で切れた吸い出し (実物で起こり得る) がちょうどこの形。
+#: 半分を確かめていれば、レコードの読み方が当たっている裏付けとしては十分
+CRC_SURE_SHARE = 0.5
 
 
 def parse_glyph_table(text: str) -> list:
@@ -2385,8 +2391,11 @@ def crc_says_the_split_is_right(folder: str, entries: list, img_path: str) -> bo
     借り物の目安 (名前の置き場 0x8140) が何を言おうと、レコードの読み方は
     当たっている —— `EVIDENCE_ORDER` の 1 段目だから。
 
-    たまたま数件合っただけでひっくり返さないよう、`CRC_SURE_MIN` 件そろって
-    初めて真を返す。検査値ファイルが無い・読めないときは偽 (分からない)。
+    たまたま数件合っただけでひっくり返さないよう、`CRC_SURE_MIN` 件そろい、
+    かつ**索引の `CRC_SURE_SHARE` 以上を確かめた**ときだけ真を返す (#278)。
+    件数だけで見ていたころは、検査値ファイルが 20 件しかなければ索引 1,200 件の
+    うち **1.7% を見ただけ**で「切り分けは正しい」と言い切っていた。
+    検査値ファイルが無い・読めないときは偽 (分からない)。
     """
     path = next((os.path.join(folder, n) for n in os.listdir(folder)
                  if n.lower() == "boku2.crc"), None)
@@ -2401,7 +2410,9 @@ def crc_says_the_split_is_right(folder: str, entries: list, img_path: str) -> bo
             ok, ng = crc_match_counts(crc, entries, img)
     except OSError:
         return False
-    return ok >= CRC_SURE_MIN and ng == 0
+    looked_at_most = min(len(entries), CRC_CHECK_FILES)
+    return (ok >= CRC_SURE_MIN and ng == 0
+            and ok >= looked_at_most * CRC_SURE_SHARE)
 
 
 def crc_report(crc: dict, entries: list, img, rec_count: int,
