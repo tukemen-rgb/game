@@ -2191,12 +2191,17 @@ def font_page_hunt(img, entries: list[dict], font_entry: dict, cells: int,
                     f"(1 行 {cols or FONT_COLS} 字の幅で、残り {want} 字が入る大きさ。"
                     f"**1 枚目と同じ幅 {wide} ドット**のものから先に挙げます):")
         return [head] + out
+    # **頼むのは `→` の行と締めの行だけ** (#285)。この行は `→` ではなく
+    # 「診ていない段」に数えている。締めの行が「確認事項はありません」と言う
+    # 横でこの行だけが報告を頼むと、**締めの数と食い違う** —— 社長は
+    # 締めの行を見て動くので、ここの頼みは届かないまま消える
     return [f"{FONT_HUNT_NONE} "
             f"(1 行 {cols or FONT_COLS} 字の幅で {want} 字ぶん入るものを "
             f"{min(len(entries), SHAPE_HUNT_FILES)} 個まで探した。"
             f"名前に font が付くものと .tms は先頭 {FONT_OWN_CAP // 1024 // 1024} MB まで、"
             f"ほかは先頭 {FONT_HUNT_HEAD // 1024} KB までを見た)。"
-            "この行ごと報告してください"]
+            "**見ていない所が残っているので「無い」とは言えません** "
+            "(下の「診ていない段」に数えています)"]
 
 
 def stopped_here(problems: int, why: str) -> str:
@@ -2448,6 +2453,25 @@ def crc_bad_shape(bad_at: list[int], looked: int, with_cause: bool = True) -> st
 #: 原因が 1 つ上にあると分かっている行に添える言葉の後ろ半分 (#265/#266)。
 #: 画面 (web/app.js の KNOCK_ON_TAIL) と 1 字そろえること
 KNOCK_ON_TAIL = " —— 直すのはその 1 つなので、別の確認事項として数えていません"
+
+
+def without_report_ask(text: str) -> str:
+    """「報告してください」と頼んでいる文だけを落とす (#285).
+
+    `blame` が `→` を外して格下げするとき、本文に残った
+    「この行ごと報告してください」まで消す。残すと 1 行のうちで
+
+        …この行ごと報告してください。**上の「…」から来ています**
+        —— 直すのはその 1 つなので、**別の確認事項として数えていません**
+
+    と、**同じ文の中で正反対のことを言う**。社長は前半だけ読んで、
+    原因ではない行を追いかける —— `blame` はそれを止めるための仕組みなのに、
+    頼みの言葉だけが素通りしていた。
+
+    文の単位で落とすので、ほかの言葉は 1 字も変えない。
+    """
+    kept = [s for s in text.split("。") if "報告して" not in s]
+    return "。".join(kept)
 
 
 def knock_on_note(head: str) -> str:
@@ -2739,9 +2763,12 @@ def check(folder: str, out=sys.stdout) -> int:
         呼ぶ側は今までどおり `"→ …"` の形で渡すこと。**道具の出す `→` の
         一覧を機械で集めている検査があり** (#179)、組み立ててから `→` を
         付けると、そこから漏れる。
+
+        格下げするときは「報告してください」も落とす (#285)。数えないと
+        言った同じ行で報告を頼んだら、言っていることが逆になる。
         """
         if knock_on:
-            say("  " + line.removeprefix("→ ") + "。" + knock_on)
+            say("  " + without_report_ask(line.removeprefix("→ ")) + "。" + knock_on)
             return 0
         say(line)
         return 1
@@ -3262,7 +3289,7 @@ def check(folder: str, out=sys.stdout) -> int:
                 f"(1 行 {FONT_COLS} 字の幅): "
                 + ", ".join(e["path"] for e in fonts[:3])
                 + "。名前が `#0` のような番号のままなら、索引の名前の読みがこの作品では"
-                  "違うということなので、その行も報告してください")
+                  "違うということです (**そのときは上の `→` の行に出ています**)")
         for e in fonts[:3]:
             # **原因が 1 つ上にあるなら、この画像は読まない** (#267)。索引の読み方が
             # 外れていると、フォントの画像は**途中で切れた形**で読める。幅も高さも

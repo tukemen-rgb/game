@@ -7053,13 +7053,25 @@ class TestEveryAskToReportIsCounted(unittest.TestCase):
     見るのは 3 つ:
       A. `→` の行が 1 本でもあれば、締めは「確認事項 N 件」
       B. `→` が 1 本も無ければ、締めは「問題なし」 (要らない心配をさせない)
-      C. `→` でも `→` の続きでもない「報告」の依頼は、**診ていない段**で
-         受け止められていること (数 ≤ 診ていない段の件数)
+      C. `→` でも `→` の続きでもない「報告」の依頼が、**1 本も無い**こと
+
+    **C のものさしが緩すぎた** (#285 で締め直した)。もとは「依頼の数 ≤
+    診ていない段の件数」だった。診ていない段は締めの行が数えるので、
+    そこに収まっていれば取りこぼさない、という読みだった —— **ところが
+    診ていない段の行は「報告してください」とは言わない。** 社長が読むのは
+    締めの行で、指示 (docs/10) は「`→` の行をそのまま報告」。`→` の付いて
+    いない依頼は、数の上で釣り合っていても**届かない**。
+
+    実際、無傷の練習データですら「→ の行はありません」と締める横で 1 本
+    頼んでいた。16 通りの壊し方でも**全部**、頼む行のほうが多かった。
+    3 か所直して 0 本にし、ものさしを `== 0` にした。
+
+    見張りがあっても、ものさしが緩ければ増える —— #97 と #250 で 2 度
+    書いた約束が、見張り付きでまた破られていた理由がこれ。
     """
 
-    #: 締めの行と、すでに数えられている行を指す言い方は C から外す。
-    #: 前者は数え方そのもの、後者は「上の → の行も一緒に」という案内
-    NOT_AN_ASK = ("== 結果:", "その行も報告してください")
+    #: 締めの行だけは C から外す (数え方そのものなので)
+    NOT_AN_ASK = ("== 結果:",)
 
     @classmethod
     def setUpClass(cls):
@@ -7148,14 +7160,15 @@ class TestEveryAskToReportIsCounted(unittest.TestCase):
                     self.assertNotIn("確認事項", last,
                                      f"{name}: → が無いのに締めが違う: {last}")
 
-    def test_every_loose_ask_is_taken_up_by_the_not_checked_line(self):
+    def test_no_ask_falls_outside_the_count(self):
         for name, out in self.out.items():
             with self.subTest(case=name):
                 orphans = self.orphan_asks(out)
-                self.assertLessEqual(
-                    len(orphans), self.skipped_count(out),
-                    f"{name}: 「報告してください」と言いながら数に入っていない行が"
-                    f" {len(orphans)} 本、診ていない段は {self.skipped_count(out)} 件:\n  "
+                self.assertEqual(
+                    orphans, [],
+                    f"{name}: 締めの数に入らないのに「報告してください」と言う行が"
+                    f" {len(orphans)} 本あります (診ていない段は "
+                    f"{self.skipped_count(out)} 件ですが、その行は報告を頼みません):\n  "
                     + "\n  ".join(o[:100] for o in orphans))
 
     def test_this_watcher_would_notice(self):
@@ -8602,6 +8615,81 @@ class TestTheFirstHourTableMatchesWhatTheToolDoes(unittest.TestCase):
                 capture_output=True, text=True, cwd=REPO).stdout
             for phrase in ("固まって", "もう一度吸い出す"):
                 self.assertIn(phrase, said, f"道具が「{phrase}」と言っていない")
+
+
+class TestADemotedLineDropsTheAskToReport(unittest.TestCase):
+    """**数えないと言った同じ行で、報告を頼んでいた** (#285).
+
+    `blame` (#265) は、原因が 1 つ上にあると分かっている行から `→` を外して
+    字下げに格下げし、**数にも入れない**ための仕組みです。ところが本文に
+    書いてあった「この行ごと報告してください」はそのまま残っていたので、
+    格下げされた行はこうなっていました:
+
+        文言の入れ物が 1 つも読めません (…)。**この行ごと報告してください**。
+        **上の「本体の中身がほとんど空です」から来ています** ——
+        直すのはその 1 つなので、**別の確認事項として数えていません**
+
+    **同じ 1 行のうちで正反対**です。社長は前半だけ読んで、原因ではない行を
+    追いかけます —— `blame` はまさにそれを止めるための仕組みなのに、
+    頼みの言葉だけが素通りしていました。
+
+    格下げするときは、頼んでいる**文だけ**を落とします (ほかは 1 字も変えない)。
+    出力の側の見張りは `TestEveryAskToReportIsCounted` が持っています。
+    """
+
+    def test_the_ask_is_dropped_and_nothing_else(self):
+        import boku2
+
+        line = ("→ 文言の入れ物が 1 つも読めません (4 件見ました)。"
+                "ここが読めないとその分が丸ごと落ちます。この行ごと報告してください")
+        got = boku2.without_report_ask(line)
+        self.assertFalse("報告して" in got, f"頼みが残っています: {got}")
+        # **ほかの言葉は 1 字も変えない** (文の単位で落とす)
+        self.assertTrue("ここが読めないとその分が丸ごと落ちます" in got,
+                        f"関係のない文まで落としています: {got}")
+        self.assertTrue(got.startswith("→ 文言の入れ物が 1 つも読めません (4 件見ました)"),
+                        f"先頭が変わっています: {got}")
+        # 頼みが無い行は 1 字も変わらない
+        plain = "→ 位置表の長さの欄が 4 件合いません (合う 0 件)"
+        self.assertEqual(boku2.without_report_ask(plain), plain)
+
+    def test_blame_actually_calls_it(self):
+        """**関数にあっても、呼ばなければ意味が無い** (#267 と同じ用心)."""
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            cli = fh.read()
+        self.assertTrue('say("  " + without_report_ask(line.removeprefix("→ "))' in cli,
+                        "blame が格下げのときに頼みを落としていない")
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            ui = fh.read()
+        self.assertTrue('lines.push("  " + withoutReportAsk(line.replace(/^→ /, ""))' in ui,
+                        "画面の blame が格下げのときに頼みを落としていない")
+
+    def test_the_browser_drops_it_the_same_way(self):
+        """画面と一括処理で落とし方が割れないこと."""
+        import json
+        import shutil
+        import subprocess
+
+        import boku2
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        cases = ["あ。この行ごと報告してください", "あ。い。この 2 行ごと報告してください。う",
+                 "頼みの無い行", "先頭 64 バイトを報告してください。あと"]
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('function withoutReportAsk(');"
+            "const b=s.indexOf('\\n}', a) + 2;"
+            "const m=new Function(s.slice(a, b)+'\\nreturn {withoutReportAsk};')();"
+            "console.log(JSON.stringify(JSON.parse(process.argv[1])"
+            ".map(m.withoutReportAsk)));"
+        )
+        res = subprocess.run([node, "-e", prog, json.dumps(cases)],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, "画面側を動かせない: " + res.stdout + res.stderr)
+        self.assertEqual([boku2.without_report_ask(c) for c in cases], json.loads(res.stdout),
+                         "同じ行を見て、画面と CLI が違う落とし方をしています")
 
 
 class TestTheReportPointsAtOnePlaceNotTwo(unittest.TestCase):

@@ -3941,6 +3941,14 @@ const MAP_ENTRY_ALT = 12;
 
 /** 原因が 1 つ上にあると分かっている行に添える言葉の後ろ半分
  *  (#265/#266。tools/boku2.py の KNOCK_ON_TAIL と 1 字そろえる) */
+/** 「報告してください」と頼んでいる文だけを落とす (#285)。
+ * **一括処理 (boku2.py の without_report_ask) と同じ判定**にしておくこと。
+ * `blame` が格下げした行に残すと、1 行のうちで「報告してください」と
+ * 「別の確認事項として数えていません」が並び、正反対のことを言う。 */
+function withoutReportAsk(text) {
+  return text.split("。").filter((x) => !x.includes("報告して")).join("。");
+}
+
 const KNOCK_ON_TAIL = " —— 直すのはその 1 つなので、別の確認事項として数えていません";
 /** 「この行は、上の『…』から来ている」の 1 文 (CLI の knock_on_note と同じ) */
 const knockOnNote = (head) => `**上の「${head}」から来ています**` + KNOCK_ON_TAIL;
@@ -4209,7 +4217,12 @@ async function fontPageHunt(items, fontItem, known, cells, dataEntry, wide = 0, 
     + `(1 行 ${cols || FONT_COLS} 字の幅で ${want} 字ぶん入るものを `
     + `${Math.min(items.length, SHAPE_HUNT_FILES)} 個まで探した。`
     + `名前に font が付くものと .tms は先頭 ${FONT_OWN_CAP / 1024 / 1024} MB まで、`
-    + `ほかは先頭 ${FONT_HUNT_HEAD / 1024} KB までを見た)。この行ごと報告してください`];
+    /* **頼むのは `→` の行と締めの行だけ** (#285。CLI と同じ言葉)。この行は
+       `→` ではなく「診ていない段」に数えているので、ここで報告を頼むと
+       締めの数と食い違う */
+    + `ほかは先頭 ${FONT_HUNT_HEAD / 1024} KB までを見た)。`
+    + "**見ていない所が残っているので「無い」とは言えません** "
+    + "(下の「診ていない段」に数えています)"];
 }
 
 async function buildIdxReport() {
@@ -4223,7 +4236,10 @@ async function buildIdxReport() {
      → を機械で集めている検査があり (#179)、組み立ててから → を付けると漏れる */
   const blame = (line) => {
     if (!knockOn) { lines.push(line); return 1; }
-    lines.push("  " + line.replace(/^→ /, "") + "。" + knockOn);
+    /* 格下げするときは「報告してください」も落とす (#285。CLI の
+       without_report_ask と同じ判定)。数えないと言った同じ行で報告を頼んだら、
+       言っていることが逆になる */
+    lines.push("  " + withoutReportAsk(line.replace(/^→ /, "")) + "。" + knockOn);
     return 0;
   };
   /* この先の「読めません」の原因が 1 つ上にあると分かっているなら、その言葉
@@ -4935,7 +4951,7 @@ async function buildIdxReport() {
     lines.push(`[フォント] 名前に font が付いたファイルが無いので、**中身の形**で探しました `
       + `(1 行 ${FONT_COLS} 字の幅): ${fonts.slice(0, 3).map((x) => x.name).join(", ")}`
       + "。名前が `#0` のような番号のままなら、索引の名前の読みがこの作品では"
-      + "違うということなので、その行も報告してください");
+      + "違うということです (**そのときは上の `→` の行に出ています**)");
   }
   for (const it of fonts.slice(0, 3)) {
     /* **原因が 1 つ上にあるなら、この画像は読まない** (#267。CLI の check と同じ言葉)。
