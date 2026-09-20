@@ -993,15 +993,65 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                                      capture_output=True, text=True, cwd=REPO)
                 return res.stdout + res.stderr
 
+            #: **表に書いてあるコマンドを、そのまま走らせる** (#287)。
+            #: 前はここで手打ちの引数を組み立てていたので、表の側だけが
+            #: 走らないコマンドになっていても気づけなかった —— 実際
+            #: `boku2.py maps 実物/MAP/*.*` は `-o` が無くて走らず、
+            #: `boku2.py unpack` は引数が無かった。社長が 25 分の行で打つのは
+            #: **表の字**なので、表の字を走らせないと確かめたことにならない。
+            #:
+            #: 置き換えるのは、実物のフォルダ名と書き出し先だけ (道具名は触らない)
+            def as_written(cell: str) -> list | None:
+                got = re.findall(r"`([^`]+)`", cell)
+                cmd = next((g for g in got
+                            if g.startswith(("boku2.py ", "proofread.py "))), None)
+                if cmd is None:
+                    return None
+                argv = []
+                for word in cmd.split():
+                    if word.endswith(".py"):
+                        argv.append(os.path.join(REPO, "tools", word))
+                    elif word == "実物":
+                        argv.append(sample)
+                    elif word == "実物/MAP/*.*":
+                        # シェルの展開は道具の側で吸収してある (Windows と同じ道)
+                        argv.append(os.path.join(sample, "MAP"))
+                    elif word.startswith("実物/"):
+                        argv.append(os.path.join(sample, word[len("実物/"):]))
+                    elif word == "OUT":
+                        argv.append(out_dir)
+                    elif word == "OUT/":
+                        argv.append(out_dir)
+                    elif word == "OUT/maps":
+                        argv.append(os.path.join(out_dir, "maps"))
+                    elif word == "all.tsv":
+                        argv.append(tsv)
+                    elif word == "<実物の文字表>":
+                        argv.append(font)
+                    else:
+                        argv.append(word)
+                return argv
+
             boku2py = os.path.join(REPO, "tools", "boku2.py")
-            checked = run(boku2py, "check", sample)
-            unpacked = run(boku2py, "unpack", os.path.join(sample, "BOKU2.IDX"),
-                           os.path.join(sample, "BOKU2.IMG"), out_dir)
-            mapped = run(boku2py, "maps", os.path.join(sample, "MAP"),
-                         "-o", os.path.join(out_dir, "maps"))
-            texted = run(boku2py, "text", out_dir, "-f", font, "-o", tsv)
-            proofed = run(os.path.join(REPO, "tools", "proofread.py"), tsv,
-                          "--font-chars", font)
+            said = {}
+            for row in rows:
+                head, cell = row.split("|")[1].strip(), row.split("|")[2]
+                argv = as_written(cell)
+                said[head] = run(*argv) if argv else None
+            checked = said["〜5 分"]
+            unpacked = said["〜20 分"]
+            mapped = said["〜25 分"]
+            texted = said["〜55 分"]
+            proofed = said["〜60 分"]
+            # **走らせた結果が「使い方」で終わっていないこと** (#287)。
+            # 引数が足りないコマンドは argparse の usage を出して終わる ——
+            # 「出るはずの言葉」で見るだけだと、そこは黙って落ちる
+            for head, got in said.items():
+                if got is None:
+                    continue
+                self.assertFalse("error: the following arguments are required" in got
+                                 or got.startswith("usage:"),
+                                 f"{head}: 表のコマンドがそのままでは走りません\n{got[:300]}")
 
             #: 表の行の頭 → その行を確かめる材料と、出るはずの言葉
             expect = {
@@ -1009,6 +1059,7 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                 # (#268)。**どちらでも「報告することは無い」**という意味なので、
                 # 両方に入っている言葉で見る
                 "〜5 分": (checked, ["docs/10 の手順へ"]),
+                # 8 分・10 分の行はコマンドではなく `check` の段を指している
                 # 検査値ファイルの段 (#243)。**数**と**中身**の 2 つが出ること
                 "〜8 分": (checked, ["[検査値]", "同じ数", "件すべて合いました"]),
                 "〜10 分": (checked, ["[MAP]", "入れ物として読めた", "1 番が会話だった"]),
@@ -1026,6 +1077,9 @@ class TestNumbersAreJudgedNotJustPrinted(unittest.TestCase):
                 if got is None:
                     skipped.append(head)
                     continue
+                # **コマンドの行は、表の字で走ったものを見る** (#287)
+                if said.get(head) is not None:
+                    got = said[head]
                 for want in wants:
                     self.assertTrue(want in got,
                                     f"{head}: 「{want}」が出ていない\n{got[-400:]}")
@@ -4938,7 +4992,9 @@ class TestProofread(unittest.TestCase):
         out = run([f"[{n}][{n + 1}][{n + 2}]" for n in range(10)])
         self.assertTrue("文字表なしで取り出したもの" in out,
                         f"番号だらけの TSV をそうと言っていない:\n{out[-600:]}")
-        self.assertTrue("-f font.txt" in out,
+        # **道筋ごと言うこと** (#287)。`font.txt` は吸い出しフォルダに置く
+        # 約束にしたので、案内も `-f 実物/font.txt` の形でそろえる
+        self.assertTrue("-f 実物/font.txt" in out,
                         f"取り出し直し方を言っていない:\n{out[-600:]}")
 
         # 2. 一部だけ番号 → **文字表が届いていない**と言う (取り出し直しではない)
@@ -8699,6 +8755,79 @@ class TestTheFirstHourTableMatchesWhatTheToolDoes(unittest.TestCase):
                 capture_output=True, text=True, cwd=REPO).stdout
             for phrase in ("固まって", "もう一度吸い出す"):
                 self.assertIn(phrase, said, f"道具が「{phrase}」と言っていない")
+
+
+class TestTheMissingGlyphTableSaysWhereToLook(unittest.TestCase):
+    """**`check` と `text` が、同じ `font.txt` を別の場所で探していた** (#287).
+
+    `check` は**吸い出しフォルダの** `font.txt` を読み、そう言います
+    (「作ったらこのフォルダに置くと、ここで出来具合を確かめられる」)。
+    `text` は `-f` に渡された道筋をそのまま開きます。素人が `check` の言う
+    とおり吸い出しフォルダに置いて、docs/10 の 55 分の行にあった
+    `-f font.txt` を打つと、**空振りして「ファイルがありません」で終わり**。
+    1 時間のうち 55 分歩いたところで、置き場所の違いだけで止まります。
+
+    docs/10 は置き場を吸い出しフォルダに一本化しました。道具の側も、
+    **見つからなかったときにどこを探せばよいか**を言います —— 渡された
+    ファイルの近くにあればその道筋を、無ければ `check` の読む場所を。
+    """
+
+    def run_text(self, *argv, cwd):
+        import subprocess
+
+        res = subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                              "text", *argv], capture_output=True, text=True, cwd=cwd)
+        return res.returncode, res.stdout + res.stderr
+
+    def test_it_names_the_place_it_found_it(self):
+        import shutil
+
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            out = os.path.join(tmp, "OUT")
+            os.makedirs(out)
+            shutil.copy(os.path.join(sample, "font.txt"), os.path.join(out, "font.txt"))
+            rc, said = self.run_text(out, "-f", "font.txt", "-o",
+                                     os.path.join(tmp, "a.tsv"), cwd=tmp)
+            self.assertEqual(rc, 1, f"見つからないのに続けています:\n{said}")
+            self.assertTrue(os.path.join(out, "font.txt") in said,
+                            f"どこにあるかを言っていない:\n{said}")
+            self.assertTrue("道筋ごと渡してください" in said, said)
+
+    def test_it_points_at_the_dump_folder_when_it_cannot_find_it(self):
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            out = os.path.join(tmp, "OUT")
+            os.makedirs(out)
+            rc, said = self.run_text(out, "-f", "font.txt", "-o",
+                                     os.path.join(tmp, "a.tsv"), cwd=tmp)
+            self.assertEqual(rc, 1, f"見つからないのに続けています:\n{said}")
+            self.assertTrue("吸い出しフォルダの" in said,
+                            f"`check` の読む場所を言っていない:\n{said}")
+
+    def test_a_real_path_still_works(self):
+        """**材料を弱くしない**。道筋を渡せば今までどおり通ること."""
+        import make_boku2_sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = os.path.join(tmp, "S")
+            make_boku2_sample.build_sample(sample)
+            out = os.path.join(tmp, "OUT")
+            import subprocess
+            subprocess.run([sys.executable, os.path.join(REPO, "tools", "boku2.py"),
+                            "unpack", os.path.join(sample, "BOKU2.IDX"),
+                            os.path.join(sample, "BOKU2.IMG"), out],
+                           capture_output=True, text=True, cwd=REPO)
+            rc, said = self.run_text(out, "-f", os.path.join(sample, "font.txt"),
+                                     "-o", os.path.join(tmp, "a.tsv"), cwd=REPO)
+            self.assertEqual(rc, 0, said)
+            self.assertTrue("文字表で全部読めました" in said, said)
 
 
 class TestADemotedLineDropsTheAskToReport(unittest.TestCase):

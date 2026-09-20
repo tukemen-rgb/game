@@ -1798,7 +1798,7 @@ def nothing_picked_note(given: list[str]) -> list[str]:
                 "     python3 tools/boku2.py unpack 実物/BOKU2.IDX 実物/BOKU2.IMG OUT/",
                 "     python3 tools/boku2.py maps 実物/MAP -o OUT/maps",
                 "   そのうえで OUT を指定します: "
-                "python3 tools/boku2.py text OUT -f font.txt -o all.tsv"]
+                "python3 tools/boku2.py text OUT -f 実物/font.txt -o all.tsv"]
     if numbered:
         return [f"   ファイルは {total} 個ありましたが、**{numbered} 個の名前が番号だけ** "
                 f"({eg}) です。`.msg` でも `1.bin` でも入れ物の名前でも"
@@ -3660,6 +3660,28 @@ def run(args) -> int:
                   f"MAP のファイルのつもりなら、その名前ごと報告してください",
                   file=sys.stderr)
     elif args.cmd == "text":
+        # **文字表が見つからないときは、どこを探すか言う** (#287)。
+        # `check` は**吸い出しフォルダの** `font.txt` を読み、`text` は
+        # 渡された道筋をそのまま開く。素人が `check` の言うとおり吸い出し
+        # フォルダに置くと、`-f font.txt` は空振りする —— docs/10 の
+        # 「最初の 1 時間」でまさにそれが起きていた
+        for one in (args.font or []):
+            if os.path.exists(one):
+                continue
+            near = [os.path.join(os.path.dirname(f) or ".", os.path.basename(one))
+                    for f in args.files]
+            near += [os.path.join(f, os.path.basename(one)) for f in args.files
+                     if os.path.isdir(f)]
+            found = next((n for n in dict.fromkeys(near) if os.path.exists(n)), None)
+            print(f"エラー: 文字表がありません: {one}", file=sys.stderr)
+            if found:
+                print(f"   {found} にあります。`-f {found}` と道筋ごと渡してください",
+                      file=sys.stderr)
+            else:
+                print("   `check` は**吸い出しフォルダの** font.txt を読みます。"
+                      "そこに置いたなら `-f 実物/font.txt` のように道筋ごと渡してください",
+                      file=sys.stderr)
+            return 1
         glyphs = load_font(args.font)
         # 文字表が ANSI で保存されて潰れていたら、**取り出す前に**言う (#199)。
         # 潰れたまま取り出すと、本文の ♡ などが `?` になったまま TSV に入る

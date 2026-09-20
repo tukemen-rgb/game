@@ -725,7 +725,7 @@ def main() -> int:
             print("  このままでは、どの検査も日本語として見ていません "
                   "(角括弧と数字に半角の ERROR が出るだけです)。"
                   "文字表を付けて取り出し直してください:")
-            print("    python3 tools/boku2.py text OUT -f font.txt -o all.tsv")
+            print("    python3 tools/boku2.py text OUT -f 実物/font.txt -o all.tsv")
         else:
             print(f"注意: {len(numbered)} 行の原文に、"
                   f"**文字表が届いていない番号**が残っています "
