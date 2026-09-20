@@ -17309,8 +17309,10 @@ class TestARetractedReadingIsNotStillOnScreen(unittest.TestCase):
                          "取り消した読み (#4) がまだ画面に出ています")
         self.assertTrue("**この作品の本文は" in src and "圧縮されていません**" in src,
                         "この作品の本文が圧縮でないことを言っていない")
-        self.assertTrue('packed && known === "DFI"' in src,
+        self.assertTrue('if (known === "DFI") {' in src,
                         "この作品と分かったときだけ言う作りになっていない")
+        self.assertTrue("**本文を探すなら `msg` と入れ物**です。" in src,
+                        "どこを探すかを言っていない")
         # 索引の読み方 (DFI かどうか) が、要約を書く所まで届いていること
         self.assertTrue('addParts(dataEntry, items, "索引に従って", c.known)' in src,
                         "どの形式の索引で切り分けたかを要約に渡していない")
@@ -17441,6 +17443,130 @@ class TestAGuessThatIsMostlyLuckIsNotStated(unittest.TestCase):
         head = src.split("const PACKED_MAX_RATIO")[0]
         self.assertTrue("32 倍という数そのものに根拠はない" in head[-800:],
                         "根拠が無いことを書いていない")
+
+
+class TestACountIsNotHungUnderAnotherGroup(unittest.TestCase):
+    """**「うち」で繋いだら、数の持ち主が入れ替わっていた** (#284).
+
+    #282 で足した行は、直前の行にぶら下がっていました:
+
+        `bin` 1 件は**種類が分からなかったもの**です。
+        **うち** 1 件は、名乗っている位置表が先頭 4KB に収まらなかったので…
+
+    「うち」と書けば、読み手はその 1 件を `bin` の内訳として読みます。
+    ところが**読まなかったファイルは `bin` とはかぎりません** —— 表が
+    大きすぎて入れ物かどうかを見なかっただけで、中身が ASCII らしければ
+    種類の欄は `txt` になります。`bin` が 0 件でも「見ていない」が 3 件、
+    ということが普通に起こる。そのとき「うち 3 件」は**ただの嘘**です。
+
+    #264〜#269 で何度も直したのと同じ形 —— **隣り合う行が食い違う**。
+    今回は自分が前の回に足した行でやりました。
+
+    直し: 主語を立てて独立した行にし、**種類の欄には別の見当が入っている**
+    ことまで言う。
+    """
+
+    @staticmethod
+    def over_but_texty(count: int = 600, stride: int = 8, size: int = 8192) -> bytes:
+        """表は先頭 4KB に収まらないが、中身は ASCII らしいファイル."""
+        b = bytearray(b"A" * size)
+        struct.pack_into("<I", b, 0, count)
+        struct.pack_into("<I", b, 4, -(-(4 + count * stride) // 16) * 16)
+        return bytes(b)
+
+    def test_a_file_we_did_not_look_at_need_not_be_bin(self):
+        """この直しが要る根拠そのものを確かめる (言いっぱなしにしない)."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('/* @extract-start sniff */'),"
+            "b=s.indexOf('/* @extract-end sniff */');"
+            "const m=new Function(s.slice(a,b)+'\\nreturn {sniffKind};')();"
+            "const v=Uint8Array.from(JSON.parse(process.argv[1]));const u={n:0};"
+            "const k=m.sniffKind(v.subarray(0,4096),'ascii',v.length,u);"
+            "console.log(JSON.stringify({ext:k.ext,unread:u.n}));"
+        )
+        res = subprocess.run([node, "-e", prog, json.dumps(list(self.over_but_texty()))],
+                             capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, "画面側を動かせない: " + res.stdout + res.stderr)
+        got = json.loads(res.stdout)
+        self.assertEqual(got["unread"], 1, "表が大きすぎたのに「見ていない」に数えていない")
+        self.assertNotEqual(got["ext"], "bin",
+                            "この材料では `bin` 以外にならないと、この直しの意味が無い")
+
+    def test_the_note_gives_the_count_its_own_subject(self):
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertFalse("**です。うち ${unread.n} 件" in src,
+                         "見ていない件数が前の行にぶら下がったままです")
+        self.assertTrue("`位置表が**先頭 4KB に収まらなかった** ${unread.n} 件は、`" in src,
+                        "見ていない件数に主語が立っていない")
+        self.assertTrue("種類の欄にはそれとは別の見当が入っています" in src,
+                        "種類の欄に別の見当が入ることを言っていない")
+
+
+class TestTheSummaryDoesNotBuryWhatToDoNext(unittest.TestCase):
+    """**断り書きを 3 回積んだら、次にすることが 400 字の末尾に沈んだ** (#284).
+
+    #281 / #282 / #283 は、どれも正しい断り書きを**同じ 1 つの段落に**足して
+    いきました。積み上がった結果がこれです (実測 約 400 字、改行なし):
+
+        … 21 個に切り分けました。中身の見当: …。「見当」と付いたものは…。
+        テキストの入れ物と見た 1 件は…。`bin` 1 件は…。うち 1 件は…。
+        名前が無い 21 件は…。圧縮らしい 1 件 (packed) がありますが…。
+        **本文を探すなら `msg` と入れ物**のほうです。
+
+    **素人は最初の 1 行で読むのをやめます。** いちばん大事な一言が最後です。
+    正しいことを書き足し続けると、正しさの総量は増えるのに**伝わる量は減る**
+    —— 断り書きは、足すだけでなく**並べ方**まで面倒を見ないと効きません。
+
+    直し: 事実 / 見当の断り / 見ていないもの / 次にすること の 4 段に改行で
+    分け、**次にすることを最後の 1 行に独立させる**
+    (`#capnote` に `white-space: pre-line`)。
+    """
+
+    def app_js(self) -> str:
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_note_is_built_as_lines(self):
+        src = self.app_js()
+        self.assertTrue("note.textContent = lines.join(" in src,
+                        "要約を 1 本の文字列で組み立てたままです")
+        # 4 つの段がそろっていること
+        for what in ("個に切り分けました", "中身の見当: ", "入れ物かどうかを**見ていません**",
+                     "**本文を探すなら `msg` と入れ物**です。"):
+            self.assertTrue(what in src, f"段が足りない: {what}")
+
+    def test_the_line_breaks_are_actually_shown(self):
+        """**改行を入れても、出しっぱなしでは折り返されて消える**.
+
+        `#capnote` は `<p>` なので、既定では改行が空白になる。
+        `white-space` を指定しないと、4 段に分けた意味が無い。
+        """
+        with open(os.path.join(REPO, "web", "style.css"), encoding="utf-8") as fh:
+            css = fh.read()
+        got = re.search(r"#capnote\s*\{([^}]*)\}", css)
+        self.assertTrue(got, "#capnote の指定がありません")
+        self.assertTrue("pre-line" in got.group(1) or "pre-wrap" in got.group(1),
+                        f"改行が見えるようになっていません: {got.group(1)!r}")
+
+    def test_what_to_do_next_is_the_last_line(self):
+        """**次にすることは最後の 1 行**。途中に混ぜると、また埋もれる."""
+        src = self.app_js()
+        body = src[src.index("const next = [];"):src.index("note.textContent = lines.join(")]
+        self.assertTrue("if (next.length) lines.push(next.join(" in body,
+                        "「次にすること」を最後にまとめていない")
+        # 断り書きの側に「本文を探すなら」を混ぜ戻していないこと
+        before = src[src.index("const lines = [];"):src.index("const next = [];")]
+        self.assertFalse("本文を探すなら" in before,
+                         "「次にすること」が断り書きの段に紛れています")
 
 
 class TestTheBitDepthGuessIsCounted(unittest.TestCase):

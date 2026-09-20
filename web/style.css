@@ -617,6 +617,10 @@ tbody tr[aria-current="true"] td { background: var(--seal-soft); color: var(--in
 }
 .hint { font-size: 11.5px; color: var(--ink-3); line-height: 1.8; max-width: 62em; }
 .hint b { color: var(--ink-2); font-weight: 600; }
+/* 切り分けのあとの要約は、事実 / 見当の断り / 見ていないもの / 次にすること を
+   改行で分ける (#284)。1 つの段落に積み上げると、いちばん大事な一言が末尾に
+   埋もれて読まれない */
+#capnote { white-space: pre-line; }
 .warnbar {
   padding: 9px 12px; background: var(--bg);
   border-left: 2px solid var(--cls-wave);

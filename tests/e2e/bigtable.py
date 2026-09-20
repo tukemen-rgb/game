@@ -52,6 +52,18 @@ def container(count: int, stride: int = 8) -> bytes:
     return bytes(b)
 
 
+def over_but_texty(count: int = OVER, stride: int = 8, size: int = 8192) -> bytes:
+    """表は 4KB に収まらないが、中身は ASCII らしいファイル (#284).
+
+    **読まなかったファイルは `bin` とはかぎらない**ことの実例。種類の欄には
+    `txt` が入るので、「`bin` N 件…**うち** M 件」と書くと数の持ち主が入れ替わる。
+    """
+    b = bytearray(b"A" * size)
+    struct.pack_into("<I", b, 0, count)
+    struct.pack_into("<I", b, 4, -(-(4 + count * stride) // 16) * 16)
+    return bytes(b)
+
+
 def packed_looking(size: int = 4096) -> bytes:
     """先頭 u32 が「伸張後の大きさ」に見えるファイル (`packed` と見当が付く)."""
     b = bytearray(size)
@@ -75,7 +87,8 @@ def build(folder: str) -> None:
     tree = [(True, 1, "/", None),
             (False, 1, "fits.bin", container(FITS)),
             (False, 1, "over.bin", container(OVER)),
-            (False, 1, "packedish.bin", packed_looking())]
+            (False, 1, "packedish.bin", packed_looking()),
+            (False, 1, "overtexty.bin", over_but_texty())]
     tree += [(False, 0 if i == PADDING - 1 else 1, f"pad{i:02d}.bin",
               bytes([0x41 + i]) * 256) for i in range(PADDING)]
     idx, img, _want = make_boku2_sample.build_dfi(tree)
@@ -118,8 +131,23 @@ async def main() -> int:
             # 収まらなかった 1 件を「見ていない」と言うこと
             if "入れ物かどうかを**見ていません**" not in (cap or ""):
                 errors.append("表が 4KB に収まらないファイルを黙って見捨てている")
-            if "うち 1 件" not in (cap or ""):
-                errors.append(f"見ていない件数が 1 件になっていない: {cap!r}")
+            if "収まらなかった** 2 件" not in (cap or ""):
+                errors.append(f"見ていない件数が 2 件になっていない: {cap!r}")
+            # **`bin` の内訳として語らないこと** (#284)。読まなかった 2 件のうち
+            # 1 件は中身が ASCII らしいので `txt` に入る。「うち」で繋ぐと
+            # 数の持ち主が入れ替わる
+            if "`bin` 1 件" not in (cap or ""):
+                errors.append(f"bin の件数が 1 件になっていない: {cap!r}")
+            if "です。うち " in (cap or ""):
+                errors.append("見ていない件数を bin の内訳としてぶら下げている")
+            if "種類の欄にはそれとは別の見当" not in (cap or ""):
+                errors.append("見ていないものにも別の見当が入っていることを言っていない")
+            # **次にすることが、断り書きの山に埋もれていないこと** (#284)
+            body = (cap or "").split("\n")
+            if len(body) < 4:
+                errors.append(f"要約が 1 つの段落のままになっている ({len(body)} 行)")
+            if not body[-1].startswith("**本文を探すなら"):
+                errors.append(f"最後の行が「次にすること」になっていない: {body[-1][:60]!r}")
             # **取り消した読みを出さないこと** (#283)。DFI = この作品
             if "(packed) の中にテキストがある見込みです" in (cap or ""):
                 errors.append("#4 で取り消した「packed を探せ」を画面が言っている")
