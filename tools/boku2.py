@@ -908,7 +908,8 @@ def parse_map_rec(b: bytes) -> tuple[int, list[dict]] | None:
     if len(b) < 16:
         return None
     declared = struct.unpack_from("<I", b, 0)[0]
-    tries = [(rec, declared) for rec in (MAP_ENTRY, MAP_ENTRY_ALT) if 1 <= declared <= 64]
+    tries = [(rec, declared) for rec in (MAP_ENTRY, MAP_ENTRY_ALT)
+             if 1 <= declared <= PARTS_COUNT_MAX]
     best = _best_map_rec(b, tries)
     if best is not None:
         # **落ちている部品が無いか見る** (#217)。先頭の数を項目数として読むのは
@@ -993,7 +994,7 @@ def parse_msg(b: bytes, stride: int, info: dict | None = None) -> list[dict] | N
     if len(b) < 8:
         return None
     n = struct.unpack_from("<I", b, 0)[0]
-    if not 1 <= n <= 20000:
+    if not 1 <= n <= PARTS_COUNT_MAX:
         return None
     tab = 4 + n * stride
     if tab > len(b):
@@ -1089,7 +1090,7 @@ def parse_tables(b: bytes) -> list[dict] | None:
     if len(b) < 16:
         return None
     t = struct.unpack_from("<I", b, 0)[0]
-    if not 1 <= t <= 2000:
+    if not 1 <= t <= PARTS_COUNT_MAX:
         return None
     head = 4 + t * 12
     if head > len(b):
@@ -1326,6 +1327,32 @@ MSG_STRIDE = 8            # BOKU2.IMG の中の .msg (位置 + 長さ)
 MAP_MSG_STRIDE = 4        # マップの中の会話 (位置だけ)
 MAP_ENTRY = 8             # 入れ物の項目 (位置 + 長さ)
 MAP_ENTRY_ALT = 12        # 日記・保存画面などの入れ物 (12 バイト刻み)
+
+#: 位置表が名乗ってよい項目数の上限 (#282)。**この 1 つに統一すること**。
+#: 前は同じ問いに 4 つの違う数が入っていた —— `parse_msg` が 20000、
+#: `parse_tables` が 2000、`parse_map_rec` が 64、画面の `looksLikeParts` が
+#: 4096。**300 倍の開き**があり、どれも根拠が書かれていなかった。
+#: おかげで枠 65 個の入れ物は**画面では読めて CLI では読めない**という、
+#: 同じファイルを見て違うことを言う状態になっていた (#204 で禁じた形)。
+#:
+#: 実物で測った数 (英語化パッチの公開ソースの翻訳ファイル 631 本。
+#: `.pot` の見出し 1 つが本文 1 つにあたる):
+#:
+#:   - `.msg` …… 最大 103 (`insect_name.msg`)
+#:   - MAP の会話表 …… 最大 306 (`M_A17200`〜`M_A17203`)
+#:   - 入れ物の部品 …… 数個
+#:
+#: 4096 は測った最大の 13 倍。緩めた代償も測った: 上限を 64 / 512 / 4096 と
+#: 変えても、練習イメージ 272 窓で 4 件 (= 実物の入れ物 4 つ)、乱数 1592 窓で
+#: 0 件と**まったく動かない**。効いているのは「16 の倍数」「範囲内」
+#: 「重ならない」のほうで、**数の上限は一度も効いていない**。
+#: それでも残してあるのは、名乗る数が大きいと表を数える手間だけが増えるため。
+#:
+#: **本当に効く上限は、読んだ範囲に表が収まるかどうか**。画面は先頭 4KB しか
+#: 読まないので、刻み 8 なら 511 個で頭打ちになる —— この数はどこにも
+#: 書かれていなかった。収まらなかったファイルは「入れ物ではない」ではなく
+#: **「見ていない」**なので、画面はその件数を言う。
+PARTS_COUNT_MAX = 4096
 
 #: 実物の索引で、名前の置き場が始まる位置。英語化パッチの公開ソースが
 #: `FILENAMES_START = 0x8140` と決め打ちしている値 (#222)。

@@ -17057,6 +17057,224 @@ class TestTheKindCensusSeparatesCheckedFromGuessed(unittest.TestCase):
                              f"{ext} は魔法数の表にある (確かめようがある)")
 
 
+class TestOneQuestionHasOneLimit(unittest.TestCase):
+    """**同じ問いに 4 つの違う上限があり、どれも測っていなかった** (#282).
+
+    「位置表が名乗ってよい項目数」の上限が、道具の中に 4 か所ありました。
+
+    | どこ | 上限 |
+    | --- | --- |
+    | CLI `parse_msg` | 20000 |
+    | CLI `parse_tables` | 2000 |
+    | CLI `parse_map_rec` | 64 |
+    | 画面 `looksLikeParts` | 4096 |
+
+    **300 倍の開き**があり、どれにも根拠が書かれていませんでした。結果、
+    **枠 65 個の入れ物は画面では読めて CLI では読めない** —— 同じファイルを
+    見て違うことを言う、#204 で禁じたはずの形です。
+
+    実物で測りました (英語化パッチの公開ソースの翻訳ファイル 631 本。
+    `.pot` の見出し 1 つが本文 1 つ): `.msg` は最大 103、MAP の会話表は
+    最大 306、入れ物の部品は数個。**どの上限より小さい**ので、4 つの数の
+    どれが正しいかという問い自体が、実物では一度も効いていません。
+
+    緩めた代償も測りました: 上限を 64 / 512 / 4096 と変えても、練習イメージ
+    272 窓で 4 件 (= 実物の入れ物 4 つ)、乱数 1592 窓で 0 件と**まったく
+    動きません**。効いているのは「16 の倍数」「範囲内」「重ならない」の
+    ほうです。1 つの `PARTS_COUNT_MAX` にまとめました。
+
+    そして**本当に効いていた上限は、誰も書いていない 511** でした ——
+    画面は各ファイルの先頭 4KB しか読まないので、刻み 8 なら
+    (4096 - 4) / 8 = 511 個で頭打ちになります。そこを超えたファイルは
+    黙って `bin` に化けていました。**「入れ物ではない」ではなく
+    「見ていない」**なので、件数を言うようにしました。
+    """
+
+    PUB = "/home/user/hilltopworks/bokunonatsuyasumi2"
+
+    @staticmethod
+    def container(count: int, stride: int = 8, pad: bool = True) -> bytes:
+        """件数 + 位置表 + 部品、の入れ物を組み立てる (画面の試験と同じ形)."""
+        table_end = 4 + count * stride
+        first = -(-table_end // 16) * 16 if pad else table_end
+        b = bytearray(first + count * 16 + 16)
+        struct.pack_into("<I", b, 0, count)
+        off = first
+        for i in range(count):
+            struct.pack_into("<I", b, 4 + i * stride, off)
+            if stride >= 8:
+                struct.pack_into("<I", b, 8 + i * stride, 16)
+            b[off:off + 16] = bytes([0x82, 0xA0] * 8)
+            off += 16
+        return bytes(b)
+
+    @staticmethod
+    def browser(cases: list) -> list:
+        """画面の `looksLikeParts` を、画面と同じ渡し方 (先頭 4KB) で動かす."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node がありません")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump([list(b) for b in cases], fh)
+            tmp = fh.name
+        try:
+            prog = (
+                "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+                "const a=s.indexOf('/* @extract-start sniff */'),"
+                "b=s.indexOf('/* @extract-end sniff */');"
+                "const m=new Function(s.slice(a,b)+"
+                "'\\nreturn {looksLikeParts,PARTS_COUNT_MAX};')();"
+                f"const list=JSON.parse(fs.readFileSync({json.dumps(tmp)},'utf8'));"
+                "console.log(JSON.stringify({cap:m.PARTS_COUNT_MAX,out:list.map(e=>{"
+                "const v=Uint8Array.from(e);const u={n:0};"
+                "const r=m.looksLikeParts(v.subarray(0,4096),v.length,u);"
+                "return {read:!!r,unread:u.n};})}));"
+            )
+            res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+            if res.returncode != 0:
+                raise AssertionError("画面側を動かせない: " + res.stdout + res.stderr)
+            return json.loads(res.stdout)
+        finally:
+            os.unlink(tmp)
+
+    def test_the_four_numbers_became_one(self):
+        import boku2
+
+        with open(os.path.join(REPO, "tools", "boku2.py"), encoding="utf-8") as fh:
+            cli = fh.read()
+        for gone in ("<= 20000", "<= 2000:", "<= 64]"):
+            self.assertFalse(gone in cli, f"古い上限 {gone} が残っています")
+        # 3 か所とも同じ名前を使っていること
+        self.assertEqual(cli.count("PARTS_COUNT_MAX"), 4,
+                         "PARTS_COUNT_MAX を使っていない所があります (定義 1 + 使い手 3)")
+        got = self.browser([self.container(4)])
+        self.assertEqual(got["cap"], boku2.PARTS_COUNT_MAX,
+                         "画面と CLI で上限の数が違います")
+
+    def test_the_two_tools_agree_on_the_same_file(self):
+        """**同じファイルを見て違うことを言わない** (#204 の決まり).
+
+        直す前は枠 65 個で割れていた (画面は読めて CLI は読めない)。
+        """
+        import boku2
+
+        sizes = [1, 4, 64, 65, 100, 306, 511]
+        cases = [self.container(n) for n in sizes]
+        got = self.browser(cases)
+        for n, raw, one in zip(sizes, cases, got["out"]):
+            mine = boku2.parse_map_rec(raw) is not None
+            self.assertEqual(mine, one["read"],
+                             f"枠 {n} 個: CLI は{'読めた' if mine else '読めない'}のに"
+                             f"画面は{'読めた' if one['read'] else '読めない'}")
+            self.assertTrue(mine, f"枠 {n} 個の入れ物を読めていない")
+            self.assertEqual(one["unread"], 0, f"枠 {n} 個で「見ていない」に数えた")
+
+    def test_past_the_read_window_it_says_it_did_not_look(self):
+        """**「入れ物ではない」と「見ていない」を分ける** (#282).
+
+        画面が読むのは先頭 4KB だけ。刻み 8 なら枠 511 個で頭打ちになる。
+        そこを黙って `bin` に落としていた。
+        """
+        cases = [self.container(512), self.container(600)]
+        got = self.browser(cases)
+        for one in got["out"]:
+            self.assertFalse(one["read"], "読めていないのに読めたことにした")
+            self.assertEqual(one["unread"], 1,
+                             "表が先頭 4KB に収まらなかったのに「見ていない」に数えていない")
+        # **ファイルに収まらない**ほうは今までどおり「違う」 (見ていない、ではない)
+        broken = bytearray(self.container(4))
+        struct.pack_into("<I", broken, 0, 3000)     # 名乗りだけ大きく、中身は小さい
+        got = self.browser([bytes(broken)])
+        self.assertEqual(got["out"][0]["unread"], 0,
+                         "ファイルに収まらないものまで「見ていない」に数えています")
+
+    def test_the_note_says_how_many_were_not_looked_at(self):
+        """関数にあっても、要約に出さなければ意味が無い."""
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertTrue("const unread = { n: 0 };" in src, "見ていない数を数えていない")
+        self.assertTrue("sniffKind(head, k.cls, k.size, unread)" in src,
+                        "数えた結果を見当付けに渡していない")
+        self.assertTrue("入れ物かどうかを**見ていません**" in src,
+                        "見ていないことを要約に出していない")
+        self.assertTrue("この中にテキストがあり得ます" in src,
+                        "取りこぼしうることを言っていない")
+
+    def test_the_limit_is_above_anything_real(self):
+        """**上限の根拠を、実物で測った数で押さえる** (公開ソースの翻訳ファイル).
+
+        `.pot` の見出し 1 つが本文 1 つ。これがそのまま位置表の項目数にあたる。
+        """
+        import re
+        import zipfile
+
+        import boku2
+
+        zip_path = os.path.join(self.PUB, "boku-no-natsuyasumi-2.zip")
+        if not os.path.exists(zip_path):
+            self.skipTest("公開ソースが無い")
+        biggest, where, files = 0, "", 0
+        with zipfile.ZipFile(zip_path) as z:
+            for name in z.namelist():
+                if not name.endswith(".pot") or "/.git/" in name:
+                    continue
+                files += 1
+                text = z.read(name).decode("utf-8", "replace")
+                count = len(re.findall(r"^msgid ", text, re.M)) - 1
+                if count > biggest:
+                    biggest, where = count, name.rsplit("/", 1)[-1]
+        self.assertGreater(files, 300, f"翻訳ファイルが {files} 本しか読めていない")
+        self.assertLess(biggest, boku2.PARTS_COUNT_MAX,
+                        f"実物に上限を超える本文数があります ({where} が {biggest})")
+        # **効いているのは上限ではない**ことも言えるように、余裕を数えておく
+        self.assertGreater(boku2.PARTS_COUNT_MAX, biggest * 4,
+                           f"実物の最大 {biggest} ({where}) に対して上限が近すぎる")
+
+    def test_the_limit_never_actually_decides_anything(self):
+        """**緩めた代償を測る**。上限を変えても拾う数が動かないこと.
+
+        動かないなら、この数は判定に効いていない —— 効いているのは
+        「16 の倍数」「範囲内」「重ならない」のほう。
+        """
+        import random
+
+        import boku2
+
+        problem = ensure_practice("work/BOKU2SAMPLE/BOKU2.IMG", "make_boku2_sample.py")
+        if problem:
+            self.skipTest(problem)
+        with open(os.path.join(REPO, "work", "BOKU2SAMPLE", "BOKU2.IMG"), "rb") as fh:
+            img = fh.read()
+        noise = bytes(random.Random(12345).getrandbits(8) for _ in range(4096 * 50))
+
+        def sweep(buf: bytes, cap: int) -> tuple[int, int]:
+            tries = hits = 0
+            for at in range(0, max(1, len(buf) - 4096), 512):
+                tries += 1
+                block = buf[at:at + 4096]
+                if len(block) < 16:
+                    continue
+                declared = struct.unpack_from("<I", block, 0)[0]
+                if not 1 <= declared <= cap:
+                    continue
+                if boku2._best_map_rec(block, [(r, declared)
+                                               for r in (boku2.MAP_ENTRY,
+                                                         boku2.MAP_ENTRY_ALT)]) is not None:
+                    hits += 1
+            return tries, hits
+
+        counts = {cap: (sweep(img, cap)[1], sweep(noise, cap)[1]) for cap in (64, 512, 4096)}
+        self.assertEqual(len(set(counts.values())), 1,
+                         f"上限を変えると拾う数が動きます: {counts}")
+        real, fake = counts[4096]
+        self.assertEqual(fake, 0, f"乱数を {fake} 件、入れ物と見ました")
+        self.assertEqual(real, 4, f"練習イメージの入れ物 4 つを {real} 件と数えました")
+
+
 class TestTheBitDepthGuessIsCounted(unittest.TestCase):
     """1 ドットのビット数の見当が、何通り当たるかを数える (#151).
 

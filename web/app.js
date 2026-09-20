@@ -1040,6 +1040,24 @@ const SIGNATURES = [
 
 /* @extract-start sniff */
 /**
+ * 位置表が名乗ってよい項目数の上限。**一括処理 (boku2.py の PARTS_COUNT_MAX)
+ * と同じ数**にしておくこと (#282)。
+ *
+ * 前は同じ問いに 4 つの違う数が入っていた —— CLI の `parse_msg` が 20000、
+ * `parse_tables` が 2000、`parse_map_rec` が 64、ここが 4096。**300 倍の開き**が
+ * あり、どれも根拠が書かれていなかった。おかげで枠 65 個の入れ物は
+ * **画面では読めて CLI では読めない**という、同じファイルを見て違うことを言う
+ * 状態になっていた (#204 で禁じた形)。
+ *
+ * 実物で測った数 (英語化パッチの公開ソースの翻訳ファイル 631 本):
+ * `.msg` は最大 103、MAP の会話表は最大 306、入れ物の部品は数個。
+ * 4096 は測った最大の 13 倍。上限を 64 / 512 / 4096 と変えても、練習イメージ
+ * 272 窓で 4 件 (= 実物の入れ物 4 つ)、乱数 1592 窓で 0 件と**まったく動かない**
+ * ので、**この数は一度も効いていない**。効いているのは位置のほうの条件。
+ */
+const PARTS_COUNT_MAX = 4096;
+
+/**
  * 名前の無いファイルに **中身から見当を付ける**。
  *
  * 索引から切り分けた結果が `#0012` のような番号だけだと、1951 個の中から
@@ -1176,17 +1194,27 @@ function findEmbeddedTim2(head) {
  *   - 入れ物の形 —— 表の後ろを **16 バイト境界まで詰めて**から部品が始まる
  *     (刻み 8 と 12。日記・保存画面がこれ)
  *
+ * **読んだ範囲に表が収まらなかったときは、「違う」ではなく「見ていない」** (#282)。
+ * ここに渡ってくるのは先頭 4KB だけなので、刻み 8 なら 511 個で頭打ちになる。
+ * 前はそれを黙って null で返していたので、**表の大きい入れ物が `bin` に化けて**
+ * いた。呼び手が数えられるように `unread` に控えておく。
+ *
+ * @param unread  省略可。表が読んだ範囲に収まらなくて見送ったら `.n` が増える
  * @returns {{ext, stride}} か null
  */
-function looksLikeParts(head, size) {
+function looksLikeParts(head, size, unread) {
   if (!size || head.length < 12) return null;
   const n = sniffU32(head, 0);
-  if (n < 1 || n > 4096) return null;
+  if (n < 1 || n > PARTS_COUNT_MAX) return null;
+  let tooBigToRead = false;
   for (const [ext, stride, pad] of [["msg", 8, false], ["msg", 4, false],
                                     ["parts", 8, true], ["parts", 12, true]]) {
     const tableEnd = 4 + n * stride;
     const wantFirst = pad ? Math.ceil(tableEnd / 16) * 16 : tableEnd;
-    if (wantFirst > size || tableEnd > head.length) continue;
+    /* **ファイルに収まらない**のは「違う」。**読んだ範囲に収まらない**のは
+       「見ていない」。この 2 つを一緒くたに null で返していた */
+    if (wantFirst > size) continue;
+    if (tableEnd > head.length) { tooBigToRead = true; continue; }
     if (sniffU32(head, 4) !== wantFirst) continue;
     let prev = -1, ok = true, real = 0;
     for (let i = 0; i < n; i++) {
@@ -1202,10 +1230,11 @@ function looksLikeParts(head, size) {
     }
     if (ok && real >= 1) return { ext, stride };
   }
+  if (tooBigToRead && unread) unread.n++;
   return null;
 }
 
-function sniffKind(head, cls, size) {
+function sniffKind(head, cls, size, unread) {
   for (const m of MAGICS) {
     if (head.length < m.bytes.length) continue;
     let hit = true;
@@ -1214,7 +1243,7 @@ function sniffKind(head, cls, size) {
   }
   /* 入れ物かどうかを、埋まっている TIM2 より先に見る。中に絵が 1 枚あるだけで
      「画像」と名づけると、**同じ入れ物に入っている文章が見えなくなる** (#153) */
-  const parts = looksLikeParts(head, size);
+  const parts = looksLikeParts(head, size, unread);
   if (parts) {
     return {
       ext: parts.ext,
@@ -5733,11 +5762,14 @@ async function addParts(dataEntry, items, how) {
      1951 個でも先頭 4KB ずつなので数秒で終わる */
   const note = $("capnote");
   const kinds = [];
+  /* **表が先頭 4KB に収まらなくて見ていない**ファイルの数 (#282)。
+     「入れ物ではない」と「見ていない」を一緒くたにしない */
+  const unread = { n: 0 };
   for (let i = 0; i < kids.length; i++) {
     const k = kids[i];
     const head = await readRange(k.file, k.offset, Math.min(k.size, 4096));
     k.cls = classifyStats(blockStats(head));
-    const kind = sniffKind(head, k.cls, k.size);
+    const kind = sniffKind(head, k.cls, k.size, unread);
     k.sniff = kind;
     kinds.push(kind);
     if (k.bare) { k.name += "." + kind.ext; k.path += "." + kind.ext; }
@@ -5772,6 +5804,10 @@ async function addParts(dataEntry, items, how) {
                      + "`.msg` にも入れ物にも**先頭の目印が無い**ので確かめようがありません。"
                      + "**絞り込みに出てこないテキストがあり得ます**。" : "")
       + (binCount ? `\`bin\` ${binCount} 件は**種類が分からなかったもの**です。` : "")
+      + (unread.n ? `うち ${unread.n} 件は、名乗っている位置表が**先頭 4KB に`
+                    + `収まらなかった**ので、入れ物かどうかを**見ていません** `
+                    + `(見ているのは各ファイルの先頭 4KB だけ。刻み 8 なら枠 511 個で`
+                    + `頭打ちになります)。この中にテキストがあり得ます。` : "")
       + (crcNamed ? `検査値ファイルの名前を ${crcNamed} 件当てました `
                     + `(その項目の先頭 ${CRC_HEAD} バイトの検査値が合ったものだけ)。` : "")
       + (crcByContent ? `そのうち ${crcByContent} 件は、並び順ではなく中身の検査値から`
