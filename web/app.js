@@ -1057,6 +1057,31 @@ const SIGNATURES = [
  */
 const PARTS_COUNT_MAX = 4096;
 
+/** 「先頭 u32 = 伸張後の大きさ」と見るときの、伸びの上限 (#283)。
+ * 32 倍という数そのものに根拠はない (LZSS 系でよくある伸びの幅、という
+ * 言い伝え)。効くかどうかは下の `packedGuessWorthIt` で大きさから決める。
+ * この見当は画面だけのもので、一括処理 (`boku2.py`) には無い ——
+ * あちらは「乱数に近い並び」だけで圧縮らしさを言うので、言葉が割れない。 */
+const PACKED_MAX_RATIO = 32;
+
+/** この確率より高い割合で**偶然**当たるなら、その見当は言わない (#283)。
+ * 2% は「50 件に 1 件の空振りまで」。練習データの最大 (102KB) で 0.07%、
+ * 2% に達するのは 2.8MB あたり。 */
+const PACKED_ACCIDENT_MAX = 0.02;
+
+/**
+ * 「先頭 u32 が伸張後の大きさ」の見当が、その大きさで意味を持つか (#283)。
+ *
+ * でたらめな 4 バイトがこの窓 (自分より大きく 32 倍以内) に入る確率は
+ * `(32 - 1) × 大きさ / 2^32` で、**大きさに比例して増える**。
+ * 100 KB で 0.07%、1 MB で 0.8%、16 MB で 12%、100 MB では **76%**。
+ * 大きいファイルではほぼ丸投げのコイン投げなのに、「圧縮らしい」と
+ * 言い切って渡していた。
+ */
+function packedGuessWorthIt(size) {
+  return (PACKED_MAX_RATIO - 1) * size / 2 ** 32 <= PACKED_ACCIDENT_MAX;
+}
+
 /**
  * 名前の無いファイルに **中身から見当を付ける**。
  *
@@ -1071,9 +1096,16 @@ const PARTS_COUNT_MAX = 4096;
  *
  * **圧縮の見当** が一つ特別です。ゲームの圧縮データは先頭 4 バイトに
  * 「伸張後の大きさ」を置くことが非常に多い (LZSS 系の定番)。先頭の u32 が
- * ファイル自身より大きく、かつ 32 倍以内なら、その形だと見ます。テキストが
- * 圧縮されているゲーム (僕の夏休み 2 など) では、`.msg` はこの `packed` の
- * 中にあるはずです。
+ * ファイル自身より大きく、かつ `PACKED_MAX_RATIO` 倍以内なら、その形だと見ます。
+ *
+ * **この作品 (僕の夏休み 2) では空振りします** (#283)。ここには長らく
+ * 「テキストが圧縮されているゲーム (僕の夏休み 2 など) では `.msg` はこの
+ * `packed` の中にあるはず」と書いてありました。**#4 で取り消した読み**です
+ * —— 英語化パッチの公開ソース一式 (`UNPACK.py` / `MSG.py` / `resource.py` /
+ * `EXEC.py`) に**伸張処理が 1 つもありません**。この作品の本文は素のままで、
+ * `.msg` は先頭が件数なので `packed` ではなく入れ物として拾われます。
+ * 取り消したはずの読みが、278 回あとまで画面に出続けていました。
+ * 見当そのものは**ほかのゲーム向け**に残します。
  */
 const MAGICS = [
   { ext: "elf",  label: "本体プログラム (ELF)",  bytes: [0x7F, 0x45, 0x4C, 0x46] },
@@ -1258,9 +1290,19 @@ function sniffKind(head, cls, size, unread) {
     return { ext: "tm2", label: `画像 (TIM2。前置きの後ろ、${tim2At} バイト目から)`,
              sure: false };
   }
-  if (size && head.length >= 8) {
+  /* **大きいファイルでは、この見当は当たらない** (#282 の続き、#283)。
+     「先頭 u32 が自分より大きく PACKED_MAX_RATIO 倍以内」に、でたらめな 4 バイトが
+     偶然入る確率は (32 - 1) × 大きさ / 2^32。大きさに比例して増える:
+
+       100 KB → 0.07%    1 MB → 0.8%    16 MB → 12%    100 MB → 76%
+
+     100 MB のファイルでは 4 回に 3 回当たる —— それを「圧縮らしい」と書いて
+     渡していた。**本物の圧縮データは乱数に近い並びなので、下の
+     `SNIFF_BY_CLASS.high` がどのみち `packed` と言う**。だから当たらなくなる
+     大きさでこの枝を降りても、失うものはほとんど無い */
+  if (size && head.length >= 8 && packedGuessWorthIt(size)) {
     const n = (head[0] | (head[1] << 8) | (head[2] << 16) | (head[3] << 24)) >>> 0;
-    if (n > size && n <= size * 32) {
+    if (n > size && n <= size * PACKED_MAX_RATIO) {
       return { ext: "packed", label: "圧縮らしい (先頭が伸張後の大きさに見える)", sure: false };
     }
   }
@@ -5686,7 +5728,7 @@ async function splitByIndex(dataEntry, c) {
   const items = c.named
     ? namedEntries(state.idxBuf, c, dataEntry.size, 4096)
     : indexEntries(state.idxBuf, c, dataEntry.size, 4096);
-  await addParts(dataEntry, items, "索引に従って");
+  await addParts(dataEntry, items, "索引に従って", c.known);
 }
 
 /**
@@ -5694,7 +5736,7 @@ async function splitByIndex(dataEntry, c) {
  * 分かっているファイル (マップの入れ物など) からでも同じ道を通る。
  * items: [{ i, at, len, name?, base?, bare? }]
  */
-async function addParts(dataEntry, items, how) {
+async function addParts(dataEntry, items, how, known) {
   const prefix = dataEntry.path + "/";
   state.entries = state.entries.filter((e) => e.kind !== "part" || e.parentPath !== dataEntry.path);
   const kids = items.filter((it) => it.len > 0).map((it) => {
@@ -5815,8 +5857,20 @@ async function addParts(dataEntry, items, how) {
       + (crcBumped ? `そのうち ${crcBumped} 件は名前がぶつかったので \`~2\` を付けました `
                      + "(検査値ファイルの名前にはフォルダが付かないため)。" : "")
       + (bareCount ? `名前が無い ${bareCount} 件は種類を末尾に付けました。` : "")
-      + (packed ? `圧縮らしい ${packed} 件 (packed) の中にテキストがある見込みです。`
-                  + "上の絞り込みに packed と入れると並びます。" : "");
+      /* **取り消した読みを画面に出し続けない** (#283)。ここには長らく
+         「packed の中にテキストがある見込みです」と書いてあったが、それは
+         #4 で取り消した読み。公開ソース一式に伸張処理が無いので、この作品の
+         本文は圧縮されていない。素人がこの 1 行に従うと、いちばん遠い所を
+         探すことになる */
+      + (packed && known === "DFI"
+         ? `圧縮らしい ${packed} 件 (packed) がありますが、**この作品の本文は`
+           + `圧縮されていません** (英語化パッチの公開ソース一式に伸張処理が`
+           + `ありません)。**本文を探すなら \`msg\` と入れ物**のほうです。`
+         : packed
+           ? `圧縮らしい ${packed} 件 (packed)。**圧縮を使う作品なら**本文が`
+             + `ここにあることがあります (この道具はまだ伸張していません)。`
+             + "上の絞り込みに packed と入れると並びます。"
+           : "");
     classifyEntries();
   });
 }

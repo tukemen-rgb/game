@@ -17275,6 +17275,174 @@ class TestOneQuestionHasOneLimit(unittest.TestCase):
         self.assertEqual(real, 4, f"練習イメージの入れ物 4 つを {real} 件と数えました")
 
 
+class TestARetractedReadingIsNotStillOnScreen(unittest.TestCase):
+    """**#4 で取り消した読みが、278 回あとまで画面に出続けていた** (#283).
+
+    切り分けたあとの要約は、長らくこう締めくくっていました:
+
+        圧縮らしい N 件 (packed) の中にテキストがある見込みです。
+        上の絞り込みに packed と入れると並びます。
+
+    この読みは **docs/09 の #3 に書かれ、#4 で取り消されています** ——
+    「テキストは圧縮ではなかった。`.msg` は先頭が件数なので `packed` では
+    なく `bin` に分類される」。取り消しは記録には残ったのに、**画面と
+    `web/app.js` の説明文には残ったまま**でした。
+
+    根拠は借り物の側で確かめられます (#272 の第 2 層): 英語化パッチの公開
+    ソース一式 (`UNPACK.py` / `MSG.py` / `resource.py` / `EXEC.py`) に
+    **伸張処理が 1 つもありません**。切り分け・`.msg` 読み・フォント差し替え・
+    詰め直しだけで完結しています。
+
+    素人がこの 1 行に従うと、**本文がいちばん無い所**を探すことになります。
+    道具が自分で「ここを見ろ」と名指ししているぶん、黙っているより悪い。
+    """
+
+    PUB = "/home/user/hilltopworks/bokunonatsuyasumi2"
+
+    def app_js(self) -> str:
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_screen_does_not_send_people_to_packed_for_this_game(self):
+        src = self.app_js()
+        self.assertFalse("(packed) の中にテキストがある見込みです" in src,
+                         "取り消した読み (#4) がまだ画面に出ています")
+        self.assertTrue("**この作品の本文は" in src and "圧縮されていません**" in src,
+                        "この作品の本文が圧縮でないことを言っていない")
+        self.assertTrue('packed && known === "DFI"' in src,
+                        "この作品と分かったときだけ言う作りになっていない")
+        # 索引の読み方 (DFI かどうか) が、要約を書く所まで届いていること
+        self.assertTrue('addParts(dataEntry, items, "索引に従って", c.known)' in src,
+                        "どの形式の索引で切り分けたかを要約に渡していない")
+
+    def test_the_hint_survives_for_games_that_do_compress(self):
+        """**材料を弱くしない**。圧縮を使う作品向けの見当そのものは残すこと."""
+        src = self.app_js()
+        self.assertTrue("圧縮を使う作品なら" in src,
+                        "ほかの作品向けの言い方が無くなっている")
+        self.assertTrue("この道具はまだ伸張していません" in src,
+                        "伸張していないことを断っていない")
+
+    def test_the_source_comment_was_corrected_too(self):
+        """説明文にも同じ取り消しを書くこと (次に読む人が同じ読みに戻らないように)."""
+        src = self.app_js()
+        head = src.split("const MAGICS = [")[0]
+        self.assertFalse("`.msg` はこの `packed` の" in head,
+                         "説明文に取り消した読みが残っています")
+        self.assertTrue("#4 で取り消した読み" in head,
+                        "取り消しの経緯を説明文に残していない")
+
+    def test_the_public_tools_really_have_no_decompression(self):
+        """**言い切る根拠を、借り物のソースそのもので押さえる** (#272 の第 2 層)."""
+        import re
+
+        if not os.path.isdir(self.PUB):
+            self.skipTest("公開ソースが無い")
+        looked, found = [], []
+        for name in ("UNPACK.py", "MSG.py", "resource.py", "EXEC.py", "MSG_notes.txt"):
+            path = os.path.join(self.PUB, name)
+            if not os.path.exists(path):
+                continue
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            looked.append(name)
+            if re.search(r"decompress|uncompress|zlib|lzss|inflate", text, re.I):
+                found.append(name)
+        self.assertGreaterEqual(len(looked), 4, f"読めたのが {looked} だけ (題材が変わった)")
+        self.assertEqual(found, [],
+                         f"公開ソースに伸張処理がありました ({found})。"
+                         "「この作品の本文は圧縮されていません」は言い直しが要ります")
+
+
+class TestAGuessThatIsMostlyLuckIsNotStated(unittest.TestCase):
+    """**大きいファイルでは「圧縮らしい」は 4 回に 3 回まぐれ当たり** (#283).
+
+    「先頭 u32 が自分より大きく 32 倍以内なら圧縮」という見当があります。
+    でたらめな 4 バイトがこの窓に入る確率は `(32 - 1) × 大きさ / 2^32` で、
+    **大きさに比例して増えます**:
+
+    | ファイルの大きさ | 偶然当たる確率 |
+    | --- | --- |
+    | 100 KB | 0.07% |
+    | 1 MB | 0.8% |
+    | 16 MB | 12% |
+    | 100 MB | **76%** |
+
+    100 MB のファイルでは 4 回に 3 回まぐれで当たるのに、「圧縮らしい」と
+    書いて渡していました。32 という数にも根拠はありません (LZSS 系で
+    よくある伸びの幅、という言い伝え)。
+
+    **本物の圧縮データは乱数に近い並び**なので、そちらの判定
+    (`SNIFF_BY_CLASS.high`) がどのみち `packed` と言います。だから
+    まぐれのほうが多くなる大きさでこの枝を降りても、失うものはほとんど
+    ありません —— それも測って確かめます。
+    """
+
+    @staticmethod
+    def accident(size: int, ratio: int = 32) -> float:
+        return min(1.0, (ratio - 1) * size / 2 ** 32)
+
+    def test_the_accident_rate_really_grows_with_size(self):
+        """表に書いた数を、乱数で実際に数えて確かめる (言いっぱなしにしない)."""
+        import random
+
+        rnd = random.Random(7)
+        for size, want in ((1 << 20, 0.0076), (16 << 20, 0.121)):
+            hits = sum(1 for _ in range(200000) if size < rnd.getrandbits(32) <= size * 32)
+            got = hits / 200000
+            self.assertAlmostEqual(got, want, delta=0.01,
+                                   msg=f"{size:,} バイトの実測 {got:.3%} が式の {want:.3%} と違う")
+
+    def test_the_guess_is_dropped_where_luck_takes_over(self):
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node がありません")
+        prog = (
+            "const fs=require('fs');const s=fs.readFileSync('web/app.js','utf8');"
+            "const a=s.indexOf('/* @extract-start sniff */'),"
+            "b=s.indexOf('/* @extract-end sniff */');"
+            "const m=new Function(s.slice(a,b)+"
+            "'\\nreturn {packedGuessWorthIt,sniffKind,PACKED_ACCIDENT_MAX};')();"
+            "const u32=(n)=>{const o=new Uint8Array(64);o[0]=n&255;o[1]=(n>>>8)&255;"
+            "o[2]=(n>>>16)&255;o[3]=n>>>24;return o;};"
+            "const at=(sz)=>({worth:m.packedGuessWorthIt(sz),"
+            "tile:m.sniffKind(u32(Math.min(sz*3,4294967295)),'tile',sz).ext,"
+            "high:m.sniffKind(u32(Math.min(sz*3,4294967295)),'high',sz).ext});"
+            "console.log(JSON.stringify({limit:m.PACKED_ACCIDENT_MAX,"
+            "small:at(100*1024),mid:at(1<<20),big:at(16*1024*1024)}));"
+        )
+        res = subprocess.run([node, "-e", prog], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(res.returncode, 0, "画面側を動かせない: " + res.stdout + res.stderr)
+        got = json.loads(res.stdout)
+        # 小さいファイルでは今までどおり言う (まぐれは 0.07%)
+        self.assertTrue(got["small"]["worth"], "100KB で見当をやめている")
+        self.assertEqual(got["small"]["tile"], "packed", "100KB で圧縮の見当が出ない")
+        # まぐれが多い大きさでは黙る
+        self.assertFalse(got["big"]["worth"], "16MB でも見当を言っている (まぐれ 12%)")
+        self.assertNotEqual(got["big"]["tile"], "packed",
+                            "まぐれのほうが多い大きさで「圧縮らしい」と言った")
+        # **材料を弱くしない**: 本物の圧縮 (乱数に近い並び) は大きさに関係なく拾う
+        self.assertEqual(got["big"]["high"], "packed",
+                         "大きいファイルで本物の圧縮まで拾えなくなった")
+        # 足切りの位置が、式と合っていること
+        limit = got["limit"]
+        self.assertLessEqual(self.accident(100 * 1024), limit)
+        self.assertGreater(self.accident(16 * 1024 * 1024), limit)
+
+    def test_the_number_thirty_two_is_written_down_as_unfounded(self):
+        """根拠の無い数は、**根拠が無いと書いておく** (#272 の第 3 層)."""
+        with open(os.path.join(REPO, "web", "app.js"), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertTrue("const PACKED_MAX_RATIO = 32;" in src, "32 に名前が付いていない")
+        head = src.split("const PACKED_MAX_RATIO")[0]
+        self.assertTrue("32 倍という数そのものに根拠はない" in head[-800:],
+                        "根拠が無いことを書いていない")
+
+
 class TestTheBitDepthGuessIsCounted(unittest.TestCase):
     """1 ドットのビット数の見当が、何通り当たるかを数える (#151).
 

@@ -8,7 +8,7 @@ const src = fs.readFileSync(path.join(repo, "web", "app.js"), "utf8");
 const s = src.indexOf("/* @extract-start sniff */");
 const e = src.indexOf("/* @extract-end sniff */");
 if (s < 0 || e < 0) { console.error("app.js に sniff マーカーが無い"); process.exit(2); }
-const m = new Function(src.slice(s, e) + "\nreturn { sniffKind, sniffSummary, MAGICS, NO_MAGIC_EXTS };")();
+const m = new Function(src.slice(s, e) + "\nreturn { sniffKind, sniffSummary, MAGICS, NO_MAGIC_EXTS, packedGuessWorthIt, PACKED_MAX_RATIO };")();
 
 const fail = (msg) => { console.error("NG: " + msg); process.exit(1); };
 const bytes = (str, pad = 64) => {
@@ -46,6 +46,22 @@ if (m.sniffKind(u32(10000 * 33), "tile", 10000).ext === "packed") fail("33 倍�
 if (m.sniffKind(u32(30000), "tile", 0).ext === "packed") fail("長さ不明なのに packed にした");
 /* 魔法数が優先される */
 if (m.sniffKind(bytes("TIM2"), "high", 10).ext !== "tm2") fail("魔法数より packed を優先した");
+/* 2.5 **大きいファイルではこの見当を言わない** (#283)。でたらめな 4 バイトが
+   この窓に入る確率は大きさに比例する: 100KB で 0.07%、16MB で 12%、100MB で 76%。
+   コイン投げに近くなったら黙る —— 本物の圧縮は「乱数に近い並び」で拾える */
+if (!m.packedGuessWorthIt(100 * 1024)) fail("100KB で見当をやめている (偶然は 0.07%)");
+if (m.packedGuessWorthIt(100 * 1024 * 1024)) fail("100MB でも見当を言っている (偶然は 76%)");
+if (m.packedGuessWorthIt(16 * 1024 * 1024)) fail("16MB でも見当を言っている (偶然は 12%)");
+{
+  const big = 8 * 1024 * 1024;                 /* 偶然 6% —— 言わない大きさ */
+  if (m.sniffKind(u32(big * 3), "tile", big).ext === "packed") {
+    fail("偶然のほうが多い大きさで「圧縮らしい」と言った");
+  }
+  /* **本物の圧縮は取りこぼさない。** 乱数に近い並びなら大きさに関係なく packed */
+  if (m.sniffKind(u32(big * 3), "high", big).ext !== "packed") {
+    fail("大きいファイルで本物の圧縮まで拾えなくなった");
+  }
+}
 
 /* 3. 魔法数も大きさも無ければバイトの性質から */
 const byClass = { jp: "txt", ascii: "txt", zero: "zero", high: "packed", wave: "wave", tile: "bin" };
@@ -142,4 +158,4 @@ for (const mg of m.MAGICS) {
   seen.add(key);
 }
 
-console.log(`OK  魔法数 ${magicCases.length + 1} 種 · 圧縮の見当 6 件 · 性質からの見当 ${Object.keys(byClass).length + 2} 件 · 入れ物と埋まった TIM2 12 件 · 集計 4 件 · 目印の無い種類`);
+console.log(`OK  魔法数 ${magicCases.length + 1} 種 · 圧縮の見当 6 件 + 大きさの足切り 5 件 · 性質からの見当 ${Object.keys(byClass).length + 2} 件 · 入れ物と埋まった TIM2 12 件 · 集計 4 件 · 目印の無い種類`);
